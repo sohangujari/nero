@@ -1,16 +1,18 @@
 import React from 'react'
 
+import { Link } from "react-router-dom";
+
 function Navbar() {
   return (
     <div className='flex justify-between items-center px-16 py-6 bg-white'>
         <span className='font-bold'>Nero AI</span>
         <div className='flex gap-4'>
-            <button className='px-4 py-1 border border-gray-200 rounded-full bg-black text-white font-light'>Home</button>
-            <button className='px-4 py-1 border border-gray-200 rounded-full text-gray-600 font-light'>Features</button>
-            <button className='px-4 py-1 border border-gray-200 rounded-full text-gray-600 font-light'>Pricing</button>
-            <button className='px-4 py-1 border border-gray-200 rounded-full text-gray-600 font-light'>Blog</button>
+            <Link to='/' className='px-4 py-1 border border-gray-200 rounded-full bg-black text-white font-light hover:border-gray-900'>Home</Link>
+            <Link to='/' className='px-4 py-1 border border-gray-200 rounded-full text-gray-600 font-light hover:border-gray-900'>Features</Link>
+            <Link to='/' className='px-4 py-1 border border-gray-200 rounded-full text-gray-600 font-light hover:border-gray-900'>Pricing</Link>
+            <Link to='/blog' className='px-4 py-1 border border-gray-200 rounded-full text-gray-600 font-light hover:border-gray-900'>Blog</Link>
         </div>
-        <button className='px-4 py-1 border border-gray-200 rounded-full text-gray-600 font-light'>Try For Free</button>
+        <Link to='/' className='px-4 py-1 border border-gray-200 rounded-full text-gray-600 font-light'>Try For Free</Link>
     </div>
   )
 }
