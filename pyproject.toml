@@ -1,24 +1,34 @@
 [project]
 name = "nero"
 version = "0.1.0"
-description = "Nero — a cross-platform CLI personal AI assistant (Phase 1: core loop)"
+description = "Nero — a cross-platform CLI personal AI assistant"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.13"
+# Exact pins — this is an application, not a library. uv.lock is the source of
+# truth for the full (transitive) graph; these are the tested direct versions.
 dependencies = [
-    "typer>=0.12",
-    "rich>=13",
-    "litellm>=1.40",
-    "psutil>=5.9",
-    "httpx>=0.27",
-    "pydantic>=2.7",
-    "pydantic-settings>=2.3",
-    "platformdirs>=4",
-    "keyring>=25",
-    "pyyaml>=6",
+    "typer==0.27.0",
+    "rich==15.0.0",
+    "litellm==1.83.0",
+    "psutil==7.2.2",
+    "httpx==0.28.1",
+    "pydantic==2.13.4",
+    "pydantic-settings==2.14.2",
+    "platformdirs==4.10.1",
+    "keyring==25.7.0",
+    "pyyaml==6.0.3",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+voice = [
+    "faster-whisper==1.2.1",
+    "kokoro-onnx==0.5.0",
+    "onnxruntime==1.27.0",
+    "sounddevice==0.5.5",
+    "numpy==2.5.1",
+    "soundfile==0.14.0",
+]
+premium-voice = ["chatterbox-tts==0.1.3"]
 
 [project.scripts]
 nero = "nero.cli:app"
@@ -29,3 +39,14 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["nero*"]
+
+[tool.uv]
+# uv manages an isolated Python 3.12 (see .python-version); never the system one.
+
+[dependency-groups]
+# Dev/build tooling — not shipped to end users. Frozen exactly in uv.lock.
+dev = [
+    "pytest==9.1.1",
+    "numpy==2.5.1",
+    "pyinstaller==6.21.0",
+]

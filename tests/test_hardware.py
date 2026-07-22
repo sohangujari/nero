@@ -3,7 +3,12 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from nero.hardware.detector import HardwareSpecs, detect_hardware, recommend_model
+from nero.hardware.detector import (
+    HardwareSpecs,
+    detect_hardware,
+    recommend_model,
+    recommend_voice,
+)
 from nero.llm import ollama
 
 
@@ -28,6 +33,24 @@ class TestRecommendModel:
     )
     def test_tiers(self, ram_gb, expected):
         assert recommend_model(specs(ram_gb)) == expected
+
+
+class TestRecommendVoice:
+    @pytest.mark.parametrize(
+        ("ram_gb", "expected"),
+        [
+            (4, ("tiny", "kokoro")),
+            (5.9, ("tiny", "kokoro")),
+            (6, ("base", "kokoro")),
+            (7.9, ("base", "kokoro")),
+            (8, ("small", "kokoro")),
+            (15.9, ("small", "kokoro")),
+            (16, ("large-v3-turbo", "kokoro")),
+            (64, ("large-v3-turbo", "kokoro")),
+        ],
+    )
+    def test_voice_tiers(self, ram_gb, expected):
+        assert recommend_voice(specs(ram_gb)) == expected
 
 
 class TestDetectHardware:

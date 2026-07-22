@@ -1,19 +1,43 @@
+import contextlib
 import logging
+import signal
+import sys
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
+from rich.progress import (
+    BarColumn,
+    DownloadColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TransferSpeedColumn,
+)
 from rich.prompt import Prompt
 from rich.table import Table
 
 from nero import __version__
+from nero._runtime import check_python_version
 from nero.config.manager import ConfigError, ConfigManager
-from nero.config.schema import NeroConfig
+from nero.config.schema import NeroConfig, STTConfig, TTSConfig
 from nero.core.chat_loop import ChatLoop
-from nero.hardware.detector import HardwareSpecs, detect_hardware, recommend_model
+from nero.hardware.detector import (
+    HardwareSpecs,
+    detect_hardware,
+    recommend_model,
+    recommend_voice,
+)
 from nero.llm import ollama
 from nero.llm.client import LLMClient
 from nero.tools.open_app import OpenAppTool
+from nero.voice import audio_io
+from nero.voice.audio_io import Player
+from nero.voice.errors import TTSLoadError, VoiceDependencyError
+from nero.voice.stt import FasterWhisperSTT
+from nero.voice.tts import VOICE_CATALOG, build_tts
+from nero.voice.voice_loop import VoiceLoop
 
 PROVIDERS = ["claude", "openai", "gemini", "ollama"]
 DEFAULT_MODELS = {
@@ -26,6 +50,15 @@ app = typer.Typer(add_completion=False, invoke_without_command=True)
 config_app = typer.Typer(invoke_without_command=True, help="View and edit Nero's configuration.")
 app.add_typer(config_app, name="config")
 console = Console()
+
+
+def _enable_debug_logging() -> None:
+    # DEBUG(hang): timestamps + thread name make it obvious which stage stalls.
+    logging.basicConfig(
+        format="%(asctime)s.%(msecs)03d [%(threadName)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    logging.getLogger("nero").setLevel(logging.DEBUG)
 
 
 def _version_callback(value: bool) -> None:
@@ -48,8 +81,11 @@ def main(
 ) -> None:
     """Nero — your personal AI assistant in the terminal. Run with no arguments to chat."""
     if debug:
-        logging.basicConfig(format="%(name)s: %(message)s")
-        logging.getLogger("nero").setLevel(logging.DEBUG)
+        _enable_debug_logging()
+    warning = check_python_version()
+    if warning and not getattr(sys, "frozen", False):
+        # Frozen binaries bundle 3.12, so only warn on the pip/pipx path.
+        Console(stderr=True).print(f"[yellow dim]{warning}[/yellow dim]")
     if ctx.invoked_subcommand is None:
         _run_chat()
 
@@ -72,6 +108,14 @@ def _apply_detection(
     config.hardware.detected_ram_gb = specs.ram_gb
     config.hardware.detected_cpu_cores = specs.cpu_cores
     config.hardware.recommended_local_model = recommendation
+    # Populate voice defaults from the hardware tier, but only when the user
+    # hasn't explicitly changed them (mirrors recommended_local_model, without
+    # clobbering a deliberate choice on a re-`detect`).
+    stt_model, tts_engine = recommend_voice(specs)
+    if config.voice.stt.model == STTConfig().model:
+        config.voice.stt.model = stt_model
+    if config.voice.tts.engine == TTSConfig().engine:
+        config.voice.tts.engine = tts_engine
     manager.save(config)
     return config, specs, recommendation
 
@@ -92,6 +136,90 @@ def detect() -> None:
         f"Provider unchanged ([bold]{config.llm.provider}[/bold]) — "
         "switch with [bold]nero config[/bold]."
     )
+
+
+@app.command()
+def talk(
+    once: bool = typer.Option(False, "--once", help="Do a single voice exchange, then exit."),
+    debug: bool = typer.Option(
+        False, "--debug", help="Verbose per-stage voice pipeline logging (same as `nero --debug`)."
+    ),
+) -> None:
+    """Talk to Nero: speak, and it speaks back (press Enter to start/stop recording)."""
+    if debug:  # DEBUG(hang): accept --debug after the subcommand too, not just before it.
+        _enable_debug_logging()
+    manager = ConfigManager()
+    if not manager.exists():
+        _first_time_setup(manager)
+    config = _load_or_exit(manager)
+
+    if not config.voice.enabled:
+        console.print(
+            "[yellow]Voice is disabled.[/yellow] Enable it with "
+            "[bold]nero config[/bold] (or [bold]nero config set voice.enabled true[/bold])."
+        )
+        raise typer.Exit()
+
+    provider = config.llm.provider
+    api_key = None
+    if provider == "ollama":
+        _ollama_preflight(config.llm.model)
+    else:
+        api_key = manager.get_api_key(provider)
+        if not api_key:
+            console.print(
+                f"[red]No {provider} API key configured.[/red] "
+                "Run [bold]nero config[/bold] and choose the API Key option."
+            )
+            raise typer.Exit(1)
+
+    client = LLMClient(
+        config=config.llm,
+        assistant_name=config.assistant.name,
+        tools=[OpenAppTool()],
+        api_key=api_key,
+    )
+
+    try:
+        stt = FasterWhisperSTT(config.voice.stt.model)
+    except VoiceDependencyError as exc:
+        console.print(f"[red]{escape(str(exc))}[/red]")
+        raise typer.Exit(1) from exc
+
+    # Pre-flight: fetch model weights (with progress) and build the TTS engine ONCE,
+    # before the loop starts. Doing this lazily inside make_player() meant a silent
+    # ~300 MB download mid-turn — which looks exactly like a hang — and reloaded the
+    # model on every single turn.
+    try:
+        _preflight_voice_models(config.voice.tts.engine)
+        tts = build_tts(config.voice.tts.engine, config.voice.tts.voice_id)
+    except VoiceDependencyError as exc:
+        console.print(f"[red]{escape(str(exc))}[/red]")
+        raise typer.Exit(1) from exc
+    except TTSLoadError as exc:
+        console.print(f"[red]{escape(str(exc))}[/red]")
+        raise typer.Exit(1) from exc
+
+    def make_player():
+        return Player(tts, sample_rate=tts.SAMPLE_RATE)
+
+    def record():
+        return audio_io.record_until_enter(console, console.input)
+
+    try:
+        VoiceLoop(
+            client=client,
+            stt=stt,
+            record=record,
+            make_player=make_player,
+            console=console,
+            assistant_name=config.assistant.name,
+            sample_rate=audio_io.RECORD_SAMPLE_RATE,
+            once=once,
+        ).run()
+    finally:
+        # We're exiting; a further Ctrl+C would only corrupt teardown output.
+        _ignore_further_interrupts()
 
 
 def _run_chat() -> None:
@@ -202,6 +330,57 @@ def config_show() -> None:
     console.print(_config_table(manager, config))
 
 
+def _ignore_further_interrupts() -> None:
+    """Stop reacting to Ctrl+C once we've committed to exiting.
+
+    Without this, a second Ctrl+C (an impatient double-tap after "Bye!") lands
+    inside interpreter teardown — typically numpy's NpzFile.__del__, since
+    kokoro-onnx keeps voices-v1.0.bin open as an npz — producing a spurious
+    "Exception ignored in: <function NpzFile.__del__>" traceback on a perfectly
+    clean exit. Nothing is left to interrupt at that point, so ignore it.
+    """
+    with contextlib.suppress(ValueError, OSError):  # not the main thread / unsupported
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+
+def _preflight_voice_models(engine: str) -> None:
+    """Download voice model weights up front, with a progress bar.
+
+    Only Kokoro has fetchable weights today; other engines no-op.
+    """
+    if engine != "kokoro":
+        return
+    from nero.voice.models import ensure_kokoro_model, models_present
+
+    if models_present():
+        return
+    console.print("[dim]First run: downloading voice models (~300 MB, one time)…[/dim]")
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        DownloadColumn(),
+        TransferSpeedColumn(),
+        console=console,
+    ) as progress:
+        tasks: dict[str, int] = {}
+
+        def on_progress(name: str, downloaded: int, total: int) -> None:
+            if name not in tasks:
+                tasks[name] = progress.add_task(name, total=total or None)
+            progress.update(tasks[name], completed=downloaded)
+
+        ensure_kokoro_model(on_progress=on_progress)
+    console.print("[green]Voice models ready.[/green]")
+
+
+def _voice_gender(voice_id: str) -> str:
+    for vid, _name, gender in VOICE_CATALOG:
+        if vid == voice_id:
+            return gender
+    return "?"
+
+
 def _key_display(manager: ConfigManager, provider: str, masked: bool = True) -> str:
     if provider == "ollama":
         return "[dim]not needed[/dim]"
@@ -221,6 +400,12 @@ def _config_table(manager: ConfigManager, config: NeroConfig) -> Table:
     if hardware.detected_ram_gb is not None:
         table.add_row("Detected Hardware", f"{hardware.detected_ram_gb:g} GB RAM, {hardware.detected_cpu_cores} cores")
         table.add_row("Recommended Local Model", hardware.recommended_local_model or "-")
+    voice = config.voice
+    table.add_row("Voice Enabled", "yes" if voice.enabled else "no")
+    if voice.enabled:
+        table.add_row("STT Model", voice.stt.model)
+        table.add_row("TTS Engine", voice.tts.engine)
+        table.add_row("Voice", f"{voice.tts.voice_id} ({_voice_gender(voice.tts.voice_id)})")
     return table
 
 
@@ -245,6 +430,14 @@ def _interactive_menu() -> None:
         body.add_row("2.", "LLM Provider", f"{provider}  [dim]\\[change][/dim]")
         body.add_row("3.", "LLM Model", config.llm.model)
         body.add_row("4.", f"API Key ({provider})", _key_display(manager, provider, masked=False))
+        voice = config.voice
+        body.add_row("5.", "Voice Enabled", "yes" if voice.enabled else "no")
+        body.add_row("6.", "STT Model", f"{voice.stt.model}  [dim]\\[auto][/dim]")
+        body.add_row("7.", "TTS Engine", voice.tts.engine)
+        body.add_row(
+            "8.", "Voice",
+            f"{voice.tts.voice_id} ({_voice_gender(voice.tts.voice_id)})  [dim]\\[change][/dim]",
+        )
         console.print(Panel(body, title="nero config", subtitle="Enter a number to edit, Enter to finish"))
 
         choice = Prompt.ask("Choice", default="", show_default=False, console=console).strip()
@@ -269,10 +462,41 @@ def _interactive_menu() -> None:
             new_key = typer.prompt(f"{provider} API key", hide_input=True).strip()
             if new_key:
                 manager.set_api_key(provider, new_key)
+        elif choice == "5":
+            manager.set_value("voice.enabled", str(not voice.enabled).lower())
+        elif choice == "6":
+            new_model = Prompt.ask("STT model", default=voice.stt.model, console=console)
+            manager.set_value("voice.stt.model", new_model.strip() or voice.stt.model)
+        elif choice == "7":
+            new_engine = Prompt.ask(
+                "TTS engine", choices=["kokoro", "chatterbox", "cloud"],
+                default=voice.tts.engine, console=console,
+            )
+            manager.set_value("voice.tts.engine", new_engine)
+        elif choice == "8":
+            _pick_voice(manager, voice.tts.voice_id)
         else:
-            console.print("[yellow]Pick 1–4, or press Enter to finish.[/yellow]")
+            console.print("[yellow]Pick 1–8, or press Enter to finish.[/yellow]")
             continue
         console.print("[green]Saved.[/green]\n")
+
+
+def _pick_voice(manager: ConfigManager, current: str) -> None:
+    table = Table(title="voices", show_header=True)
+    table.add_column("#")
+    table.add_column("id")
+    table.add_column("name")
+    table.add_column("gender")
+    for i, (vid, name, gender) in enumerate(VOICE_CATALOG, start=1):
+        marker = " (current)" if vid == current else ""
+        table.add_row(str(i), vid, name + marker, gender)
+    console.print(table)
+    choice = Prompt.ask(
+        "Voice number", choices=[str(i) for i in range(1, len(VOICE_CATALOG) + 1)],
+        default="1", console=console,
+    )
+    voice_id = VOICE_CATALOG[int(choice) - 1][0]
+    manager.set_value("voice.tts.voice_id", voice_id)
 
 
 def _switch_provider(manager: ConfigManager, config: NeroConfig, new_provider: str) -> None:

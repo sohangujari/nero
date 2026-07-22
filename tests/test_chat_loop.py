@@ -376,9 +376,11 @@ class TestSendLoop:
         assert "".join(collected) == "Opening Calculator."
 
     def test_system_prompt_gates_tool_use(self):
-        prompt = make_client().system_prompt
-        assert "Only call the open_app tool when the user explicitly asks" in prompt
-        assert "greetings" in prompt
+        prompt = make_client().system_prompt.lower()
+        # Gating is preserved; wording changed when the general-purpose framing
+        # was restored (see TestGeneralPurposeRegression).
+        assert "only when the user explicitly asks to open" in prompt
+        assert "do not call any tool" in prompt
 
     def test_bug_report_repro_history_stays_clean(self):
         """hi → open_app → hi: no raw JSON ever persisted, no echo loop fuel."""
@@ -547,3 +549,79 @@ class TestChatLoop:
             FakeLLMClient(), console=console, assistant_name="Nero", input_fn=raise_interrupt
         )
         loop.run()  # must not raise
+
+
+# --- Regression: Nero is a general assistant that ALSO has a tool ---
+class TestGeneralPurposeRegression:
+    def test_prompt_states_general_capability_before_the_tool(self):
+        """The tool must be framed as an addition, not as the whole job."""
+        lowered = make_client().system_prompt.lower()
+        assert "general-purpose" in lowered
+        # General capabilities are named explicitly, so the model doesn't infer
+        # that opening apps is its only job.
+        for capability in ("maths", "facts", "jokes", "casual conversation"):
+            assert capability in lowered, f"missing capability: {capability}"
+        # And it is explicitly told not to self-limit to the tool.
+        assert "never limited to one topic" in lowered
+        assert "never say that you can only open applications" in lowered
+        # The general framing comes before the tool description.
+        assert lowered.index("general-purpose") < lowered.index("open_app")
+        # Tool gating is still present.
+        assert "only when the user explicitly asks to open" in lowered
+
+    def test_none_classification_passes_content_through_verbatim(self):
+        """A plain answer must reach the user unmodified — no canned substitute."""
+        answer = "100 plus 50 is 150."
+        client = make_client()
+        fake_turns(client, [([answer], RoundResult(content=answer, tool_calls=[]))])
+        shown, messages = [], [{"role": "user", "content": "calculate 100 plus 50"}]
+        client.send(messages, on_text=shown.append)
+        assert "".join(shown) == answer
+        assert messages[-1] == {"role": "assistant", "content": answer}
+        assert APOLOGY not in "".join(shown)
+
+    @pytest.mark.parametrize(
+        "reply",
+        [
+            "100 plus 5 is 105.",
+            "Publication tooling usually means typesetting and layout software.",
+            "I'm doing well, thanks for asking! How can I help?",
+            "Python was created by Guido van Rossum in 1991.",
+            "Why did the chicken cross the road? To get to the other side.",
+            "Photosynthesis converts light energy into chemical energy.",
+        ],
+    )
+    def test_general_answers_are_not_swallowed(self, reply):
+        """Varied general-knowledge answers all survive the classifier intact."""
+        client = make_client()
+        fake_turns(client, [([reply], RoundResult(content=reply, tool_calls=[]))])
+        shown = []
+        client.send([{"role": "user", "content": "q"}], on_text=shown.append)
+        assert "".join(shown) == reply
+
+    def test_ollama_path_general_answer_survives_buffering(self):
+        """The buffered ollama path must not eat plain answers either."""
+        reply = "The Eiffel Tower is 330 metres tall."
+        client = make_client(provider="ollama", model="phi4-mini", api_key=None)
+        fake_turns(client, [([reply], RoundResult(content=reply, tool_calls=[]))])
+        shown = []
+        client.send([{"role": "user", "content": "how tall is it"}], on_text=shown.append)
+        assert "".join(shown) == reply
+
+    def test_tool_calling_still_works(self):
+        """Regression check: restoring general chat must not break the tool."""
+        stub = StubTool(result="Opened Calculator.")
+        client = make_client(tools=[stub])
+        fake_turns(
+            client,
+            [
+                ([], RoundResult(content=None, tool_calls=[pending(raw='{"app_name": "Calculator"}',
+                                                                  arguments={"app_name": "Calculator"})])),
+                (["Calculator is open."], RoundResult(content="Calculator is open.", tool_calls=[])),
+            ],
+        )
+        messages = [{"role": "user", "content": "open calculator"}]
+        shown = []
+        client.send(messages, on_text=shown.append)
+        assert stub.calls == [{"app_name": "Calculator"}]
+        assert "".join(shown) == "Calculator is open."

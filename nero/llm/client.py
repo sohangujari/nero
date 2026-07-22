@@ -118,16 +118,30 @@ class LLMClient:
         self.api_key = api_key
         self.ollama_base_url = ollama_base_url
         self.tools = {tool.name: tool for tool in tools}
+        # Two separate concerns, stated separately on purpose: (1) Nero is a
+        # general-purpose assistant, (2) it *additionally* has one tool, gated to
+        # explicit open-app requests. An earlier tool-gating fix collapsed these
+        # into a tool-only description, and small local models then refused
+        # everything that wasn't an app request. Lead with the general capability.
+        # Kept deliberately short and non-nuanced: small local models (phi4-mini
+        # et al) follow terse, concrete instructions far better than long ones.
+        # Both halves must be stated — a tool-only description makes the model
+        # refuse general questions; over-stressing the tool makes it fire the
+        # tool on unrelated questions. Concrete examples anchor both sides.
         self.system_prompt = (
-            f"You are {assistant_name}, a helpful personal AI assistant running in "
-            "the user's terminal. You can open applications on their computer with "
-            "the open_app tool. Only call the open_app tool when the user "
-            "explicitly asks you to open, launch, or start a specific named "
-            "application. Do not call any tool in response to greetings, general "
-            "conversation, or ambiguous input. If you are not calling a tool, "
-            "respond with plain conversational content only — never write out "
-            "tool-call JSON as text. Keep responses concise — this is a chat, "
-            "not a document."
+            f"You are {assistant_name}, a helpful general-purpose AI assistant "
+            "running in the user's terminal.\n\n"
+            "Answer any question normally: maths, facts, explanations, jokes, "
+            "casual conversation. You are a normal assistant and are never limited "
+            "to one topic. Never say that you can only open applications.\n\n"
+            "You also have one tool, open_app, which opens an application on the "
+            "user's computer. Call open_app only when the user explicitly asks to "
+            "open, launch, or start a named application — for example "
+            '"open Calculator" or "launch Safari". For any other message, '
+            "including ordinary questions, do not call any tool: just reply with "
+            "text.\n\n"
+            "When you are not calling a tool, reply with plain text only — never "
+            "write tool-call JSON as text. Keep replies concise."
         )
         self._last_round: RoundResult | None = None
 

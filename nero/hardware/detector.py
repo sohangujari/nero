@@ -24,7 +24,15 @@ def detect_hardware() -> HardwareSpecs:
 
 
 def recommend_model(specs: HardwareSpecs) -> str:
-    for max_ram_exclusive, model in TIERS:
+    for max_ram_exclusive, model, _stt, _tts in TIERS:
         if specs.ram_gb < max_ram_exclusive:
             return model
-    return DEFAULT_TIER
+    return DEFAULT_TIER[0]
+
+
+def recommend_voice(specs: HardwareSpecs) -> tuple[str, str]:
+    """Return (stt_model, tts_engine) recommended for the detected RAM."""
+    for max_ram_exclusive, _model, stt_model, tts_engine in TIERS:
+        if specs.ram_gb < max_ram_exclusive:
+            return stt_model, tts_engine
+    return DEFAULT_TIER[1], DEFAULT_TIER[2]

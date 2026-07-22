@@ -268,3 +268,40 @@ class TestClassifyToolCall:
         outcome, call, _ = classify(content)
         assert outcome is ToolCallOutcome.VALID
         assert call.arguments == {"app_name": "Terminal"}
+
+
+class TestOpenAIWireFormatToolCalls:
+    """phi4-mini emits tool calls as text in OpenAI format, sometimes with
+    unbalanced brackets. Both must still be recognised and executed."""
+
+    def test_nested_function_shape_is_coerced(self):
+        blob = '{"type": "function", "function": {"name": "open_app", "arguments": {"app_name": "Safari"}}}'
+        outcome, call, _ = classify(blob)
+        assert outcome is ToolCallOutcome.VALID
+        assert call.name == "open_app"
+        assert call.arguments == {"app_name": "Safari"}
+
+    def test_nested_function_in_array(self):
+        blob = '[{"type": "function", "function": {"name": "open_app", "arguments": {"app_name": "Calendar"}}}]'
+        outcome, call, _ = classify(blob)
+        assert outcome is ToolCallOutcome.VALID
+        assert call.arguments == {"app_name": "Calendar"}
+
+    def test_real_phi4_mini_unbalanced_output_is_salvaged(self):
+        """Verbatim capture from phi4-mini: note the missing '}' before ']'."""
+        blob = '[{"type": "function", "function": {"name": "open_app", "arguments": {"app_name": "Calculator"}}]}'
+        outcome, call, _ = classify(blob)
+        assert outcome is ToolCallOutcome.VALID, "unbalanced OpenAI-format call must be salvaged"
+        assert call.name == "open_app"
+        assert call.arguments == {"app_name": "Calculator"}
+
+    def test_salvage_still_rejects_empty_app_name(self):
+        blob = '[{"type": "function", "function": {"name": "open_app", "arguments": {"app_name": ""}}]}'
+        outcome, call, _ = classify(blob)
+        assert outcome is ToolCallOutcome.MALFORMED
+        assert call is None
+
+    def test_salvage_does_not_fire_on_ordinary_prose(self):
+        outcome, _, cleaned = classify("Tokyo is the capital of Japan.")
+        assert outcome is ToolCallOutcome.NONE
+        assert cleaned == "Tokyo is the capital of Japan."

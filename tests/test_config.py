@@ -16,7 +16,7 @@ class TestSchema:
         with pytest.raises(ValidationError):
             NeroConfig.model_validate({"assistant": {"name": "X", "voice": "loud"}})
         with pytest.raises(ValidationError):
-            NeroConfig.model_validate({"voice": {}})
+            NeroConfig.model_validate({"telemetry": {}})
 
     def test_nested_models(self):
         config = NeroConfig.model_validate(

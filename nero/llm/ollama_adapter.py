@@ -114,7 +114,15 @@ def _try_parse_json_tool_call(content: str | None) -> ToolCallRequest | None:
 
 
 def _coerce_tool_call(candidate) -> ToolCallRequest | None:
-    if not isinstance(candidate, dict) or "name" not in candidate or "arguments" not in candidate:
+    if not isinstance(candidate, dict):
+        return None
+    # OpenAI wire format: {"type": "function", "function": {"name", "arguments"}}.
+    # Small models frequently emit this shape as plain text rather than using
+    # the structured tool_calls field.
+    inner = candidate.get("function")
+    if isinstance(inner, dict) and "name" in inner:
+        candidate = inner
+    if "name" not in candidate or "arguments" not in candidate:
         return None
     arguments = candidate["arguments"]
     if isinstance(arguments, str):
@@ -163,6 +171,12 @@ def classify_tool_call(
         try:
             parsed = json.loads(blob)
         except json.JSONDecodeError:
+            # Small models emit subtly broken JSON (e.g. phi4-mini drops a brace:
+            # `[{"type":"function","function":{...}}]}`). Rather than discard a
+            # real intent, look for a well-formed tool-call object embedded in it.
+            salvaged = _salvage_tool_call(blob, tool_names, is_valid)
+            if salvaged is not None:
+                return ToolCallOutcome.VALID, salvaged, remainder
             return ToolCallOutcome.MALFORMED, None, remainder
         candidates = parsed if isinstance(parsed, list) else [parsed]
         saw_attempt = False
@@ -182,12 +196,68 @@ def classify_tool_call(
     return ToolCallOutcome.NONE, None, text
 
 
+def _salvage_tool_call(
+    blob: str, tool_names: set[str], is_valid: Callable[[ToolCallRequest], bool]
+) -> ToolCallRequest | None:
+    """Recover a valid tool call from JSON that doesn't parse as a whole.
+
+    Scans every `{`-rooted, brace-balanced substring (ignoring square brackets,
+    which are what small models typically mismatch) and returns the first that
+    coerces to a known, valid tool call. Returns None if nothing valid is found,
+    so genuinely malformed attempts still classify as MALFORMED.
+    """
+    for start, char in enumerate(blob):
+        if char != "{":
+            continue
+        end = _matching_brace_end(blob, start)
+        if end is None:
+            continue
+        try:
+            candidate = json.loads(blob[start : end + 1])
+        except json.JSONDecodeError:
+            continue
+        call = _coerce_tool_call(candidate)
+        if call is not None and call.name in tool_names and is_valid(call):
+            return call
+    return None
+
+
+def _matching_brace_end(text: str, start: int) -> int | None:
+    """Index closing the `{` at `start`, counting braces only (string-aware)."""
+    depth = 0
+    in_string = False
+    escape = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if escape:
+            escape = False
+        elif char == "\\":
+            escape = True
+        elif char == '"':
+            in_string = not in_string
+        elif not in_string:
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return index
+    return None
+
+
 def _is_tool_attempt(candidate, tool_names: set[str]) -> bool:
     """A dict that looks like it's trying to call a tool: it either names a
-    known tool or carries an `arguments` object."""
-    return isinstance(candidate, dict) and (
-        "arguments" in candidate or candidate.get("name") in tool_names
-    )
+    known tool or carries an `arguments` object.
+
+    Also unwraps the OpenAI wire shape, where those keys live one level down
+    under "function" and the top level only has "type"/"function".
+    """
+    if not isinstance(candidate, dict):
+        return False
+    inner = candidate.get("function")
+    if isinstance(inner, dict) and "name" in inner:
+        candidate = inner
+    return "arguments" in candidate or candidate.get("name") in tool_names
 
 
 def _mentions_tool(content: str, tool_names: set[str]) -> bool:

@@ -6,8 +6,11 @@ application on your machine.
 
 **Phase 2** adds multi-provider support: Nero talks to Claude, GPT, Gemini, or
 a local Ollama model, switchable via config with zero code changes. On first
-run it detects your hardware and recommends a local model tier. Voice, more
-tools, and persistent memory are later phases.
+run it detects your hardware and recommends a local model tier.
+
+**Phase 3** adds voice: `nero talk` lets you speak to Nero and hear it speak
+back, using the same LLM providers and tools as text mode. More tools and
+persistent memory are later phases.
 
 ## Providers
 
@@ -25,11 +28,60 @@ and never asks for a key. For ollama, Nero checks that the server is running
 
 ## Install
 
-Requires Python 3.12+.
+Nero ships two ways. Most people want the binary.
+
+### End users — standalone binary (no Python needed)
+
+Download the file for your OS from the [Releases](https://github.com/sohangujari/nero/releases)
+page, make it executable, and run it. There's no Python to install, no `pip`, no
+dependency resolver — the binary bundles a fixed Python 3.12 and everything else.
 
 ```sh
-pip install -e .
+# macOS / Linux
+chmod +x nero-macos        # or nero-linux
+./nero-macos
+
+# Windows
+nero-windows.exe
 ```
+
+Voice model weights (whisper, kokoro-onnx) download once into a per-user cache
+the first time you run `nero talk`.
+
+### Developers / contributors — uv
+
+Nero is pinned to **Python 3.12** and uses [uv](https://docs.astral.sh/uv/),
+which manages its own isolated 3.12 — independent of whatever Python is on your
+`PATH`. This is what makes installs reproducible: `uv.lock` pins every dependency
+(including transitive ones) to the exact tested version.
+
+```sh
+uv sync --extra voice --group dev   # installs the locked deps into .venv on py3.12
+uv run nero                         # chat (text)
+uv run nero talk                    # voice
+uv run pytest -q                    # tests
+```
+
+`uv sync` resolves against the committed `uv.lock`, so you get the identical
+versions CI tested — the Python-3.13 install failure that motivated this setup
+cannot recur. If you install via bare `pip`/`pipx` against a non-3.12
+interpreter instead, Nero prints a one-line warning pointing you here.
+
+## Voice (Phase 3)
+
+```sh
+nero talk          # speak; Nero transcribes, answers, and speaks back
+nero talk --once   # a single exchange, then exit
+```
+
+Press Enter to start recording, Enter again to stop. What Nero heard is printed
+before it replies. Say "stop" (or "exit") to leave, or press Ctrl+C.
+
+The default voice is `af_bella` (female); the male equivalent is `am_michael`.
+Change it — along with the STT model and TTS engine — in `nero config` (the
+Voice rows) or with `nero config set voice.tts.voice_id am_michael`. Disable
+voice entirely with `nero config set voice.enabled false`. On first run the STT
+model and TTS engine are auto-selected from your detected hardware tier.
 
 ## First run
 
