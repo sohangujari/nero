@@ -3,6 +3,7 @@ import json
 import logging
 import signal
 import sys
+import uuid
 
 import typer
 from rich.console import Console
@@ -33,6 +34,7 @@ from nero.hardware.detector import (
 )
 from nero.llm import ollama
 from nero.llm.client import LLMClient
+from nero.memory.history_store import HistoryStore, default_history_path
 from nero.skills.registry import build_registry
 from nero.voice import audio_io
 from nero.voice.audio_io import Player
@@ -168,6 +170,20 @@ def history(
 
 
 @app.command()
+def forget() -> None:
+    """Clear Nero's remembered conversation history (not the audit log)."""
+    store = HistoryStore(default_history_path(), session_id="-")
+    if not store.recent(limit=1):
+        console.print("[dim]Conversation history is already empty.[/dim]")
+        return
+    if not typer.confirm("Clear all remembered conversation history?", default=False):
+        console.print("[dim]Kept. Nothing was cleared.[/dim]")
+        return
+    removed = store.clear()
+    console.print(f"[green]Cleared[/green] {removed} stored messages.")
+
+
+@app.command()
 def talk(
     once: bool = typer.Option(False, "--once", help="Do a single voice exchange, then exit."),
     debug: bool = typer.Option(
@@ -245,10 +261,24 @@ def talk(
             assistant_name=config.assistant.name,
             sample_rate=audio_io.RECORD_SAMPLE_RATE,
             once=once,
+            history=_build_history(config),
         ).run()
     finally:
         # We're exiting; a further Ctrl+C would only corrupt teardown output.
         _ignore_further_interrupts()
+
+
+def _build_history(config: NeroConfig) -> HistoryStore | None:
+    """The one place conversation memory is constructed — both `nero` and
+    `nero talk` call it, so text and voice can't drift. None when memory is off,
+    so both loops treat "disabled" and "empty" identically (seed [], no append)."""
+    if not config.memory.enabled:
+        return None
+    return HistoryStore(
+        default_history_path(),
+        session_id=uuid.uuid4().hex,
+        max_turns=config.memory.max_history_turns,
+    )
 
 
 def _build_registry(manager: ConfigManager, config: NeroConfig):
@@ -295,7 +325,10 @@ def _run_chat() -> None:
         registry=_build_registry(manager, config),
         api_key=api_key,
     )
-    ChatLoop(client, console=console, assistant_name=config.assistant.name).run()
+    ChatLoop(
+        client, console=console, assistant_name=config.assistant.name,
+        history=_build_history(config),
+    ).run()
 
 
 def _ollama_preflight(model: str) -> None:
