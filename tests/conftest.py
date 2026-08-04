@@ -7,4 +7,10 @@ def isolate_audit_log(tmp_path, monkeypatch):
     fake = tmp_path / "audit.db"
     monkeypatch.setattr("nero.core.audit_log.default_audit_path", lambda: fake)
     monkeypatch.setattr("nero.cli.default_audit_path", lambda: fake, raising=False)
+    monkeypatch.setattr(
+        "nero.memory.history_store.default_history_path", lambda: tmp_path / "history.db"
+    )
+    monkeypatch.setattr(
+        "nero.cli.default_history_path", lambda: tmp_path / "history.db", raising=False
+    )
     return fake
