@@ -244,3 +244,50 @@ def test_voice_connection_failure_still_suggests_starting_ollama():
     out = _run_failing_voice_turn(httpx.ConnectError("connection refused"))
     assert "Could not reach the model provider" in out
     assert "ollama serve" in out
+
+
+# --- Session memory: seed from history, persist only successful turns ---
+class AppendingClient:
+    """Like the real client: streams chunks AND appends the final assistant text."""
+    provider = "claude"
+
+    def __init__(self, reply):
+        self._reply = reply
+
+    def send(self, messages, on_text):
+        on_text(self._reply)
+        messages.append({"role": "assistant", "content": self._reply})
+
+
+class FakeHistory:
+    def __init__(self, seed=None):
+        self._seed = seed or []
+        self.appended = []
+
+    def recent(self, limit=None):
+        return list(self._seed)
+
+    def append_turn(self, user, assistant):
+        self.appended.append((user, assistant))
+
+
+def _history_loop(transcripts, reply, history):
+    return VoiceLoop(
+        client=AppendingClient(reply), stt=FakeSTT(transcripts),
+        record=lambda: object(), make_player=FakePlayer,
+        console=Console(), assistant_name="Nero",
+        input_fn=lambda *_a: "", once=True, history=history,
+    )
+
+
+def test_voice_seeds_from_history():
+    seed = [{"role": "user", "content": "earlier"},
+            {"role": "assistant", "content": "reply"}]
+    loop = _history_loop(["Say hi."], "Hi.", FakeHistory(seed))
+    assert loop.messages == seed  # seeded in __init__, before run()
+
+
+def test_voice_successful_turn_is_appended():
+    hist = FakeHistory()
+    _history_loop(["Hello."], "Hi there.", hist).run()
+    assert hist.appended == [("Hello.", "Hi there.")]

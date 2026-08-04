@@ -66,6 +66,7 @@ class VoiceLoop:
         sample_rate: int = RECORD_SAMPLE_RATE,
         input_fn: Callable[[str], str] | None = None,
         once: bool = False,
+        history=None,
     ):
         self.client = client
         self.stt = stt
@@ -76,7 +77,8 @@ class VoiceLoop:
         self.sample_rate = sample_rate
         self.input_fn = input_fn or console.input
         self.once = once
-        self.messages: list[dict] = []
+        self.history = history
+        self.messages: list[dict] = history.recent() if history else []
 
     def run(self) -> None:
         self.console.print(
@@ -191,6 +193,11 @@ class VoiceLoop:
             )
             self.console.print()
             logger.debug("history after voice turn: %r", self.messages)
+            if self.history is not None:
+                self.history.append_turn(
+                    self.messages[turn_start]["content"],
+                    self.messages[-1]["content"],
+                )
             return True
         except KeyboardInterrupt:
             _debug_dump_interrupt("interrupted during turn")

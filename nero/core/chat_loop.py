@@ -22,13 +22,15 @@ class ChatLoop:
         console: Console,
         assistant_name: str,
         input_fn: Callable[[str], str] | None = None,
+        history=None,
     ):
         self.client = client
         self.console = console
         self.assistant_name = assistant_name
         self.input_fn = input_fn or console.input
-        # Session-only history; nothing is persisted across runs (Phase 1 scope).
-        self.messages: list[dict] = []
+        self.history = history
+        # Seed from persisted history when memory is on; else a blank session.
+        self.messages: list[dict] = history.recent() if history else []
 
     def run(self) -> None:
         self.console.print(
@@ -55,6 +57,14 @@ class ChatLoop:
             try:
                 self.client.send(self.messages, on_text=self._print_chunk)
                 self.console.print()
+                if self.history is not None:
+                    # Persist only on success — past every rollback branch below.
+                    # messages[turn_start] is the user text; messages[-1] is the
+                    # final assistant text turn (tool msgs are never last).
+                    self.history.append_turn(
+                        self.messages[turn_start]["content"],
+                        self.messages[-1]["content"],
+                    )
                 # Inspection hook (visible under `nero --debug`): history must
                 # contain only clean text turns and structured tool pairs.
                 logger.debug("history after turn: %r", self.messages)

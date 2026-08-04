@@ -496,6 +496,57 @@ def make_loop(inputs, client=None):
     return loop, client
 
 
+class FakeHistory:
+    def __init__(self, seed=None):
+        self._seed = seed or []
+        self.appended = []
+
+    def recent(self, limit=None):
+        return list(self._seed)
+
+    def append_turn(self, user, assistant):
+        self.appended.append((user, assistant))
+
+
+class TestChatLoopHistory:
+    def _loop(self, inputs, client=None, history=None):
+        client = client or FakeLLMClient()
+        queue = list(inputs)
+
+        def next_input(prompt):
+            if not queue:
+                raise EOFError
+            return queue.pop(0)
+
+        console = Console(file=open("/dev/null", "w"), force_terminal=False)
+        return ChatLoop(client, console=console, assistant_name="Nero",
+                        input_fn=next_input, history=history), client
+
+    def test_seeds_messages_from_history(self):
+        seed = [{"role": "user", "content": "earlier"},
+                {"role": "assistant", "content": "reply"}]
+        loop, _ = self._loop(["exit"], history=FakeHistory(seed))
+        assert loop.messages == seed
+
+    def test_no_history_starts_empty(self):
+        loop, _ = self._loop(["exit"])
+        assert loop.messages == []
+
+    def test_successful_turn_is_appended(self):
+        hist = FakeHistory()
+        loop, _ = self._loop(["hello", "exit"], history=hist)
+        loop.run()
+        assert hist.appended == [("hello", "hi there")]
+
+    def test_failed_turn_is_not_appended(self):
+        hist = FakeHistory()
+        loop, _ = self._loop(["boom", "exit"],
+                             client=FakeLLMClient(error=RuntimeError("nope")),
+                             history=hist)
+        loop.run()
+        assert hist.appended == []
+
+
 class TestChatLoop:
     def test_exit_ends_loop(self):
         loop, client = make_loop(["exit"])
