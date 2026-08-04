@@ -546,6 +546,25 @@ class TestChatLoopHistory:
         loop.run()
         assert hist.appended == []
 
+    def test_max_rounds_fallthrough_not_appended(self):
+        """send() can return normally without ever appending final assistant
+        text (MAX_TOOL_ROUNDS exhausted) — messages[-1] is left as a tool
+        result. That must never be persisted as the assistant's reply."""
+
+        class MaxRoundsClient:
+            provider = "claude"
+
+            def send(self, messages, on_text):
+                on_text("")
+                messages.append(
+                    {"role": "tool", "tool_call_id": "x", "content": "raw tool output"}
+                )
+
+        hist = FakeHistory()
+        loop, _ = self._loop(["do it", "exit"], client=MaxRoundsClient(), history=hist)
+        loop.run()
+        assert hist.appended == []
+
 
 class TestChatLoop:
     def test_exit_ends_loop(self):

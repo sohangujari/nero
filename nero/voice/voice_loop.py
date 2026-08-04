@@ -193,7 +193,9 @@ class VoiceLoop:
             )
             self.console.print()
             logger.debug("history after voice turn: %r", self.messages)
-            if self.history is not None:
+            # MAX_TOOL_ROUNDS exhaustion leaves a tool message last instead of
+            # final assistant text; the role check excludes that case.
+            if self.history is not None and self.messages[-1].get("role") == "assistant":
                 self.history.append_turn(
                     self.messages[turn_start]["content"],
                     self.messages[-1]["content"],

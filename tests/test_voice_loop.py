@@ -291,3 +291,28 @@ def test_voice_successful_turn_is_appended():
     hist = FakeHistory()
     _history_loop(["Hello."], "Hi there.", hist).run()
     assert hist.appended == [("Hello.", "Hi there.")]
+
+
+def test_voice_max_rounds_fallthrough_not_appended():
+    """Same MAX_TOOL_ROUNDS-exhaustion gap as ChatLoop: send() can return
+    normally leaving a tool message last instead of final assistant text.
+    That must never be persisted as the assistant's reply."""
+
+    class MaxRoundsClient:
+        provider = "claude"
+
+        def send(self, messages, on_text):
+            on_text("")
+            messages.append(
+                {"role": "tool", "tool_call_id": "x", "content": "raw tool output"}
+            )
+
+    hist = FakeHistory()
+    loop = VoiceLoop(
+        client=MaxRoundsClient(), stt=FakeSTT(["Hello."]),
+        record=lambda: object(), make_player=FakePlayer,
+        console=Console(), assistant_name="Nero",
+        input_fn=lambda *_a: "", once=True, history=hist,
+    )
+    loop.run()
+    assert hist.appended == []

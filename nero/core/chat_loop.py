@@ -57,10 +57,12 @@ class ChatLoop:
             try:
                 self.client.send(self.messages, on_text=self._print_chunk)
                 self.console.print()
-                if self.history is not None:
+                if self.history is not None and self.messages[-1].get("role") == "assistant":
                     # Persist only on success — past every rollback branch below.
                     # messages[turn_start] is the user text; messages[-1] is the
-                    # final assistant text turn (tool msgs are never last).
+                    # final assistant text turn — except when MAX_TOOL_ROUNDS is
+                    # exhausted, which leaves a tool message last; the role check
+                    # excludes that case.
                     self.history.append_turn(
                         self.messages[turn_start]["content"],
                         self.messages[-1]["content"],
