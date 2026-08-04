@@ -50,6 +50,13 @@ class VoiceConfig(BaseModel):
     tts: TTSConfig = TTSConfig()
 
 
+class MemoryConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    max_history_turns: int = 20  # counts exchanges (user+assistant pairs)
+
+
 class SkillToggles(BaseModel):
     """One field per skill, rather than dict[str, bool], so a typo'd skill name
     is rejected instead of silently ignored. Adding a skill means adding a field
@@ -88,3 +95,4 @@ class NeroConfig(BaseModel):
     hardware: HardwareConfig = HardwareConfig()
     voice: VoiceConfig = VoiceConfig()
     skills: SkillsConfig = SkillsConfig()
+    memory: MemoryConfig = MemoryConfig()
