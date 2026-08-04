@@ -27,6 +27,16 @@ class TestValidation:
         assert m.enabled is False
         assert m.max_history_turns == 5
 
+    def test_rejects_negative_max_history_turns(self):
+        # -1 flows into HistoryStore(max_turns=-1) -> SQLite `LIMIT -2` -> no
+        # limit at all, dumping the entire history table into model context.
+        with pytest.raises(ValidationError):
+            MemoryConfig.model_validate({"max_history_turns": -1})
+
+    def test_accepts_zero_and_default_max_history_turns(self):
+        assert MemoryConfig.model_validate({"max_history_turns": 0}).max_history_turns == 0
+        assert MemoryConfig.model_validate({"max_history_turns": 20}).max_history_turns == 20
+
 
 class TestSetValue:
     def test_nested_keys(self, tmp_path):

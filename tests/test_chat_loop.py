@@ -565,6 +565,36 @@ class TestChatLoopHistory:
         loop.run()
         assert hist.appended == []
 
+    def test_tool_turn_persists_only_text_pair(self):
+        """A completed tool turn appends assistant+tool_calls, then a tool
+        result, then the final assistant text. Only the (user, final text)
+        pair may be persisted — the intermediate tool-call scaffolding must
+        never reach history. If append_turn ever switched to a fixed offset
+        (e.g. messages[turn_start + 1]) instead of messages[-1], this test
+        would catch it: that index would grab the tool_calls stub, not
+        "Done!"."""
+
+        class ToolTurnClient:
+            provider = "claude"
+
+            def send(self, messages, on_text):
+                messages.append(
+                    {"role": "assistant", "content": "", "tool_calls": [
+                        {"id": "x", "type": "function",
+                         "function": {"name": "open_app", "arguments": '{"app_name": "Safari"}'}},
+                    ]}
+                )
+                messages.append(
+                    {"role": "tool", "tool_call_id": "x", "content": "Opened Safari."}
+                )
+                on_text("Done!")
+                messages.append({"role": "assistant", "content": "Done!"})
+
+        hist = FakeHistory()
+        loop, _ = self._loop(["open safari", "exit"], client=ToolTurnClient(), history=hist)
+        loop.run()
+        assert hist.appended == [("open safari", "Done!")]
+
 
 class TestChatLoop:
     def test_exit_ends_loop(self):

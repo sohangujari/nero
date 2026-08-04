@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 Provider = Literal["claude", "openai", "gemini", "ollama"]
 Mode = Literal["online", "offline"]
@@ -54,7 +54,7 @@ class MemoryConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = True
-    max_history_turns: int = 20  # counts exchanges (user+assistant pairs)
+    max_history_turns: int = Field(default=20, ge=0)  # counts exchanges (user+assistant pairs)
 
 
 class SkillToggles(BaseModel):
