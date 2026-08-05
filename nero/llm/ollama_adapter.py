@@ -16,6 +16,18 @@ import httpx
 from pydantic import BaseModel
 
 
+class OllamaModelError(Exception):
+    """Ollama answered, but refused the request.
+
+    Deliberately NOT an httpx.HTTPError subclass. `raise_for_status()` used to
+    raise httpx.HTTPStatusError here, which callers caught in the same branch as
+    genuine transport failures — so a 404 for a mistyped model surfaced as
+    "Could not reach the model provider... make sure it's running" while Ollama
+    was demonstrably up and serving other models. The server being reachable and
+    the model being usable are different facts and need different messages.
+    """
+
+
 class ToolCallRequest(BaseModel):
     name: str
     arguments: dict
@@ -57,7 +69,11 @@ async def ollama_chat(
         payload["tools"] = tools
     async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=5.0)) as client:
         async with client.stream("POST", f"{base_url}/api/chat", json=payload) as response:
-            response.raise_for_status()
+            if response.status_code >= 400:
+                # Read the body before leaving the stream context — Ollama puts
+                # its own explanation in {"error": "..."} and it's far more
+                # useful than any message we could invent.
+                raise _model_error(model, response.status_code, await response.aread())
             async for line in response.aiter_lines():
                 if not line.strip():
                     continue
@@ -75,6 +91,35 @@ async def ollama_chat(
                     content=message.get("content") or None,
                     tool_calls=tool_calls or None,
                 )
+
+
+def _model_error(model: str, status: int, body: bytes) -> OllamaModelError:
+    """Turn Ollama's error response into something the user can act on."""
+    detail = _error_detail(body)
+    if status == 404:
+        # The overwhelmingly common case: mistyped, or never pulled.
+        return OllamaModelError(
+            f"Model {model!r} isn't available locally. "
+            f"Pull it with `ollama pull {model}`, or pick another with `nero config`."
+        )
+    if detail:
+        # e.g. a pulled but embedding-only model refusing /api/chat — no
+        # list-models preflight can predict this, only the response reports it.
+        return OllamaModelError(f"Ollama couldn't use model {model!r}: {detail}")
+    return OllamaModelError(
+        f"Ollama rejected the request for model {model!r} (HTTP {status})."
+    )
+
+
+def _error_detail(body: bytes) -> str:
+    """Ollama's own `{"error": ...}` text, or "" if the body isn't that shape."""
+    try:
+        parsed = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError):
+        return ""
+    if not isinstance(parsed, dict):
+        return ""
+    return str(parsed.get("error") or "").strip()
 
 
 def extract_tool_call(response: OllamaChatResponse) -> ToolCallRequest | None:
@@ -246,17 +291,31 @@ def _matching_brace_end(text: str, start: int) -> int | None:
 
 
 def _is_tool_attempt(candidate, tool_names: set[str]) -> bool:
-    """A dict that looks like it's trying to call a tool: it either names a
-    known tool or carries an `arguments` object.
+    """A dict that belongs to the tool-call protocol rather than to the reply.
 
-    Also unwraps the OpenAI wire shape, where those keys live one level down
-    under "function" and the top level only has "type"/"function".
+    Three shapes count, and all three must be kept away from the user:
+
+    - it carries an `arguments` object, or names a known tool — a real attempt;
+    - it is an OpenAI envelope (`{"type": "function", ...}`) — those keys
+      normally live one level down under "function", so unwrap and re-check;
+    - it is an envelope with nothing callable inside. phi4-mini fabricates
+      tool *results* this way, e.g.
+      `[{"type": "function", "result": true, "message": "YouTube has been opened"}]`
+      — narrating an action it never took. There is no call to make, but it is
+      protocol noise, not an answer, so it must never be shown as one.
+
+    Ordinary JSON an assistant might legitimately return (`{"city": "Tokyo"}`)
+    matches none of these and is left alone.
     """
     if not isinstance(candidate, dict):
         return False
     inner = candidate.get("function")
     if isinstance(inner, dict) and "name" in inner:
         candidate = inner
+    elif str(candidate.get("type") or "").startswith("function"):
+        # Prefix, not equality: the value varies ("function", "function/result",
+        # "function_call") and every variant is protocol noise.
+        return True
     return "arguments" in candidate or candidate.get("name") in tool_names
 
 
@@ -271,6 +330,39 @@ def _first_bracket(content: str) -> int:
     return len(content)
 
 
+def _strip_residue(remainder: str) -> str:
+    """Drop a remainder that is only leftover JSON punctuation.
+
+    Small models frequently emit unbalanced blobs, so the extractor matches
+    from an inner `{` and leaves the orphaned `[` behind. A lone bracket is not
+    an answer; blanking it lets the caller fall back to the apology instead of
+    printing punctuation as if Nero had said it.
+    """
+    if remainder.strip(" \t\n\r[]{},"):
+        return remainder  # there is real text here — keep it
+    return ""
+
+
+def _has_tool_marker(region: str) -> bool:
+    """Does this JSON region belong to the tool-call protocol?
+
+    `"name"`/`"arguments"` catch real calls. `"type": "function"` additionally
+    catches envelopes carrying neither — notably fabricated tool *results*,
+    which would otherwise never be extracted and would print as the reply.
+    """
+    # Small models sometimes escape the quotes (`\"name\"`), which hid the
+    # markers from a plain substring check. Unescape before looking.
+    plain = region.replace('\\"', '"')
+    if '"name"' in plain or '"arguments"' in plain:
+        return True
+    # No closing quote in the marker: the value varies across model outputs
+    # ("function", "function/result", "function_call"), and matching the prefix
+    # covers the family. A JSON answer whose "type" means something else
+    # ("mammal", "article") is unaffected.
+    compact = plain.replace(" ", "").replace("\n", "")
+    return '"type":"function' in compact
+
+
 def _extract_tool_blob(content: str) -> tuple[str, str] | None:
     """Find the first bracket-balanced JSON region carrying a tool marker.
     Returns (blob, remainder) where remainder is content with the blob removed."""
@@ -281,8 +373,8 @@ def _extract_tool_blob(content: str) -> tuple[str, str] | None:
         if end is None:
             continue
         region = content[index : end + 1]
-        if '"name"' in region or '"arguments"' in region:
-            return region, content[:index] + content[end + 1 :]
+        if _has_tool_marker(region):
+            return region, _strip_residue(content[:index] + content[end + 1 :])
     return None
 
 

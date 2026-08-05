@@ -81,6 +81,7 @@ def test_talk_once_runs_voice_loop(monkeypatch, tmp_path):
     config = NeroConfig()
     monkeypatch.setattr(cli, "ConfigManager", lambda: _fake_manager(tmp_path, config))
     monkeypatch.setattr(cli, "FasterWhisperSTT", lambda model: object())
+    monkeypatch.setattr(cli, "_build_registry", lambda manager, config: object())
     # Must be stubbed: the real pre-flight downloads ~300 MB of model weights.
     preflight_calls = []
     monkeypatch.setattr(
@@ -157,6 +158,7 @@ def test_config_show_includes_voice(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "ConfigManager", lambda: _fake_manager(tmp_path, NeroConfig()))
     result = runner.invoke(cli.app, ["config", "show"])
     assert "af_bella" in result.stdout
+    assert "online" in result.stdout
 
 
 def test_ignore_further_interrupts_installs_sig_ign():
@@ -178,6 +180,7 @@ def test_talk_ignores_interrupts_after_loop_exits(monkeypatch, tmp_path):
     config = NeroConfig()
     monkeypatch.setattr(cli, "ConfigManager", lambda: _fake_manager(tmp_path, config))
     monkeypatch.setattr(cli, "FasterWhisperSTT", lambda model: object())
+    monkeypatch.setattr(cli, "_build_registry", lambda manager, config: object())
     monkeypatch.setattr(cli, "_preflight_voice_models", lambda engine: None)
 
     class FakeTTS:

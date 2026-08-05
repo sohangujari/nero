@@ -1,10 +1,12 @@
 import asyncio
 import json
 
+import httpx
 import pytest
 
 from nero.llm.ollama_adapter import (
     OllamaChatResponse,
+    OllamaModelError,
     ToolCallRequest,
     _try_parse_json_tool_call,
     extract_tool_call,
@@ -81,11 +83,16 @@ class TestExtractToolCall:
 
 
 class FakeStreamResponse:
-    def __init__(self, lines):
+    def __init__(self, lines, status_code=200, body=b""):
         self._lines = lines
+        self.status_code = status_code
+        self._body = body
 
     def raise_for_status(self):
         pass
+
+    async def aread(self):
+        return self._body
 
     async def aiter_lines(self):
         for line in self._lines:
@@ -93,21 +100,26 @@ class FakeStreamResponse:
 
 
 class FakeStreamContext:
-    def __init__(self, lines, calls, method, url, payload):
+    def __init__(self, lines, calls, method, url, payload, status_code=200, body=b""):
         self._lines = lines
+        self._status_code = status_code
+        self._body = body
         calls.append({"method": method, "url": url, "payload": payload})
 
     async def __aenter__(self):
-        return FakeStreamResponse(self._lines)
+        return FakeStreamResponse(self._lines, self._status_code, self._body)
 
     async def __aexit__(self, *args):
         return False
 
 
 class FakeAsyncClient:
-    def __init__(self, lines, calls):
+    def __init__(self, lines, calls, status_code=200, body=b"", connect_error=None):
         self._lines = lines
         self._calls = calls
+        self._status_code = status_code
+        self._body = body
+        self._connect_error = connect_error
 
     async def __aenter__(self):
         return self
@@ -116,7 +128,11 @@ class FakeAsyncClient:
         return False
 
     def stream(self, method, url, json=None):
-        return FakeStreamContext(self._lines, self._calls, method, url, json)
+        if self._connect_error is not None:
+            raise self._connect_error
+        return FakeStreamContext(
+            self._lines, self._calls, method, url, json, self._status_code, self._body
+        )
 
 
 @pytest.fixture
@@ -125,6 +141,24 @@ def fake_ollama(monkeypatch):
         calls = []
         monkeypatch.setattr(
             "httpx.AsyncClient", lambda **kwargs: FakeAsyncClient(lines, calls)
+        )
+        return calls
+
+    return install
+
+
+@pytest.fixture
+def fake_ollama_failure(monkeypatch):
+    """Install a fake client that fails: either an HTTP error response, or a
+    transport-level connection error. The two must stay distinguishable."""
+
+    def install(status_code=200, body=b"", connect_error=None):
+        calls = []
+        monkeypatch.setattr(
+            "httpx.AsyncClient",
+            lambda **kwargs: FakeAsyncClient(
+                [], calls, status_code, body, connect_error
+            ),
         )
         return calls
 
@@ -305,3 +339,249 @@ class TestOpenAIWireFormatToolCalls:
         outcome, _, cleaned = classify("Tokyo is the capital of Japan.")
         assert outcome is ToolCallOutcome.NONE
         assert cleaned == "Tokyo is the capital of Japan."
+
+
+class TestModelVersusConnectionErrors:
+    """Ollama answering with an error body is NOT the server being unreachable.
+
+    Regression: `raise_for_status()` raised httpx.HTTPStatusError, which
+    subclasses httpx.HTTPError — the same class the chat loop catches for
+    genuine connection failures. A 404 for a mistyped model therefore surfaced
+    as "Could not reach the model provider... make sure it's running", while
+    Ollama was demonstrably running and serving other models fine.
+    """
+
+    def test_missing_model_raises_model_error_not_http_error(self, fake_ollama_failure):
+        fake_ollama_failure(
+            status_code=404, body=b'{"error":"model \'gemma3n\' not found"}'
+        )
+        with pytest.raises(OllamaModelError):
+            collect(model="gemma3n")
+
+    def test_missing_model_error_is_not_an_httpx_error(self, fake_ollama_failure):
+        # The heart of the bug: if this inherits from httpx.HTTPError, the chat
+        # loop's connection-failure branch swallows it again.
+        fake_ollama_failure(
+            status_code=404, body=b'{"error":"model \'gemma3n\' not found"}'
+        )
+        try:
+            collect(model="gemma3n")
+        except OllamaModelError as exc:
+            assert not isinstance(exc, httpx.HTTPError)
+        else:
+            pytest.fail("expected OllamaModelError")
+
+    def test_missing_model_message_names_the_model_and_the_pull_command(
+        self, fake_ollama_failure
+    ):
+        fake_ollama_failure(
+            status_code=404, body=b'{"error":"model \'gemma3n\' not found"}'
+        )
+        with pytest.raises(OllamaModelError) as caught:
+            collect(model="gemma3n")
+        message = str(caught.value)
+        assert "gemma3n" in message
+        assert "ollama pull gemma3n" in message
+        assert "running" not in message.lower()
+
+    def test_unusable_model_relays_ollamas_own_explanation(self, fake_ollama_failure):
+        # A pulled but embedding-only model (nomic-embed-text) 400s on /api/chat.
+        # No list-models preflight can catch this — only the response can.
+        fake_ollama_failure(
+            status_code=400, body=b'{"error":"\\"nomic-embed-text\\" does not support chat"}'
+        )
+        with pytest.raises(OllamaModelError) as caught:
+            collect(model="nomic-embed-text")
+        message = str(caught.value)
+        assert "does not support chat" in message
+        assert "nomic-embed-text" in message
+
+    def test_error_response_without_parseable_body_still_explains(
+        self, fake_ollama_failure
+    ):
+        fake_ollama_failure(status_code=500, body=b"<html>gateway blew up</html>")
+        with pytest.raises(OllamaModelError) as caught:
+            collect(model="gemma3")
+        message = str(caught.value)
+        assert "gemma3" in message
+        assert "500" in message
+
+    def test_connection_failure_still_raises_an_httpx_error(self, fake_ollama_failure):
+        # The other half of the fix: a genuinely unreachable server must keep
+        # raising an httpx error so the "is Ollama running?" hint still fires.
+        fake_ollama_failure(connect_error=httpx.ConnectError("connection refused"))
+        with pytest.raises(httpx.ConnectError):
+            collect(model="gemma3")
+
+    def test_connection_failure_is_not_a_model_error(self, fake_ollama_failure):
+        fake_ollama_failure(connect_error=httpx.ConnectError("connection refused"))
+        try:
+            collect(model="gemma3")
+        except httpx.ConnectError as exc:
+            assert not isinstance(exc, OllamaModelError)
+        else:
+            pytest.fail("expected httpx.ConnectError")
+
+    def test_successful_response_is_unaffected(self, fake_ollama):
+        fake_ollama([json.dumps({"message": {"content": "hi"}, "done": True})])
+        responses = collect(model="gemma3")
+        assert [r.content for r in responses] == ["hi"]
+
+
+class TestFabricatedToolResults:
+    """Small models sometimes narrate a tool RESULT as JSON text.
+
+    Captured verbatim from phi4-mini on "open YouTube". The shape carries
+    neither "name" nor "arguments", so it used to slip past _is_tool_attempt,
+    classify as NONE, and get printed to the user as if it were the reply.
+    """
+
+    NAMES = {"open_app", "open_website", "get_weather", "play_music"}
+
+    def classify(self, content):
+        return classify_tool_call(content, self.NAMES, lambda call: True)
+
+    def test_fabricated_result_is_not_shown_to_the_user(self):
+        blob = '[{"type": "function", "result": true, "message": "YouTube has been opened"}]'
+        outcome, call, cleaned = self.classify(blob)
+        assert call is None
+        assert '"result"' not in cleaned
+        assert "YouTube has been opened" not in cleaned
+
+    def test_fabricated_result_after_real_text_keeps_the_text(self):
+        blob = (
+            'Opening YouTube for you. '
+            '[{"type": "function", "result": true, "message": "done"}]'
+        )
+        _outcome, _call, cleaned = self.classify(blob)
+        assert "Opening YouTube for you." in cleaned
+        assert '"result"' not in cleaned
+
+    def test_bare_function_envelope_is_not_shown(self):
+        # Same family: a "type": "function" wrapper with no call inside it.
+        blob = '{"type": "function", "status": "ok"}'
+        _outcome, _call, cleaned = self.classify(blob)
+        assert '"function"' not in cleaned
+
+    def test_definition_echo_is_still_stripped(self):
+        # The other phi4-mini failure shape — echoes the tool definition back.
+        blob = (
+            '[{"type": "function", "function": {"name": "open_website", '
+            '"description": "Open a website.", "parameters": {}}}]'
+        )
+        outcome, call, cleaned = self.classify(blob)
+        assert outcome is ToolCallOutcome.MALFORMED
+        assert call is None
+        assert "open_website" not in cleaned
+
+    def test_ordinary_json_answer_is_still_shown(self):
+        # Must not over-trigger: a genuine JSON answer has no tool-call shape.
+        blob = '{"population": 37400068, "city": "Tokyo"}'
+        outcome, _call, cleaned = self.classify(blob)
+        assert outcome is ToolCallOutcome.NONE
+        assert cleaned == blob
+
+    def test_plain_prose_is_untouched(self):
+        outcome, _call, cleaned = self.classify("The capital of Japan is Tokyo.")
+        assert outcome is ToolCallOutcome.NONE
+        assert cleaned == "The capital of Japan is Tokyo."
+
+
+class TestBracketResidue:
+    """Stripping a tool blob must not leave punctuation posing as the reply.
+
+    An unbalanced blob (phi4-mini drops closing brackets often) gets matched
+    from its inner `{`, leaving the orphaned `[` behind. Showing a lone bracket
+    as Nero's answer is the same defect as showing the JSON, just smaller.
+    """
+
+    NAMES = {"open_app", "open_website"}
+
+    def classify(self, content):
+        return classify_tool_call(content, self.NAMES, lambda call: True)
+
+    def test_orphaned_open_bracket_is_not_the_reply(self):
+        blob = '[{"type": "function", "function": {"name": "open_website", "arguments": {}}}'
+        _outcome, _call, cleaned = self.classify(blob)
+        assert cleaned.strip() == ""
+
+    def test_orphaned_close_bracket_is_not_the_reply(self):
+        blob = '{"name": "open_app", "arguments": {"app_name": "Safari"}}]'
+        _outcome, _call, cleaned = self.classify(blob)
+        assert cleaned.strip() == ""
+
+    def test_real_text_around_a_blob_survives(self):
+        blob = 'Sure, opening it. [{"name": "open_app", "arguments": {"app_name": "Safari"}}]'
+        _outcome, _call, cleaned = self.classify(blob)
+        assert "Sure, opening it." in cleaned
+
+    def test_prose_with_brackets_is_untouched(self):
+        text = "Use the list [1, 2, 3] for that."
+        outcome, _call, cleaned = self.classify(text)
+        assert outcome is ToolCallOutcome.NONE
+        assert cleaned == text
+
+
+class TestEscapedToolJson:
+    """phi4-mini sometimes emits the blob with backslash-escaped quotes.
+
+    Captured verbatim on "open YouTube". The marker check looked for `"name"`,
+    but the raw text contains `\\"name\\"`, so the region was never recognised
+    as protocol noise and printed as the reply.
+    """
+
+    NAMES = {"open_app", "open_website"}
+
+    def classify(self, content):
+        return classify_tool_call(content, self.NAMES, lambda call: True)
+
+    def test_escaped_definition_echo_is_not_shown(self):
+        blob = (
+            '{\\"type\\": \\"function\\", \\"function\\": '
+            '{\\"name\\": \\"open_website\\", \\"parameters\\": {}}}'
+        )
+        _outcome, _call, cleaned = self.classify(blob)
+        assert "open_website" not in cleaned
+        assert "function" not in cleaned
+
+    def test_escaped_result_is_not_shown(self):
+        blob = '[{\\"type\\": \\"function\\", \\"result\\": true}]'
+        _outcome, _call, cleaned = self.classify(blob)
+        assert "function" not in cleaned
+
+    def test_prose_mentioning_a_quoted_word_is_untouched(self):
+        text = 'The word \\"function\\" comes from Latin.'
+        outcome, _call, cleaned = self.classify(text)
+        assert outcome is ToolCallOutcome.NONE
+        assert cleaned == text
+
+
+class TestFunctionTypeVariants:
+    """The `type` value itself varies: "function", "function/result", ...
+
+    Captured verbatim on "open YouTube". Requiring the value to equal
+    "function" exactly let every variant through.
+    """
+
+    NAMES = {"open_app", "open_website"}
+
+    def classify(self, content):
+        return classify_tool_call(content, self.NAMES, lambda call: True)
+
+    def test_function_slash_result_variant_is_not_shown(self):
+        blob = '[{"type": "function/result", "result": "Opening YouTube in your browser"}]'
+        _outcome, _call, cleaned = self.classify(blob)
+        assert "Opening YouTube" not in cleaned
+        assert "function" not in cleaned
+
+    def test_function_call_variant_is_not_shown(self):
+        blob = '[{"type": "function_call", "status": "done"}]'
+        _outcome, _call, cleaned = self.classify(blob)
+        assert "function" not in cleaned
+
+    def test_unrelated_type_field_is_untouched(self):
+        # A JSON answer whose "type" means something else must still show.
+        text = '{"type": "mammal", "name_of_animal": "otter"}'
+        outcome, _call, cleaned = self.classify(text)
+        assert outcome is ToolCallOutcome.NONE
+        assert cleaned == text

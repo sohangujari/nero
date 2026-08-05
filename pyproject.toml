@@ -17,6 +17,7 @@ dependencies = [
     "platformdirs==4.10.1",
     "keyring==25.7.0",
     "pyyaml==6.0.3",
+    "pynput==1.8.2; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]

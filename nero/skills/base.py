@@ -1,4 +1,7 @@
 from abc import ABC, abstractmethod
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict
 
 # JSON-schema primitive type -> acceptable Python type(s). bool is excluded from
 # the numeric checks because in Python bool is a subclass of int.
@@ -11,11 +14,13 @@ _JSON_TYPES: dict[str, type | tuple[type, ...]] = {
     "array": list,
 }
 
+PermissionTier = Literal["read_only", "state_changing", "destructive"]
+
 
 def validate_arguments(input_schema: dict, arguments) -> bool:
-    """Generic validation of tool-call arguments against a Tool's input schema.
+    """Generic validation of tool-call arguments against a Skill's input schema.
 
-    Reusable across any tool: checks required fields are present, primitive
+    Reusable across any skill: checks required fields are present, primitive
     types match, and required string fields are non-empty (a present-but-empty
     required string is semantically no argument at all — e.g. app_name="").
     """
@@ -49,21 +54,26 @@ def _type_ok(expected: str | None, value) -> bool:
     return isinstance(value, python_type)
 
 
-class Tool(ABC):
-    """A local capability Claude can invoke via tool calling."""
+class SkillMeta(BaseModel):
+    """Everything the registry and the LLM need to know about a skill."""
+
+    model_config = ConfigDict(extra="forbid")
 
     name: str
     description: str
     input_schema: dict
+    requires_network: bool
+    permission_tier: PermissionTier
+    # Shown verbatim when the skill is blocked by offline mode. Optional so
+    # non-network skills don't carry a message they can never emit.
+    offline_message: str | None = None
+
+
+class Skill(ABC):
+    """A local capability the model can invoke via tool calling."""
+
+    meta: SkillMeta
 
     @abstractmethod
     async def execute(self, **kwargs) -> str:
-        """Run the tool and return a result string for Claude (errors included)."""
-
-    def to_anthropic(self) -> dict:
-        """The tool definition dict expected by the Anthropic Messages API."""
-        return {
-            "name": self.name,
-            "description": self.description,
-            "input_schema": self.input_schema,
-        }
+        """Run the skill and return a result string for the model (errors included)."""

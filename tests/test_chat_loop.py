@@ -9,17 +9,22 @@ from rich.console import Console
 from nero.config.schema import LLMConfig
 from nero.core.chat_loop import ChatLoop
 from nero.llm.client import APOLOGY, LLMClient, PendingToolCall, RoundResult
-from nero.tools.base import Tool
+from nero.skills.base import Skill, SkillMeta
+from nero.skills.registry import SkillRegistry
 
 
-class StubTool(Tool):
-    name = "open_app"
-    description = "stub"
-    input_schema = {
-        "type": "object",
-        "properties": {"app_name": {"type": "string"}},
-        "required": ["app_name"],
-    }
+class StubTool(Skill):
+    meta = SkillMeta(
+        name="open_app",
+        description="stub",
+        input_schema={
+            "type": "object",
+            "properties": {"app_name": {"type": "string"}},
+            "required": ["app_name"],
+        },
+        requires_network=False,
+        permission_tier="state_changing",
+    )
 
     def __init__(self, result="done", error: Exception | None = None):
         self._result = result
@@ -33,11 +38,12 @@ class StubTool(Tool):
         return self._result
 
 
-def make_client(provider="claude", model="claude-sonnet-5", tools=None, api_key="sk-test"):
+def make_client(provider="claude", model="claude-sonnet-5", tools=None, api_key="sk-test", registry=None):
+    skills = tools if tools is not None else [StubTool(result="Opened Safari.")]
     return LLMClient(
         config=LLMConfig(provider=provider, model=model),
         assistant_name="Nero",
-        tools=tools if tools is not None else [StubTool(result="Opened Safari.")],
+        registry=registry if registry is not None else SkillRegistry(skills),
         api_key=api_key,
     )
 
@@ -76,7 +82,7 @@ class TestToolDefinitions:
                 "function": {
                     "name": "open_app",
                     "description": "stub",
-                    "parameters": stub.input_schema,
+                    "parameters": stub.meta.input_schema,
                 },
             }
         ]
@@ -379,7 +385,7 @@ class TestSendLoop:
         prompt = make_client().system_prompt.lower()
         # Gating is preserved; wording changed when the general-purpose framing
         # was restored (see TestGeneralPurposeRegression).
-        assert "only when the user explicitly asks to open" in prompt
+        assert "only when the user explicitly asks for that action" in prompt
         assert "do not call any tool" in prompt
 
     def test_bug_report_repro_history_stays_clean(self):
@@ -551,6 +557,18 @@ class TestChatLoop:
         loop.run()  # must not raise
 
 
+def four_skill_registry():
+    from nero.skills.open_app.server import OpenAppSkill
+    from nero.skills.open_website.server import OpenWebsiteSkill
+    from nero.skills.play_music.server import PlayMusicSkill
+    from nero.skills.registry import SkillRegistry
+    from nero.skills.weather.server import WeatherSkill
+
+    return SkillRegistry(
+        [OpenAppSkill(), OpenWebsiteSkill(), WeatherSkill(), PlayMusicSkill()]
+    )
+
+
 # --- Regression: Nero is a general assistant that ALSO has a tool ---
 class TestGeneralPurposeRegression:
     def test_prompt_states_general_capability_before_the_tool(self):
@@ -563,11 +581,11 @@ class TestGeneralPurposeRegression:
             assert capability in lowered, f"missing capability: {capability}"
         # And it is explicitly told not to self-limit to the tool.
         assert "never limited to one topic" in lowered
-        assert "never say that you can only open applications" in lowered
+        assert "never say that you can only do one kind of task" in lowered
         # The general framing comes before the tool description.
-        assert lowered.index("general-purpose") < lowered.index("open_app")
+        assert lowered.index("general-purpose") < lowered.index("a few tools")
         # Tool gating is still present.
-        assert "only when the user explicitly asks to open" in lowered
+        assert "only when the user explicitly asks for that action" in lowered
 
     def test_none_classification_passes_content_through_verbatim(self):
         """A plain answer must reach the user unmodified — no canned substitute."""
@@ -592,17 +610,29 @@ class TestGeneralPurposeRegression:
         ],
     )
     def test_general_answers_are_not_swallowed(self, reply):
-        """Varied general-knowledge answers all survive the classifier intact."""
-        client = make_client()
+        """Varied general-knowledge answers all survive the classifier intact.
+
+        Uses the full four-skill registry (not the single-skill default) so
+        this exercises the fuller tool schema — the shape of prompt the
+        Phase 3 regression actually broke under.
+        """
+        client = make_client(registry=four_skill_registry())
         fake_turns(client, [([reply], RoundResult(content=reply, tool_calls=[]))])
         shown = []
         client.send([{"role": "user", "content": "q"}], on_text=shown.append)
         assert "".join(shown) == reply
 
     def test_ollama_path_general_answer_survives_buffering(self):
-        """The buffered ollama path must not eat plain answers either."""
+        """The buffered ollama path must not eat plain answers either.
+
+        Also uses the full four-skill registry: the original regression lived
+        on this buffered ollama path, so it is the one that most needs
+        full-schema coverage.
+        """
         reply = "The Eiffel Tower is 330 metres tall."
-        client = make_client(provider="ollama", model="phi4-mini", api_key=None)
+        client = make_client(
+            provider="ollama", model="phi4-mini", api_key=None, registry=four_skill_registry()
+        )
         fake_turns(client, [([reply], RoundResult(content=reply, tool_calls=[]))])
         shown = []
         client.send([{"role": "user", "content": "how tall is it"}], on_text=shown.append)
@@ -625,3 +655,187 @@ class TestGeneralPurposeRegression:
         client.send(messages, on_text=shown.append)
         assert stub.calls == [{"app_name": "Calculator"}]
         assert "".join(shown) == "Calculator is open."
+
+
+class TestSystemPromptFraming:
+    def test_states_general_capability_first(self):
+        prompt = make_client().system_prompt
+        general = prompt.index("general-purpose")
+        tools = prompt.index("tools")
+        assert general < tools, "the general-assistant half must come first"
+
+    def test_names_no_specific_skill(self):
+        # Spec D4: per-skill detail lives in SkillMeta.description, not the
+        # prompt, so prompt length stays constant as skills are added.
+        prompt = make_client().system_prompt
+        for name in ("open_app", "open_website", "get_weather", "play_music"):
+            assert name not in prompt
+
+    def test_forbids_narrowing_replies(self):
+        assert "never limited" in make_client().system_prompt
+
+    def test_forbids_tool_json_as_text(self):
+        assert "never" in make_client().system_prompt
+        assert "tool-call JSON" in make_client().system_prompt
+
+    def test_stays_short(self):
+        # The previous regression came from an over-long, over-specific prompt.
+        # Small local models follow terse instructions far better.
+        assert len(make_client().system_prompt) < 900
+
+
+from nero.llm.ollama_adapter import OllamaModelError
+
+
+class TestOllamaErrorMessaging:
+    """A reachable Ollama refusing a model must not read as a dead server."""
+
+    def _run(self, error, provider="ollama"):
+        import io
+
+        client = FakeLLMClient(error=error)
+        client.provider = provider
+        queue = ["what's up", "exit"]
+
+        def next_input(prompt):
+            if not queue:
+                raise EOFError
+            return queue.pop(0)
+
+        buffer = io.StringIO()
+        # Wide console: rich would otherwise wrap mid-command and break the
+        # substring assertions below for reasons unrelated to the behaviour.
+        console = Console(file=buffer, force_terminal=False, width=200)
+        loop = ChatLoop(client, console=console, assistant_name="Nero", input_fn=next_input)
+        loop.run()
+        return buffer.getvalue(), loop
+
+    def test_model_error_reports_the_model_not_the_server(self):
+        out, _ = self._run(
+            OllamaModelError(
+                "Model 'gemma3n' isn't available locally. "
+                "Pull it with `ollama pull gemma3n`, or pick another with `nero config`."
+            )
+        )
+        assert "gemma3n" in out
+        assert "ollama pull gemma3n" in out
+        assert "Could not reach the model provider" not in out
+        assert "make sure it's running" not in out
+        # Must be handled by a dedicated branch, not the generic catch-all:
+        # "Something went wrong" reads like a crash for a known, fixable state.
+        assert "Something went wrong" not in out
+
+    def test_connection_failure_still_suggests_starting_ollama(self):
+        out, _ = self._run(httpx.ConnectError("connection refused"))
+        assert "Could not reach the model provider" in out
+        assert "ollama serve" in out
+
+    def test_model_error_rolls_back_the_failed_turn(self):
+        # Same contract as every other recoverable error: no orphan user turn.
+        _, loop = self._run(OllamaModelError("Model 'gemma3n' isn't available locally."))
+        assert loop.messages == []
+
+    def test_loop_survives_a_model_error(self):
+        out, _ = self._run(OllamaModelError("Model 'gemma3n' isn't available locally."))
+        assert "signing off" in out
+
+
+class TestAllSkillsFire:
+    """Locks both halves at once: every skill still reachable, and ordinary
+    questions still answered. The Phase 3 regression broke the second half while
+    the first half kept working, so neither is sufficient alone."""
+
+    def _registry(self):
+        return four_skill_registry()
+
+    def test_all_four_skills_are_offered_to_the_model(self):
+        client = LLMClient(
+            config=LLMConfig(provider="claude", model="claude-sonnet-5"),
+            assistant_name="Nero",
+            registry=self._registry(),
+            api_key="sk-test",
+        )
+        names = {d["function"]["name"] for d in client._tool_definitions()}
+        assert names == {"open_app", "open_website", "get_weather", "play_music"}
+
+    def test_every_skill_description_is_non_empty(self):
+        for skill in self._registry().available():
+            assert skill.meta.description.strip(), skill.meta.name
+
+    def test_every_skill_declares_a_tier_and_network_flag(self):
+        for skill in self._registry().available():
+            assert skill.meta.permission_tier in (
+                "read_only", "state_changing", "destructive"
+            )
+            assert isinstance(skill.meta.requires_network, bool)
+
+    def test_network_flags_match_the_spec(self):
+        flags = {
+            skill.meta.name: skill.meta.requires_network
+            for skill in self._registry().available()
+        }
+        assert flags == {
+            "open_app": False,
+            "open_website": True,
+            "get_weather": True,
+            "play_music": False,
+        }
+
+    def test_every_network_skill_has_an_offline_message(self):
+        for skill in self._registry().available():
+            if skill.meta.requires_network:
+                assert skill.meta.offline_message, skill.meta.name
+
+
+class TestOllamaFullJsonReplyIsNoise:
+    """Structural leak guard: on the ollama path, if a reply is entirely a JSON
+    object/array AND tools were offered this turn, it is tool-call protocol noise
+    the model narrated instead of calling — never show it. Replaces chasing each
+    fabricated shape (function/result, status/message, escaped quotes, ...).
+    """
+
+    def _ollama_client(self, tools=None):
+        return make_client(
+            provider="ollama", model="phi4-mini",
+            tools=tools if tools is not None else [StubTool(result="ok")],
+            api_key=None,
+        )
+
+    def _run(self, client, content):
+        fake_turns(client, [([content], RoundResult(content=content, tool_calls=[]))])
+        shown, messages = [], [{"role": "user", "content": "open youtube"}]
+        client.send(messages, on_text=shown.append)
+        return "".join(shown), messages
+
+    def test_fabricated_result_json_is_not_shown(self):
+        shown, messages = self._run(
+            self._ollama_client(),
+            '[{"type": "function/result", "result": "YouTube opened"}]',
+        )
+        assert "function" not in shown and "YouTube opened" not in shown
+        assert shown == APOLOGY
+        assert messages[-1] == {"role": "assistant", "content": APOLOGY}
+
+    def test_status_message_json_is_not_shown(self):
+        shown, _ = self._run(
+            self._ollama_client(),
+            '{"status": "success", "message": "Opening YouTube"}',
+        )
+        assert shown == APOLOGY
+
+    def test_json_with_leading_junk_is_not_shown(self):
+        shown, _ = self._run(
+            self._ollama_client(), '{}\n\n\n[{"status": "success"}]'
+        )
+        assert shown == APOLOGY
+
+    def test_genuine_prose_answer_still_shows(self):
+        shown, _ = self._run(self._ollama_client(), "Tokyo is the capital of Japan.")
+        assert shown == "Tokyo is the capital of Japan."
+
+    def test_json_reply_is_kept_when_no_tools_offered(self):
+        # If Nero offered no tools, a JSON reply is the user's legitimate answer.
+        shown, _ = self._run(
+            self._ollama_client(tools=[]), '{"city": "Tokyo", "pop": 37400068}'
+        )
+        assert shown == '{"city": "Tokyo", "pop": 37400068}'

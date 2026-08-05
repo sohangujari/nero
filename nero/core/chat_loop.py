@@ -4,6 +4,9 @@ from collections.abc import Callable
 import httpx
 import litellm
 from rich.console import Console
+from rich.markup import escape
+
+from nero.llm.ollama_adapter import OllamaModelError
 
 logger = logging.getLogger("nero.chat")
 
@@ -64,6 +67,11 @@ class ChatLoop:
                     "\n[red]Your API key was rejected.[/red] "
                     "Update it with [bold]nero config[/bold]."
                 )
+            except OllamaModelError as exc:
+                # Ordered before the connection branch on purpose: the server
+                # answered, so "is Ollama running?" is the wrong question.
+                del self.messages[turn_start:]
+                self.console.print(f"\n[red]{escape(str(exc))}[/red]")
             except (
                 litellm.exceptions.APIConnectionError,
                 litellm.exceptions.ServiceUnavailableError,

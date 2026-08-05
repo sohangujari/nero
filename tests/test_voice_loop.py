@@ -195,3 +195,52 @@ def test_aborted_turn_still_shuts_player_down():
     loop.run()
     player = FakePlayer.instances[0]
     assert player.shutdown_called, "aborted turn leaked the playback thread"
+
+
+# --- A reachable Ollama refusing a model is not a dead server ---
+import io
+
+import httpx
+
+from nero.llm.ollama_adapter import OllamaModelError
+
+
+def _run_failing_voice_turn(error):
+    """One voice turn whose client raises `error`; returns everything printed."""
+
+    class FailingClient:
+        provider = "ollama"
+
+        def send(self, messages, on_text):
+            raise error
+
+    buffer = io.StringIO()
+    # Wide console so rich doesn't wrap mid-command and break substring checks.
+    console = Console(file=buffer, force_terminal=False, width=200)
+    inputs = iter([""] * 5)
+    VoiceLoop(
+        client=FailingClient(), stt=FakeSTT(["hello"]),
+        record=lambda: object(), make_player=FakePlayer,
+        console=console, assistant_name="Nero",
+        input_fn=lambda *_a: next(inputs), once=True,
+    ).run()
+    return buffer.getvalue()
+
+
+def test_voice_model_error_reports_the_model_not_the_server():
+    out = _run_failing_voice_turn(
+        OllamaModelError(
+            "Model 'gemma3n' isn't available locally. Pull it with `ollama pull gemma3n`."
+        )
+    )
+    assert "gemma3n" in out
+    assert "ollama pull gemma3n" in out
+    assert "Could not reach the model provider" not in out
+    assert "make sure it's running" not in out
+    assert "Something went wrong" not in out
+
+
+def test_voice_connection_failure_still_suggests_starting_ollama():
+    out = _run_failing_voice_turn(httpx.ConnectError("connection refused"))
+    assert "Could not reach the model provider" in out
+    assert "ollama serve" in out

@@ -14,7 +14,7 @@ from nero.llm.ollama_adapter import (
     classify_tool_call,
     ollama_chat,
 )
-from nero.tools.base import Tool, validate_arguments
+from nero.skills.registry import SkillRegistry
 
 logger = logging.getLogger("nero.llm")
 
@@ -110,36 +110,37 @@ class LLMClient:
         self,
         config: LLMConfig,
         assistant_name: str,
-        tools: list[Tool],
+        registry: SkillRegistry,
         api_key: str | None = None,
         ollama_base_url: str = ollama.BASE_URL,
     ):
         self.config = config
         self.api_key = api_key
         self.ollama_base_url = ollama_base_url
-        self.tools = {tool.name: tool for tool in tools}
+        self.registry = registry
         # Two separate concerns, stated separately on purpose: (1) Nero is a
-        # general-purpose assistant, (2) it *additionally* has one tool, gated to
-        # explicit open-app requests. An earlier tool-gating fix collapsed these
-        # into a tool-only description, and small local models then refused
-        # everything that wasn't an app request. Lead with the general capability.
+        # general-purpose assistant, (2) it *additionally* has tools, gated to
+        # explicit requests. An earlier tool-gating fix collapsed these into a
+        # tool-only description, and small local models then refused everything
+        # that wasn't an app request. Lead with the general capability.
+        #
         # Kept deliberately short and non-nuanced: small local models (phi4-mini
         # et al) follow terse, concrete instructions far better than long ones.
-        # Both halves must be stated — a tool-only description makes the model
-        # refuse general questions; over-stressing the tool makes it fire the
-        # tool on unrelated questions. Concrete examples anchor both sides.
+        # No skill is named here — per-skill detail lives in SkillMeta.description,
+        # which reaches the model as schema. That keeps this prompt a constant
+        # length as skills are added, and avoids the over-description that made
+        # the model fire tools on unrelated questions.
         self.system_prompt = (
             f"You are {assistant_name}, a helpful general-purpose AI assistant "
             "running in the user's terminal.\n\n"
             "Answer any question normally: maths, facts, explanations, jokes, "
             "casual conversation. You are a normal assistant and are never limited "
-            "to one topic. Never say that you can only open applications.\n\n"
-            "You also have one tool, open_app, which opens an application on the "
-            "user's computer. Call open_app only when the user explicitly asks to "
-            "open, launch, or start a named application — for example "
-            '"open Calculator" or "launch Safari". For any other message, '
-            "including ordinary questions, do not call any tool: just reply with "
-            "text.\n\n"
+            "to one topic. Never say that you can only do one kind of task.\n\n"
+            "You also have a few tools for doing things on the user's computer. "
+            "Call a tool only when the user explicitly asks for that action — for "
+            'example "open Calculator" or "what\'s the weather in Paris". For any '
+            "other message, including ordinary questions, do not call any tool: "
+            "just reply with text.\n\n"
             "When you are not calling a tool, reply with plain text only — never "
             "write tool-call JSON as text. Keep replies concise."
         )
@@ -158,17 +159,7 @@ class LLMClient:
         return model
 
     def _tool_definitions(self) -> list[dict]:
-        return [
-            {
-                "type": "function",
-                "function": {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "parameters": tool.input_schema,
-                },
-            }
-            for tool in self.tools.values()
-        ]
+        return self.registry.tool_definitions()
 
     async def stream_chat(self, messages: list, tools: list) -> AsyncIterator[str]:
         """One completion round: yields display-text deltas as they arrive.
@@ -288,7 +279,10 @@ class LLMClient:
         # tool calls, and accompanying content must not print as an answer.
         # Cloud rounds keep live streaming (their preamble text is intentional).
         hold_all = self.config.provider == "ollama"
-        tool_names = set(self.tools)
+        # Every known skill, not just the available ones: a call naming a
+        # disabled skill must classify as a tool call so the registry can refuse
+        # and audit it, rather than being discarded as MALFORMED.
+        tool_names = self.registry.known_names()
         for _ in range(MAX_TOOL_ROUNDS):
             gate = _JsonGate(on_text, hold_all=hold_all)
             self._last_round = None
@@ -348,6 +342,18 @@ class LLMClient:
                 self._emit_final(on_text, messages, cleaned, gate.streamed)
                 return
 
+            # Structural leak guard (ollama path only): if tools were offered and
+            # the whole reply is JSON, it's tool-call protocol noise the model
+            # narrated instead of calling — never an answer. Catches the open set
+            # of fabricated shapes (function/result, status/message, escaped
+            # quotes, leading `{}`) without chasing each one. Cloud replies stream
+            # live and aren't buffered here, so this can't swallow a real answer.
+            if hold_all and tool_definitions and _looks_like_json(content):
+                gate.discard()
+                logger.debug("Discarded all-JSON ollama reply as protocol noise: %r", content)
+                self._emit_final(on_text, messages, None, gate.streamed)
+                return
+
             # NONE: ordinary conversational content.
             gate.flush()
             self._emit_final(on_text, messages, content, gate.streamed)
@@ -367,8 +373,7 @@ class LLMClient:
         return self._valid_args(call.name, call.arguments)
 
     def _valid_args(self, name: str, arguments) -> bool:
-        tool = self.tools.get(name)
-        return tool is not None and validate_arguments(tool.input_schema, arguments)
+        return self.registry.validate(name, arguments)
 
     def _emit_final(
         self,
@@ -389,17 +394,23 @@ class LLMClient:
         messages.append({"role": "assistant", "content": display})
 
     async def _execute_tool(self, name: str, arguments: dict | None) -> str:
-        """Execute a tool call; every failure mode returns an error string the
-        model can react to — the REPL must survive whatever comes back."""
-        tool = self.tools.get(name)
-        if tool is None:
-            return f"Error: unknown tool {name!r}."
-        if arguments is None:
-            return "Error: tool arguments were not valid JSON."
-        try:
-            return await tool.execute(**arguments)
-        except Exception as exc:  # noqa: BLE001
-            return f"Error: {exc}"
+        return await self.registry.execute(name, arguments, self.provider)
+
+
+def _looks_like_json(content: str | None) -> bool:
+    """True if the reply leads with a JSON bracket.
+
+    Only consulted on the ollama path when tools were offered — where a reply
+    opening with `{`/`[` is a fabricated tool-call blob (often unbalanced or
+    escaped, so no real parse is possible), never a genuine answer. The
+    legitimate `{"city": "Tokyo"}` case only arises with no tools offered, which
+    the caller already excludes.
+
+    ponytail: leading-bracket heuristic, not a parse. Ceiling: on the ollama
+    path a genuine prose answer that happens to start with `{` becomes an
+    apology-and-retry. Vanishingly rare; tighten to a real parse only if it bites.
+    """
+    return (content or "").strip().replace('\\"', '"').startswith(("{", "["))
 
 
 def _arguments_as_dict(raw) -> dict:

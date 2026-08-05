@@ -3,26 +3,27 @@ import subprocess
 
 import pytest
 
-from nero.tools.open_app import OpenAppTool
+from nero.skills.open_app.server import OpenAppSkill
 
 
 @pytest.fixture
 def tool():
-    return OpenAppTool()
+    return OpenAppSkill()
 
 
 def run(tool, **kwargs):
     return asyncio.run(tool.execute(**kwargs))
 
 
-class TestToolInterface:
-    def test_anthropic_definition_shape(self, tool):
-        definition = tool.to_anthropic()
-        assert definition["name"] == "open_app"
-        assert definition["description"]
-        assert definition["input_schema"]["type"] == "object"
-        assert definition["input_schema"]["required"] == ["app_name"]
-        assert "app_name" in definition["input_schema"]["properties"]
+class TestSkillInterface:
+    def test_meta_shape(self, tool):
+        assert tool.meta.name == "open_app"
+        assert tool.meta.description
+        assert tool.meta.input_schema["type"] == "object"
+        assert tool.meta.input_schema["required"] == ["app_name"]
+        assert "app_name" in tool.meta.input_schema["properties"]
+        assert tool.meta.requires_network is False
+        assert tool.meta.permission_tier == "state_changing"
 
 
 class TestExecute:
@@ -91,43 +92,3 @@ class TestExecute:
         monkeypatch.setattr("platform.system", lambda: "Plan9")
         result = run(tool, app_name="Safari")
         assert "Error" in result
-
-
-from nero.tools.base import validate_arguments
-
-OPEN_APP_SCHEMA = {
-    "type": "object",
-    "properties": {"app_name": {"type": "string"}},
-    "required": ["app_name"],
-}
-
-
-class TestValidateArguments:
-    def test_valid(self):
-        assert validate_arguments(OPEN_APP_SCHEMA, {"app_name": "Safari"}) is True
-
-    def test_missing_required_field(self):
-        assert validate_arguments(OPEN_APP_SCHEMA, {}) is False
-
-    def test_empty_required_string(self):
-        assert validate_arguments(OPEN_APP_SCHEMA, {"app_name": ""}) is False
-        assert validate_arguments(OPEN_APP_SCHEMA, {"app_name": "   "}) is False
-
-    def test_wrong_type(self):
-        assert validate_arguments(OPEN_APP_SCHEMA, {"app_name": 5}) is False
-
-    def test_non_dict_arguments(self):
-        assert validate_arguments(OPEN_APP_SCHEMA, "nope") is False
-
-    def test_extra_fields_tolerated(self):
-        assert validate_arguments(OPEN_APP_SCHEMA, {"app_name": "Safari", "x": 1}) is True
-
-    def test_generic_required_int(self):
-        schema = {
-            "type": "object",
-            "properties": {"count": {"type": "integer"}},
-            "required": ["count"],
-        }
-        assert validate_arguments(schema, {"count": 3}) is True
-        assert validate_arguments(schema, {"count": "3"}) is False
-        assert validate_arguments(schema, {}) is False

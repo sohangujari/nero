@@ -10,7 +10,9 @@ from collections.abc import Callable
 
 import httpx
 import litellm
+from rich.markup import escape
 
+from nero.llm.ollama_adapter import OllamaModelError
 from nero.voice.audio_io import RECORD_SAMPLE_RATE
 from nero.voice.errors import (
     MicPermissionError,
@@ -200,6 +202,12 @@ class VoiceLoop:
             self.console.print(
                 "\n[red]Your API key was rejected.[/red] Update it with [bold]nero config[/bold]."
             )
+            return True
+        except OllamaModelError as exc:
+            # Ordered before the connection branch on purpose: the server
+            # answered, so "is Ollama running?" is the wrong question.
+            del self.messages[turn_start:]
+            self.console.print(f"\n[red]{escape(str(exc))}[/red]")
             return True
         except (
             litellm.exceptions.APIConnectionError,

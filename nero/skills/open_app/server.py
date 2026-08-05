@@ -3,27 +3,31 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from nero.tools.base import Tool
+from nero.skills.base import Skill, SkillMeta
 
 
-class OpenAppTool(Tool):
-    name = "open_app"
-    description = (
-        "Open an application installed on the user's computer by name. "
-        "Use this when the user asks to open, launch, or start an app "
-        "(e.g. 'open Spotify'). Returns a confirmation or an error message "
-        "if the app could not be found."
-    )
-    input_schema = {
-        "type": "object",
-        "properties": {
-            "app_name": {
-                "type": "string",
-                "description": "The application's name, e.g. 'Safari' or 'Spotify'.",
-            }
+class OpenAppSkill(Skill):
+    meta = SkillMeta(
+        name="open_app",
+        description=(
+            "Open an application installed on the user's computer by name. "
+            "Use this when the user asks to open, launch, or start an app "
+            "(e.g. 'open Spotify'). Returns a confirmation or an error message "
+            "if the app could not be found."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "app_name": {
+                    "type": "string",
+                    "description": "The application's name, e.g. 'Safari' or 'Spotify'.",
+                }
+            },
+            "required": ["app_name"],
         },
-        "required": ["app_name"],
-    }
+        requires_network=False,
+        permission_tier="state_changing",
+    )
 
     async def execute(self, **kwargs) -> str:
         app_name = str(kwargs.get("app_name") or "").strip()
@@ -38,7 +42,7 @@ class OpenAppTool(Tool):
             if system == "Linux":
                 return self._open_linux(app_name)
             return f"Error: unsupported platform {system!r}."
-        except Exception as exc:  # noqa: BLE001 — must reach Claude as a tool result
+        except Exception as exc:  # noqa: BLE001 — must reach the model as a skill result
             return f"Error launching {app_name!r}: {exc}"
 
     def _open_macos(self, app_name: str) -> str:
@@ -101,3 +105,8 @@ class OpenAppTool(Tool):
                 except OSError:
                     continue
         return None
+
+
+# The seam a future FastMCP wrapper attaches to (spec D1) — wrap this object,
+# don't touch the logic above it.
+SKILL = OpenAppSkill()

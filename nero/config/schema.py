@@ -3,6 +3,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict
 
 Provider = Literal["claude", "openai", "gemini", "ollama"]
+Mode = Literal["online", "offline"]
 
 
 class AssistantConfig(BaseModel):
@@ -49,10 +50,41 @@ class VoiceConfig(BaseModel):
     tts: TTSConfig = TTSConfig()
 
 
+class SkillToggles(BaseModel):
+    """One field per skill, rather than dict[str, bool], so a typo'd skill name
+    is rejected instead of silently ignored. Adding a skill means adding a field
+    — the honest cost of strict validation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    open_app: bool = True
+    open_website: bool = True
+    get_weather: bool = True
+    play_music: bool = True
+
+
+class WeatherSkillConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    default_location: str | None = None
+
+
+class SkillsConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: SkillToggles = SkillToggles()
+    weather: WeatherSkillConfig = WeatherSkillConfig()
+
+
 class NeroConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     assistant: AssistantConfig = AssistantConfig()
     llm: LLMConfig = LLMConfig()
+    # Whether Nero may use the network at all. This is a user *intent*, not a
+    # connectivity probe: offline hides network skills from the model entirely
+    # (see spec D2). Runtime network failures are handled per skill.
+    mode: Mode = "online"
     hardware: HardwareConfig = HardwareConfig()
     voice: VoiceConfig = VoiceConfig()
+    skills: SkillsConfig = SkillsConfig()

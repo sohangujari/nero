@@ -1,4 +1,5 @@
 import contextlib
+import json
 import logging
 import signal
 import sys
@@ -22,6 +23,7 @@ from nero import __version__
 from nero._runtime import check_python_version
 from nero.config.manager import ConfigError, ConfigManager
 from nero.config.schema import NeroConfig, STTConfig, TTSConfig
+from nero.core.audit_log import AuditLog, default_audit_path
 from nero.core.chat_loop import ChatLoop
 from nero.hardware.detector import (
     HardwareSpecs,
@@ -31,7 +33,7 @@ from nero.hardware.detector import (
 )
 from nero.llm import ollama
 from nero.llm.client import LLMClient
-from nero.tools.open_app import OpenAppTool
+from nero.skills.registry import build_registry
 from nero.voice import audio_io
 from nero.voice.audio_io import Player
 from nero.voice.errors import TTSLoadError, VoiceDependencyError
@@ -139,6 +141,33 @@ def detect() -> None:
 
 
 @app.command()
+def history(
+    limit: int = typer.Option(20, "--limit", "-n", help="How many entries to show."),
+) -> None:
+    """Show what Nero has actually done — a log of recent skill invocations."""
+    entries = AuditLog(default_audit_path()).recent(limit)
+    if not entries:
+        console.print("[dim]No skill invocations recorded yet.[/dim]")
+        return
+    table = Table(title=f"nero history — last {len(entries)}", show_header=True)
+    table.add_column("when", style="dim", no_wrap=True)
+    table.add_column("skill")
+    table.add_column("arguments")
+    table.add_column("result")
+    table.add_column("via", style="dim")
+    # recent() is newest-first; reverse so the table reads like a log, oldest at top.
+    for entry in reversed(entries):
+        table.add_row(
+            entry.timestamp.strftime("%Y-%m-%d %H:%M"),
+            entry.skill_name,
+            escape(json.dumps(entry.arguments, ensure_ascii=False)),
+            escape(entry.result_summary),
+            entry.provider,
+        )
+    console.print(table)
+
+
+@app.command()
 def talk(
     once: bool = typer.Option(False, "--once", help="Do a single voice exchange, then exit."),
     debug: bool = typer.Option(
@@ -176,7 +205,7 @@ def talk(
     client = LLMClient(
         config=config.llm,
         assistant_name=config.assistant.name,
-        tools=[OpenAppTool()],
+        registry=_build_registry(manager, config),
         api_key=api_key,
     )
 
@@ -222,6 +251,25 @@ def talk(
         _ignore_further_interrupts()
 
 
+def _build_registry(manager: ConfigManager, config: NeroConfig):
+    """The one place skills get constructed — both `nero` and `nero talk` call
+    this, so the text and voice paths can never drift apart."""
+
+    def remember_location(location: str) -> None:
+        # Best-effort convenience only: a config-write failure (read-only
+        # config dir, full disk -> OSError from save()'s write_text(), or a
+        # bad value -> ConfigError) must never turn an already-successful
+        # weather report into an error the user sees.
+        with contextlib.suppress(ConfigError, OSError):
+            manager.set_value("skills.weather.default_location", location)
+
+    return build_registry(
+        config,
+        audit=AuditLog(default_audit_path()),
+        on_location_resolved=remember_location,
+    )
+
+
 def _run_chat() -> None:
     manager = ConfigManager()
     if not manager.exists():
@@ -244,7 +292,7 @@ def _run_chat() -> None:
     client = LLMClient(
         config=config.llm,
         assistant_name=config.assistant.name,
-        tools=[OpenAppTool()],
+        registry=_build_registry(manager, config),
         api_key=api_key,
     )
     ChatLoop(client, console=console, assistant_name=config.assistant.name).run()
@@ -320,6 +368,28 @@ def config_set(key: str, value: str) -> None:
         )
         raise typer.Exit(1) from exc
     console.print(f"[green]Saved:[/green] {key} = {value}")
+    if key in ("llm.model", "llm.provider"):
+        _warn_if_no_tool_support(manager)
+
+
+def _warn_if_no_tool_support(manager: ConfigManager) -> None:
+    """If the current model is an Ollama model that can't call tools, say so.
+
+    Ollama reports this authoritatively via /api/show, so the warning is
+    grounded, not a guess. Silent for cloud providers, and silent when Ollama
+    can't answer (down, or model not pulled) — better quiet than a false alarm.
+    """
+    config = manager.load()
+    if config.llm.provider != "ollama":
+        return
+    if ollama.supports_tools(config.llm.model) is False:
+        console.print(
+            f"[yellow]Heads up:[/yellow] [bold]{config.llm.model}[/bold] has no "
+            "tool-calling support in Ollama, so skills like opening websites, "
+            "checking the weather, or controlling music won't work with it. "
+            "General conversation is fine. [bold]phi4-mini[/bold] or "
+            "[bold]qwen3[/bold] are good choices if you want skills."
+        )
 
 
 @config_app.command("show")
@@ -395,6 +465,7 @@ def _config_table(manager: ConfigManager, config: NeroConfig) -> Table:
     table.add_row("Assistant Name", config.assistant.name)
     table.add_row("LLM Provider", config.llm.provider)
     table.add_row("LLM Model", config.llm.model)
+    table.add_row("Mode", config.mode)
     table.add_row(f"API Key ({config.llm.provider})", _key_display(manager, config.llm.provider))
     hardware = config.hardware
     if hardware.detected_ram_gb is not None:
@@ -406,6 +477,10 @@ def _config_table(manager: ConfigManager, config: NeroConfig) -> Table:
         table.add_row("STT Model", voice.stt.model)
         table.add_row("TTS Engine", voice.tts.engine)
         table.add_row("Voice", f"{voice.tts.voice_id} ({_voice_gender(voice.tts.voice_id)})")
+    enabled = [name for name, on in config.skills.enabled.model_dump().items() if on]
+    table.add_row("Skills Enabled", ", ".join(enabled) if enabled else "none")
+    if config.skills.weather.default_location:
+        table.add_row("Weather Location", config.skills.weather.default_location)
     return table
 
 
@@ -438,6 +513,12 @@ def _interactive_menu() -> None:
             "8.", "Voice",
             f"{voice.tts.voice_id} ({_voice_gender(voice.tts.voice_id)})  [dim]\\[change][/dim]",
         )
+        body.add_row("9.", "Mode", f"{config.mode}  [dim]\\[toggle][/dim]")
+        body.add_row("10.", "Skills", _skills_summary(config))
+        body.add_row(
+            "11.", "Weather Location",
+            config.skills.weather.default_location or "[dim]not set[/dim]",
+        )
         console.print(Panel(body, title="nero config", subtitle="Enter a number to edit, Enter to finish"))
 
         choice = Prompt.ask("Choice", default="", show_default=False, console=console).strip()
@@ -455,6 +536,7 @@ def _interactive_menu() -> None:
         elif choice == "3":
             new_model = Prompt.ask("LLM model", default=config.llm.model, console=console)
             manager.set_value("llm.model", new_model.strip() or config.llm.model)
+            _warn_if_no_tool_support(manager)
         elif choice == "4":
             if provider == "ollama":
                 console.print("Ollama runs locally — no API key needed.")
@@ -475,8 +557,20 @@ def _interactive_menu() -> None:
             manager.set_value("voice.tts.engine", new_engine)
         elif choice == "8":
             _pick_voice(manager, voice.tts.voice_id)
+        elif choice == "9":
+            manager.set_value("mode", "offline" if config.mode == "online" else "online")
+        elif choice == "10":
+            _skills_menu(manager, config)
+        elif choice == "11":
+            current = config.skills.weather.default_location or ""
+            new_location = Prompt.ask(
+                "Default weather location (blank to clear)", default=current, console=console
+            ).strip()
+            # set_value can't write null, so save the model directly.
+            config.skills.weather.default_location = new_location or None
+            manager.save(config)
         else:
-            console.print("[yellow]Pick 1–8, or press Enter to finish.[/yellow]")
+            console.print("[yellow]Pick 1–11, or press Enter to finish.[/yellow]")
             continue
         console.print("[green]Saved.[/green]\n")
 
@@ -499,6 +593,44 @@ def _pick_voice(manager: ConfigManager, current: str) -> None:
     manager.set_value("voice.tts.voice_id", voice_id)
 
 
+def _skills_summary(config: NeroConfig) -> str:
+    toggles = config.skills.enabled.model_dump()
+    enabled = [name for name, on in toggles.items() if on]
+    return f"{len(enabled)}/{len(toggles)} enabled  [dim]\\[change][/dim]"
+
+
+def _skills_menu(manager: ConfigManager, config: NeroConfig) -> None:
+    toggles = config.skills.enabled.model_dump()
+    names = list(toggles)
+    # Ask the registry rather than hardcoding which skills need the network —
+    # SkillMeta is the single source of truth.
+    registry = build_registry(config)
+    table = Table(title="skills", show_header=True)
+    table.add_column("#")
+    table.add_column("skill")
+    table.add_column("enabled")
+    table.add_column("needs network")
+    for index, name in enumerate(names, start=1):
+        skill = registry.get(name)
+        needs_network = skill is not None and skill.meta.requires_network
+        table.add_row(
+            str(index), name,
+            "yes" if toggles[name] else "no",
+            "yes" if needs_network else "no",
+        )
+    console.print(table)
+    choice = Prompt.ask(
+        "Toggle which skill? (Enter to go back)", default="", show_default=False, console=console
+    ).strip()
+    if not choice:
+        return
+    if not choice.isdigit() or not 1 <= int(choice) <= len(names):
+        console.print(f"[yellow]Pick 1–{len(names)}.[/yellow]")
+        return
+    name = names[int(choice) - 1]
+    manager.set_value(f"skills.enabled.{name}", str(not toggles[name]).lower())
+
+
 def _switch_provider(manager: ConfigManager, config: NeroConfig, new_provider: str) -> None:
     manager.set_value("llm.provider", new_provider)
     if new_provider == "ollama":
@@ -510,6 +642,7 @@ def _switch_provider(manager: ConfigManager, config: NeroConfig, new_provider: s
             f"Model set to [bold]{recommendation}[/bold] (hardware recommendation). "
             "No API key needed."
         )
+        _warn_if_no_tool_support(manager)
         return
     default_model = DEFAULT_MODELS[new_provider]
     manager.set_value("llm.model", default_model)
