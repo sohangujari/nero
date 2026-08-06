@@ -514,6 +514,10 @@ def _config_table(manager: ConfigManager, config: NeroConfig) -> Table:
     table.add_row("Skills Enabled", ", ".join(enabled) if enabled else "none")
     if config.skills.weather.default_location:
         table.add_row("Weather Location", config.skills.weather.default_location)
+    memory = config.memory
+    table.add_row("Memory", "yes" if memory.enabled else "no")
+    if memory.enabled:
+        table.add_row("History Turns", str(memory.max_history_turns))
     return table
 
 
@@ -552,6 +556,9 @@ def _interactive_menu() -> None:
             "11.", "Weather Location",
             config.skills.weather.default_location or "[dim]not set[/dim]",
         )
+        memory = config.memory
+        body.add_row("12.", "Memory", f"{'yes' if memory.enabled else 'no'}  [dim]\\[toggle][/dim]")
+        body.add_row("13.", "History Turns", str(memory.max_history_turns))
         console.print(Panel(body, title="nero config", subtitle="Enter a number to edit, Enter to finish"))
 
         choice = Prompt.ask("Choice", default="", show_default=False, console=console).strip()
@@ -602,8 +609,20 @@ def _interactive_menu() -> None:
             # set_value can't write null, so save the model directly.
             config.skills.weather.default_location = new_location or None
             manager.save(config)
+        elif choice == "12":
+            manager.set_value("memory.enabled", str(not memory.enabled).lower())
+        elif choice == "13":
+            new_turns = Prompt.ask(
+                "How many exchanges to remember", default=str(memory.max_history_turns),
+                console=console,
+            ).strip()
+            if new_turns:
+                try:
+                    manager.set_value("memory.max_history_turns", new_turns)
+                except ConfigError:
+                    console.print("[yellow]Enter a whole number of 0 or more.[/yellow]")
         else:
-            console.print("[yellow]Pick 1–11, or press Enter to finish.[/yellow]")
+            console.print("[yellow]Pick 1–13, or press Enter to finish.[/yellow]")
             continue
         console.print("[green]Saved.[/green]\n")
 
