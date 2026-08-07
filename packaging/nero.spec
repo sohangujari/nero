@@ -5,11 +5,20 @@
 # Build:  uv run pyinstaller packaging/nero.spec
 # Output: dist/nero  (rename per-OS in the release workflow)
 
+import sys
+
 from PyInstaller.utils.hooks import collect_dynamic_libs, collect_submodules, collect_data_files
 
 hiddenimports = []
 datas = []
 binaries = []
+
+# play_music imports pynput.keyboard lazily inside WindowsController, and pynput
+# is a Windows-only dependency (sys_platform marker in pyproject). A lazy import
+# behind a platform check is invisible to PyInstaller's static analysis, so name
+# it explicitly — only on the Windows build, where the package is installed.
+if sys.platform == "win32":
+    hiddenimports += collect_submodules("pynput")
 
 # Native/ML packages that PyInstaller can't fully trace by static analysis.
 # (sounddevice/soundfile are single modules with dedicated contrib hooks that

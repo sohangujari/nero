@@ -45,8 +45,17 @@ chmod +x nero-macos        # or nero-linux
 nero-windows.exe
 ```
 
-Voice model weights (whisper, kokoro-onnx) download once into a per-user cache
-the first time you run `nero talk`.
+The binaries are **unsigned**, so the OS may warn on first launch:
+
+- **macOS** — Gatekeeper blocks unsigned downloads. Either right-click the file →
+  *Open* → *Open* once, or clear the quarantine flag:
+  `xattr -d com.apple.quarantine nero-macos`.
+- **Windows** — SmartScreen may prompt; choose *More info* → *Run anyway*.
+
+The first launch runs a short setup: Nero detects your hardware, recommends a local
+model, and asks for your provider and (for cloud providers) an API key. Voice model
+weights (whisper, kokoro-onnx) download once into a per-user cache the first time you
+run `nero talk`. Nothing else needs installing — no Python, no `pip`.
 
 ### Developers / contributors — uv
 
