@@ -14,13 +14,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # github.ref_name is the tag that triggered the run (e.g. "v0.1.0"), so
+        # asset names carry their version automatically on every future tag.
+        # On Windows the version goes before the extension, not after it.
         include:
           - os: ubuntu-latest
-            artifact: nero-linux
+            artifact: nero-linux-${{ github.ref_name }}
           - os: macos-latest
-            artifact: nero-macos
+            artifact: nero-macos-${{ github.ref_name }}
           - os: windows-latest
-            artifact: nero-windows.exe
+            artifact: nero-windows-${{ github.ref_name }}.exe
     steps:
       - uses: actions/checkout@v4
 

@@ -36,13 +36,16 @@ Download the file for your OS from the [Releases](https://github.com/sohangujari
 page, make it executable, and run it. There's no Python to install, no `pip`, no
 dependency resolver — the binary bundles a fixed Python 3.12 and everything else.
 
+Asset names carry their release version — substitute the file you actually
+downloaded in the commands below.
+
 ```sh
 # macOS / Linux
-chmod +x nero-macos        # or nero-linux
-./nero-macos
+chmod +x nero-macos-v0.1.1        # or nero-linux-v0.1.1
+./nero-macos-v0.1.1
 
 # Windows
-nero-windows.exe
+nero-windows-v0.1.1.exe
 ```
 
 The binaries are **unsigned**, so the OS may warn on first launch:
@@ -53,7 +56,7 @@ The binaries are **unsigned**, so the OS may warn on first launch:
   Open** — that path offers the *Open* button the double-click dialog doesn't.
   If your macOS hides it there, open **System Settings → Privacy & Security** and
   click **Open Anyway**, or clear the quarantine flag from a terminal:
-  `xattr -d com.apple.quarantine nero-macos`.
+  `xattr -d com.apple.quarantine nero-macos-v0.1.1`.
 - **Windows** — SmartScreen may prompt; choose *More info* → *Run anyway*.
 
 The first launch runs a short setup: Nero detects your hardware, recommends a local
