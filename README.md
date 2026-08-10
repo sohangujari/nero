@@ -47,8 +47,12 @@ nero-windows.exe
 
 The binaries are **unsigned**, so the OS may warn on first launch:
 
-- **macOS** — Gatekeeper blocks unsigned downloads. Either right-click the file →
-  *Open* → *Open* once, or clear the quarantine flag:
+- **macOS** — Gatekeeper blocks unsigned downloads. **Double-clicking is a dead
+  end**: it shows *"Apple could not verify…"* with only *Done* / *Move to Bin* —
+  no *Open* button. Instead **right-click (or Control-click) the file → Open →
+  Open** — that path offers the *Open* button the double-click dialog doesn't.
+  If your macOS hides it there, open **System Settings → Privacy & Security** and
+  click **Open Anyway**, or clear the quarantine flag from a terminal:
   `xattr -d com.apple.quarantine nero-macos`.
 - **Windows** — SmartScreen may prompt; choose *More info* → *Run anyway*.
 
