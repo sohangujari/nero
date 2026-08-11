@@ -41,13 +41,39 @@ class TTSConfig(BaseModel):
     voice_id: str = "af_bella"  # Kokoro default female; male equivalent: am_michael
 
 
+class VADConfig(BaseModel):
+    """Voice-activity detection tuning.
+
+    All four numbers are physical-world calibration: a slow talker needs longer
+    silence, a noisy room a higher threshold. No default is right for every mic.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    silence_ms: int = Field(default=800, ge=200)  # silence that ends a turn
+    threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    # Generous on purpose: dictating a long message is a real use case, not an
+    # error. These caps exist to stop a stuck stream, not to police the user.
+    max_utterance_seconds: int = Field(default=180, ge=1)
+    wait_for_speech_seconds: int = Field(default=30, ge=1)
+
+
 class VoiceConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = True
     input_mode: Literal["press_to_talk", "text_only"] = "press_to_talk"
+    barge_in: bool = True
+    vad: VADConfig = VADConfig()
     stt: STTConfig = STTConfig()
     tts: TTSConfig = TTSConfig()
+
+    @property
+    def barge_in_active(self) -> bool:
+        """Barge-in needs a detector. With VAD off it is inert regardless of
+        `barge_in`, so every consumer must ask this rather than read the flag."""
+        return self.barge_in and self.vad.enabled
 
 
 class MemoryConfig(BaseModel):

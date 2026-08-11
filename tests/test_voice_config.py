@@ -202,3 +202,65 @@ def test_talk_ignores_interrupts_after_loop_exits(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "VoiceLoop", ExplodingLoop)
     runner.invoke(cli.app, ["talk", "--once"])
     assert installed == [True]
+
+
+class TestVADConfig:
+    def test_defaults(self):
+        from nero.config.schema import NeroConfig
+
+        vad = NeroConfig().voice.vad
+        assert vad.enabled is True
+        assert vad.silence_ms == 800
+        assert vad.threshold == 0.5
+        assert vad.max_utterance_seconds == 180
+        assert vad.wait_for_speech_seconds == 30
+
+    def test_barge_in_defaults_on(self):
+        from nero.config.schema import NeroConfig
+
+        assert NeroConfig().voice.barge_in is True
+
+    def test_rejects_unknown_keys(self):
+        from pydantic import ValidationError
+        from nero.config.schema import NeroConfig
+
+        with pytest.raises(ValidationError):
+            NeroConfig.model_validate({"voice": {"vad": {"nonsense": 1}}})
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("silence_ms", 199),
+            ("threshold", -0.1),
+            ("threshold", 1.1),
+            ("max_utterance_seconds", 0),
+            ("wait_for_speech_seconds", 0),
+        ],
+    )
+    def test_out_of_range_values_rejected(self, field, value):
+        from pydantic import ValidationError
+        from nero.config.schema import NeroConfig
+
+        with pytest.raises(ValidationError):
+            NeroConfig.model_validate({"voice": {"vad": {field: value}}})
+
+
+class TestBargeInActive:
+    """barge_in depends on VAD; the two settings are not independent."""
+
+    @pytest.mark.parametrize(
+        ("vad_enabled", "barge_in", "expected"),
+        [
+            (True, True, True),
+            (True, False, False),
+            (False, True, False),   # inert: no detector exists
+            (False, False, False),
+        ],
+    )
+    def test_truth_table(self, vad_enabled, barge_in, expected):
+        from nero.config.schema import NeroConfig
+
+        config = NeroConfig.model_validate(
+            {"voice": {"barge_in": barge_in, "vad": {"enabled": vad_enabled}}}
+        )
+        assert config.voice.barge_in_active is expected
