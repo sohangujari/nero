@@ -137,6 +137,55 @@ def record_until_silence(
     return np.concatenate(blocks, axis=0).reshape(-1).astype(np.float32)
 
 
+# How long speech must persist before it counts as a barge-in. This is the
+# self-hearing guard: Nero's own output leaking into the mic produces brief
+# blips, not sustained speech. Deliberately a constant, not config — if this
+# number needs tuning the heuristic is wrong and the honest fix is
+# `voice.barge_in = false`, not a knob.
+BARGE_IN_SUSTAINED_MS = 400
+
+
+def listen_for_barge_in(vad, on_detect, stop, on_error=None) -> threading.Thread:
+    """Watch the mic during playback; call `on_detect(prefix)` once on barge-in.
+
+    `prefix` is the audio buffered since speech began, handed forward so the
+    interrupting words are not lost when recording takes over.
+
+    Never raises into the caller: a microphone failure disables barge-in for the
+    session but must not end Nero's reply.
+    """
+    import numpy as np
+
+    needed = max(1, round(BARGE_IN_SUSTAINED_MS / 1000 * RECORD_SAMPLE_RATE / VAD_FRAME))
+
+    def watch():
+        try:
+            sd = _import_sd()
+            vad.reset()
+            run: list = []
+            with sd.InputStream(
+                samplerate=RECORD_SAMPLE_RATE, channels=1, dtype="float32"
+            ) as stream:
+                while not stop.is_set():
+                    data, _ = stream.read(VAD_FRAME)
+                    frame = np.asarray(data, dtype=np.float32).reshape(-1)
+                    if vad.is_speech(frame):
+                        run.append(frame.copy())
+                        if len(run) >= needed:
+                            on_detect(np.concatenate(run, axis=0).reshape(-1))
+                            return
+                    else:
+                        run.clear()
+        except Exception as exc:  # noqa: BLE001 — barge-in is optional, the reply is not
+            logger.debug("barge-in monitor stopped", exc_info=True)
+            if on_error is not None:
+                on_error(exc)
+
+    thread = threading.Thread(target=watch, daemon=True)
+    thread.start()
+    return thread
+
+
 def _mic_error(exc: Exception) -> Exception:
     if "permission" in str(exc).lower():
         return MicPermissionError(

@@ -400,3 +400,54 @@ class TestSpokenTracking:
         player.join(timeout=5)
         assert player._stop.is_set()
         assert fake_sd.stop_calls == [True]
+
+
+class TestBargeInMonitor:
+    def test_sustained_speech_fires_with_buffered_prefix(self, monkeypatch):
+        fake = make_fake_sd(frames=[np.full((512, 1), 0.4, dtype="float32")])
+        monkeypatch.setitem(sys.modules, "sounddevice", fake)
+        # 400ms / 32ms = 13 frames of continuous speech required.
+        vad = ScriptedVAD([True] * 20)
+        fired = []
+        stop = threading.Event()
+        thread = audio_io.listen_for_barge_in(vad, fired.append, stop)
+        thread.join(timeout=5)
+        assert len(fired) == 1
+        assert fired[0].size > 0
+        assert np.allclose(fired[0], 0.4)
+
+    def test_short_burst_does_not_fire(self, monkeypatch):
+        """Nero's own voice leaking into the mic produces brief blips; the
+        sustained gate is what stops Nero interrupting itself."""
+        fake = make_fake_sd(frames=[np.full((512, 1), 0.4, dtype="float32")])
+        monkeypatch.setitem(sys.modules, "sounddevice", fake)
+        vad = ScriptedVAD(([True] * 5 + [False] * 5) * 20)
+        fired = []
+        stop = threading.Event()
+        thread = audio_io.listen_for_barge_in(vad, fired.append, stop)
+        threading.Timer(0.3, stop.set).start()
+        thread.join(timeout=5)
+        assert fired == []
+
+    def test_stop_event_ends_the_thread(self, monkeypatch):
+        fake = make_fake_sd(frames=[np.zeros((512, 1), dtype="float32")])
+        monkeypatch.setitem(sys.modules, "sounddevice", fake)
+        vad = ScriptedVAD([False] * 100000)
+        stop = threading.Event()
+        thread = audio_io.listen_for_barge_in(vad, lambda prefix: None, stop)
+        stop.set()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+    def test_mic_failure_does_not_raise_into_the_caller(self, monkeypatch):
+        """A dead mic must not kill Nero's reply — the turn matters more."""
+        fake = make_fake_sd(frames=[np.zeros((512, 1), dtype="float32")],
+                            input_error_msg="Device unavailable")
+        monkeypatch.setitem(sys.modules, "sounddevice", fake)
+        stop = threading.Event()
+        errors = []
+        thread = audio_io.listen_for_barge_in(
+            ScriptedVAD([]), lambda prefix: None, stop, on_error=errors.append
+        )
+        thread.join(timeout=5)
+        assert len(errors) == 1
