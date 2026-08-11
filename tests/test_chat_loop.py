@@ -1,4 +1,5 @@
 import asyncio
+import io
 from types import SimpleNamespace
 
 import httpx
@@ -11,6 +12,17 @@ from nero.core.chat_loop import ChatLoop
 from nero.llm.client import APOLOGY, LLMClient, PendingToolCall, RoundResult
 from nero.skills.base import Skill, SkillMeta
 from nero.skills.registry import SkillRegistry
+
+
+def quiet_console() -> Console:
+    """A Console that swallows ChatLoop's output.
+
+    StringIO rather than os.devnull: nothing here reads the text back, so an
+    in-memory buffer needs no file handle (the old `open(...)` calls were never
+    closed) and names no per-platform device path. The hardcoded "/dev/null"
+    this replaces failed every windows-latest CI run with FileNotFoundError.
+    """
+    return Console(file=io.StringIO(), force_terminal=False)
 
 
 class StubTool(Skill):
@@ -491,7 +503,7 @@ def make_loop(inputs, client=None):
             raise EOFError
         return queue.pop(0)
 
-    console = Console(file=open("/dev/null", "w"), force_terminal=False)
+    console = quiet_console()
     loop = ChatLoop(client, console=console, assistant_name="Nero", input_fn=next_input)
     return loop, client
 
@@ -518,7 +530,7 @@ class TestChatLoopHistory:
                 raise EOFError
             return queue.pop(0)
 
-        console = Console(file=open("/dev/null", "w"), force_terminal=False)
+        console = quiet_console()
         return ChatLoop(client, console=console, assistant_name="Nero",
                         input_fn=next_input, history=history), client
 
@@ -650,7 +662,7 @@ class TestChatLoop:
         def raise_interrupt(prompt):
             raise KeyboardInterrupt
 
-        console = Console(file=open("/dev/null", "w"), force_terminal=False)
+        console = quiet_console()
         loop = ChatLoop(
             FakeLLMClient(), console=console, assistant_name="Nero", input_fn=raise_interrupt
         )
