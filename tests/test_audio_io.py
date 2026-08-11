@@ -65,6 +65,12 @@ def make_fake_sd(frames=None, input_error_msg=None, play_error=None):
 
     fake.play = play
     fake.wait = wait
+    fake.stop_calls = []
+
+    def stop():
+        fake.stop_calls.append(True)
+
+    fake.stop = stop
     return fake
 
 
@@ -299,6 +305,23 @@ class SentenceTTS:
             yield np.full(4, len(sentence), dtype=np.float32)
 
 
+class PrefetchingTTS:
+    """Pulls 3 sentences from the stream before yielding any audio.
+
+    Still one audio chunk per sentence, in order — just with the source
+    lookahead a real batching TTS engine could exhibit.
+    """
+
+    async def synthesize_stream(self, text_stream):
+        buffered = []
+        async for sentence in text_stream:
+            buffered.append(sentence)
+            if len(buffered) == 3:
+                break
+        for sentence in buffered:
+            yield np.full(4, len(sentence), dtype=np.float32)
+
+
 class TestSpokenTracking:
     def test_spoken_text_is_empty_before_anything_plays(self):
         player = Player(SentenceTTS(), 24000, play_fn=lambda a, sr: None)
@@ -313,8 +336,9 @@ class TestSpokenTracking:
         player.join(timeout=5)
         assert player.spoken_text() == "One. Two."
 
-    def test_queued_but_unplayed_sentences_are_not_reported(self):
+    def test_queued_but_unplayed_sentences_are_not_reported(self, monkeypatch):
         """The whole point of D3: only what reached the speaker is recorded."""
+        monkeypatch.setitem(sys.modules, "sounddevice", make_fake_sd())
         started = threading.Event()
         release = threading.Event()
 
@@ -333,10 +357,46 @@ class TestSpokenTracking:
         release.set()
         player.stop_now()
 
-    def test_stop_now_halts_playback(self):
+    def test_prefetched_sentences_are_not_reported_until_played(self, monkeypatch):
+        """Discriminates the play-counter from mere yielded-to-TTS tracking.
+
+        A real TTS engine can pull several sentences ahead of what it has
+        actually turned into played audio (batching/lookahead). This fake
+        mimics that: it drains three sentences from the stream (so all three
+        land in `_yielded`) before yielding any audio. If `spoken_text()`
+        were `" ".join(self._yielded)` with no `[:self._spoken]` slice, this
+        would report all three while only the first has reached the speaker.
+        """
+        monkeypatch.setitem(sys.modules, "sounddevice", make_fake_sd())
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocking_play(audio, sr):
+            started.set()
+            release.wait(timeout=5)
+
+        player = Player(PrefetchingTTS(), 24000, play_fn=blocking_play)
+        player.start()
+        player.enqueue("First.")
+        player.enqueue("Second.")
+        player.enqueue("Third.")
+        player.close()
+        assert started.wait(timeout=5)
+        # All three sentences were pulled by the TTS engine already...
+        assert player._yielded == ["First.", "Second.", "Third."]
+        # ...but only the first has been dispatched to play.
+        assert player.spoken_text() == "First."
+        release.set()
+        player.join(timeout=5)
+        assert player.spoken_text() == "First. Second. Third."
+
+    def test_stop_now_halts_playback(self, monkeypatch):
+        fake_sd = make_fake_sd()
+        monkeypatch.setitem(sys.modules, "sounddevice", fake_sd)
         player = Player(SentenceTTS(), 24000, play_fn=lambda a, sr: None)
         player.start()
         player.enqueue("One.")
         player.stop_now()
         player.join(timeout=5)
         assert player._stop.is_set()
+        assert fake_sd.stop_calls == [True]
