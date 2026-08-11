@@ -22,6 +22,13 @@ _KOKORO_VOICES = (
     "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin",
 )
 
+# silero VAD v5, ~2.3 MB. Downloaded like the Kokoro weights rather than bundled,
+# so the shipped binary stays the same size.
+_SILERO_VAD = (
+    "silero_vad.onnx",
+    "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx",
+)
+
 
 def voice_cache_dir() -> Path:
     path = Path(user_cache_dir("nero")) / "voice-models"
@@ -49,6 +56,17 @@ def ensure_kokoro_model(on_progress=None) -> tuple[Path, Path]:
     model_path = _ensure_file(cache, *_KOKORO_MODEL, on_progress=on_progress)
     voices_path = _ensure_file(cache, *_KOKORO_VOICES, on_progress=on_progress)
     return model_path, voices_path
+
+
+def vad_model_present() -> bool:
+    """True if the VAD model is already cached (no download needed)."""
+    dest = voice_cache_dir() / _SILERO_VAD[0]
+    return dest.exists() and dest.stat().st_size > 0
+
+
+def ensure_vad_model(on_progress=None) -> Path:
+    """Return the cached silero VAD model path, downloading it on first use."""
+    return _ensure_file(voice_cache_dir(), *_SILERO_VAD, on_progress=on_progress)
 
 
 def _ensure_file(cache: Path, name: str, url: str, on_progress=None) -> Path:
