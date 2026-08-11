@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import keyring
+import keyring.errors
 import yaml
 from platformdirs import user_config_dir
 from pydantic import ValidationError
@@ -73,7 +74,15 @@ class ConfigManager:
         entry = KEYRING_ENTRIES.get(provider)
         if entry is None:
             return None
-        return keyring.get_password(KEYRING_SERVICE, entry)
+        try:
+            return keyring.get_password(KEYRING_SERVICE, entry)
+        except keyring.errors.KeyringError:
+            # No backend (Linux CI, headless boxes) or a locked/denied keychain.
+            # Every caller already handles "no key stored", and `config`/`config
+            # show` render through here — letting this escape kills the menu.
+            # Deliberately read-only: set_api_key must still raise, or a failed
+            # write would look like success and lose the key.
+            return None
 
     def set_api_key(self, provider: str, value: str) -> None:
         entry = KEYRING_ENTRIES.get(provider)

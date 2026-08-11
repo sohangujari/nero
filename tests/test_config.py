@@ -1,3 +1,4 @@
+import keyring.errors
 import pytest
 from pydantic import ValidationError
 
@@ -122,6 +123,29 @@ class TestConfigManager:
         assert manager.get_api_key("ollama") is None
         with pytest.raises(ConfigError):
             manager.set_api_key("ollama", "anything")
+
+    def test_unusable_keyring_reads_as_not_set(self, manager, monkeypatch):
+        """Linux CI runners (and a locked/absent keychain anywhere) have no backend.
+
+        Reading must degrade to "no key", not blow up: `config`/`config show`
+        render the key through here, so an escaping KeyringError takes down the
+        whole menu.
+        """
+        def boom(svc, user):
+            raise keyring.errors.NoKeyringError("No recommended backend was available")
+
+        monkeypatch.setattr("keyring.get_password", boom)
+        assert manager.get_api_key("claude") is None
+
+    def test_unusable_keyring_still_fails_loudly_on_write(self, manager, monkeypatch):
+        """Writing is not the same call. A silently swallowed set_api_key would
+        report success and lose the user's key."""
+        def boom(svc, user, val):
+            raise keyring.errors.NoKeyringError("No recommended backend was available")
+
+        monkeypatch.setattr("keyring.set_password", boom)
+        with pytest.raises(keyring.errors.KeyringError):
+            manager.set_api_key("claude", "sk-ant-test-1234")
 
     def test_provider_needs_key(self, manager):
         assert manager.provider_needs_key("claude") is True
