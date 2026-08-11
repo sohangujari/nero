@@ -1,4 +1,5 @@
 import asyncio
+import io
 import threading
 import sys
 import types
@@ -191,3 +192,84 @@ def test_recorder_stops_capture_thread_on_keyboard_interrupt(monkeypatch):
     # If the finally didn't run, capture threads would still be alive.
     leftover = [t for t in threading.enumerate() if t.name.startswith("Thread-") and t.is_alive()]
     assert all("capture" not in t.name for t in leftover)
+
+
+class ScriptedVAD:
+    """Returns a scripted speech/silence verdict per frame."""
+
+    FRAME_SAMPLES = 512
+
+    def __init__(self, verdicts):
+        self._verdicts = list(verdicts)
+        self.reset_calls = 0
+
+    def reset(self):
+        self.reset_calls += 1
+
+    def is_speech(self, frame):
+        return self._verdicts.pop(0) if self._verdicts else False
+
+
+def vad_frames(count):
+    """`count` frames of the exact size record_until_silence reads."""
+    return [np.zeros((512, 1), dtype="float32") for _ in range(count)]
+
+
+class TestRecordUntilSilence:
+    def test_stops_after_configured_silence(self, monkeypatch):
+        fake = make_fake_sd(frames=vad_frames(1))
+        monkeypatch.setitem(sys.modules, "sounddevice", fake)
+        # speech, speech, then silence long enough to end the turn.
+        # 800ms / 32ms per frame = 25 silent frames.
+        vad = ScriptedVAD([True, True] + [False] * 25)
+        audio = audio_io.record_until_silence(
+            Console(file=io.StringIO()), vad, silence_ms=800
+        )
+        assert audio.ndim == 1
+        assert audio.size > 0
+
+    def test_prefix_audio_lands_at_the_head(self, monkeypatch):
+        """Barge-in hands its buffered audio forward; without this the user's
+        first word — the one that triggered the interrupt — is clipped."""
+        fake = make_fake_sd(frames=vad_frames(1))
+        monkeypatch.setitem(sys.modules, "sounddevice", fake)
+        vad = ScriptedVAD([True] + [False] * 25)
+        prefix = np.full(512, 0.7, dtype=np.float32)
+        audio = audio_io.record_until_silence(
+            Console(file=io.StringIO()), vad, silence_ms=800, prefix=prefix
+        )
+        assert np.allclose(audio[:512], 0.7)
+
+    def test_gives_up_when_speech_never_starts(self, monkeypatch):
+        fake = make_fake_sd(frames=vad_frames(1))
+        monkeypatch.setitem(sys.modules, "sounddevice", fake)
+        vad = ScriptedVAD([False] * 5000)
+        audio = audio_io.record_until_silence(
+            Console(file=io.StringIO()), vad, wait_for_speech_seconds=1
+        )
+        assert audio.size == 0
+
+    def test_hard_cap_stops_an_endless_utterance(self, monkeypatch):
+        fake = make_fake_sd(frames=vad_frames(1))
+        monkeypatch.setitem(sys.modules, "sounddevice", fake)
+        vad = ScriptedVAD([True] * 100000)
+        audio = audio_io.record_until_silence(
+            Console(file=io.StringIO()), vad, max_utterance_seconds=1
+        )
+        # 1 second at 16 kHz, allowing one frame of overshoot.
+        assert 0 < audio.size <= 16000 + 512
+
+    def test_vad_state_is_reset_per_recording(self, monkeypatch):
+        fake = make_fake_sd(frames=vad_frames(1))
+        monkeypatch.setitem(sys.modules, "sounddevice", fake)
+        vad = ScriptedVAD([True] + [False] * 25)
+        audio_io.record_until_silence(Console(file=io.StringIO()), vad, silence_ms=800)
+        assert vad.reset_calls == 1
+
+    def test_mic_permission_error_is_translated(self, monkeypatch):
+        fake = make_fake_sd(frames=vad_frames(1), input_error_msg="Permission denied")
+        monkeypatch.setitem(sys.modules, "sounddevice", fake)
+        with pytest.raises(MicPermissionError):
+            audio_io.record_until_silence(
+                Console(file=io.StringIO()), ScriptedVAD([]), silence_ms=800
+            )

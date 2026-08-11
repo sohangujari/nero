@@ -18,6 +18,7 @@ logger = logging.getLogger("nero.voice.audio")  # DEBUG(hang)
 
 RECORD_SAMPLE_RATE = 16000
 _BLOCK = 1600  # 0.1s blocks at 16 kHz
+VAD_FRAME = 512  # 32 ms at 16 kHz — the only size silero accepts at this rate
 
 
 def _import_sd():
@@ -67,6 +68,61 @@ def record_until_enter(console, input_fn: Callable[[], str]):
 
     if errors:
         raise _mic_error(errors[0])
+    if not blocks:
+        return np.zeros(0, dtype=np.float32)
+    return np.concatenate(blocks, axis=0).reshape(-1).astype(np.float32)
+
+
+def record_until_silence(
+    console,
+    vad,
+    *,
+    silence_ms: int = 800,
+    max_utterance_seconds: int = 180,
+    wait_for_speech_seconds: int = 30,
+    prefix=None,
+) -> "np.ndarray":
+    """Record until the speaker stops, using VAD rather than a keypress.
+
+    Returns mono float32 at 16 kHz, empty if speech never started. `prefix` is
+    prepended verbatim — barge-in passes the audio it already buffered so the
+    interrupting word is not clipped.
+    """
+    import numpy as np
+
+    sd = _import_sd()
+    vad.reset()
+    console.print("[bold red]●[/bold red] Listening — I'll stop when you do")
+
+    blocks: list = list([] if prefix is None else [np.asarray(prefix, dtype=np.float32).reshape(-1)])
+    silent_needed = max(1, round(silence_ms / 1000 * RECORD_SAMPLE_RATE / VAD_FRAME))
+    max_frames = round(max_utterance_seconds * RECORD_SAMPLE_RATE / VAD_FRAME)
+    wait_frames = round(wait_for_speech_seconds * RECORD_SAMPLE_RATE / VAD_FRAME)
+
+    started = False
+    silent_run = 0
+    try:
+        with sd.InputStream(
+            samplerate=RECORD_SAMPLE_RATE, channels=1, dtype="float32"
+        ) as stream:
+            for index in range(max_frames):
+                data, _ = stream.read(VAD_FRAME)
+                frame = np.asarray(data, dtype=np.float32).reshape(-1)
+                speech = vad.is_speech(frame)
+                if speech:
+                    started = True
+                    silent_run = 0
+                    blocks.append(frame.copy())
+                elif started:
+                    silent_run += 1
+                    blocks.append(frame.copy())
+                    if silent_run >= silent_needed:
+                        break
+                elif index >= wait_frames:
+                    return np.zeros(0, dtype=np.float32)
+    except sd.PortAudioError as exc:
+        raise _mic_error(exc) from exc
+
     if not blocks:
         return np.zeros(0, dtype=np.float32)
     return np.concatenate(blocks, axis=0).reshape(-1).astype(np.float32)
