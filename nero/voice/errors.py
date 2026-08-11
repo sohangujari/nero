@@ -23,3 +23,15 @@ class PlaybackError(VoiceError):
 
 class TTSLoadError(VoiceError):
     """A TTS engine's model files could not be loaded."""
+
+
+class VADUnavailableError(VoiceError):
+    """The voice-activity model could not be downloaded or loaded."""
+
+
+class BargeIn(Exception):
+    """The user spoke over Nero. Not an error — a control-flow signal.
+
+    Deliberately not a VoiceError: it is raised out of `tap()` to unwind a
+    normal turn, and must not be caught by generic voice error handling.
+    """
