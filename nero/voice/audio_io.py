@@ -186,6 +186,8 @@ class Player:
         self._thread: threading.Thread | None = None
         self._error: Exception | None = None
         self._stop = threading.Event()
+        self._yielded: list[str] = []
+        self._spoken = 0
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -202,6 +204,28 @@ class Player:
             self._thread.join(timeout)
         if self._error is not None:
             raise self._error
+
+    def spoken_text(self) -> str:
+        """The sentences that actually reached the speaker, in order.
+
+        A sentence interrupted halfway counts as spoken (sentence-level
+        granularity is the accepted ceiling).
+        """
+        return " ".join(self._yielded[: self._spoken])
+
+    def stop_now(self) -> None:
+        """Cut playback off immediately — barge-in, not end-of-turn.
+
+        `shutdown()` drains politely; this stops the device mid-chunk, which is
+        the difference between interrupting Nero and waiting for the sentence.
+        """
+        self._stop.set()
+        try:
+            sd = _import_sd()
+            sd.stop()
+        except Exception:  # noqa: BLE001 — never let a device quirk mask the interrupt
+            logger.debug("sd.stop() failed during barge-in", exc_info=True)
+        self._queue.put(self._SENTINEL)
 
     def shutdown(self, timeout: float = 5.0) -> None:
         """Stop the playback thread and wait, bounded. Idempotent and safe to
@@ -254,6 +278,7 @@ class Player:
                     return
                 # DEBUG(hang) sentence handed to the TTS engine
                 logger.debug("STAGE 5c: synthesizing %r", item)
+                self._yielded.append(item)
                 yield item
 
         async for audio in self._tts.synthesize_stream(sentences()):
@@ -265,5 +290,6 @@ class Player:
                 )
             else:
                 logger.debug("STAGE 5: audio chunk #%d from TTS", _chunks)  # DEBUG(hang)
+            self._spoken += 1
             await loop.run_in_executor(None, self._play, audio, self._sample_rate)
             logger.debug("STAGE 7c: chunk #%d dispatched+played", _chunks)  # DEBUG(hang)

@@ -289,3 +289,54 @@ class TestRecordUntilSilence:
             audio_io.record_until_silence(
                 Console(file=io.StringIO()), ScriptedVAD([]), silence_ms=800
             )
+
+
+class SentenceTTS:
+    """One audio chunk per sentence, mirroring the real TTSEngine contract."""
+
+    async def synthesize_stream(self, text_stream):
+        async for sentence in text_stream:
+            yield np.full(4, len(sentence), dtype=np.float32)
+
+
+class TestSpokenTracking:
+    def test_spoken_text_is_empty_before_anything_plays(self):
+        player = Player(SentenceTTS(), 24000, play_fn=lambda a, sr: None)
+        assert player.spoken_text() == ""
+
+    def test_spoken_text_reports_played_sentences_in_order(self):
+        player = Player(SentenceTTS(), 24000, play_fn=lambda a, sr: None)
+        player.start()
+        player.enqueue("One.")
+        player.enqueue("Two.")
+        player.close()
+        player.join(timeout=5)
+        assert player.spoken_text() == "One. Two."
+
+    def test_queued_but_unplayed_sentences_are_not_reported(self):
+        """The whole point of D3: only what reached the speaker is recorded."""
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocking_play(audio, sr):
+            started.set()
+            release.wait(timeout=5)
+
+        player = Player(SentenceTTS(), 24000, play_fn=blocking_play)
+        player.start()
+        player.enqueue("First.")
+        player.enqueue("Second.")
+        player.enqueue("Third.")
+        assert started.wait(timeout=5)
+        # Only sentence 1 has been dispatched; 2 and 3 are still queued.
+        assert player.spoken_text() == "First."
+        release.set()
+        player.stop_now()
+
+    def test_stop_now_halts_playback(self):
+        player = Player(SentenceTTS(), 24000, play_fn=lambda a, sr: None)
+        player.start()
+        player.enqueue("One.")
+        player.stop_now()
+        player.join(timeout=5)
+        assert player._stop.is_set()
