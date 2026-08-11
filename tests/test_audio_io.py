@@ -266,6 +266,22 @@ class TestRecordUntilSilence:
         audio_io.record_until_silence(Console(file=io.StringIO()), vad, silence_ms=800)
         assert vad.reset_calls == 1
 
+    def test_prefix_is_discarded_when_speech_never_starts(self, monkeypatch):
+        """A spurious barge-in (Nero hearing itself) must not reach the STT.
+
+        The prefix can contain Nero's own voice. If no real speech follows, we
+        must return empty — otherwise Nero's words get transcribed as the
+        user's and fed back to the model.
+        """
+        fake = make_fake_sd(frames=vad_frames(1))
+        monkeypatch.setitem(sys.modules, "sounddevice", fake)
+        vad = ScriptedVAD([False] * 5000)
+        prefix = np.full(512, 0.7, dtype=np.float32)
+        audio = audio_io.record_until_silence(
+            Console(file=io.StringIO()), vad, wait_for_speech_seconds=1, prefix=prefix
+        )
+        assert audio.size == 0
+
     def test_mic_permission_error_is_translated(self, monkeypatch):
         fake = make_fake_sd(frames=vad_frames(1), input_error_msg="Permission denied")
         monkeypatch.setitem(sys.modules, "sounddevice", fake)

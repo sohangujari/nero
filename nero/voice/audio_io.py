@@ -86,7 +86,12 @@ def record_until_silence(
 
     Returns mono float32 at 16 kHz, empty if speech never started. `prefix` is
     prepended verbatim — barge-in passes the audio it already buffered so the
-    interrupting word is not clipped.
+    interrupting word is not clipped. Exception: if no real speech follows
+    `prefix` before `wait_for_speech_seconds` elapses, `prefix` is discarded
+    and empty audio is returned. This matters because barge-in can fire on
+    Nero hearing its own voice through the speakers; without this, a spurious
+    trigger with no real user speech would hand Nero's own words back to the
+    STT engine as if the user had said them.
     """
     import numpy as np
 
@@ -119,6 +124,10 @@ def record_until_silence(
                     if silent_run >= silent_needed:
                         break
                 elif index >= wait_frames:
+                    # Discard `prefix` here too. A spurious barge-in (Nero
+                    # hearing itself) puts Nero's own speech in `prefix`; with
+                    # no real speech following it, returning it would feed
+                    # Nero's words back to the STT as if the user said them.
                     return np.zeros(0, dtype=np.float32)
     except sd.PortAudioError as exc:
         raise _mic_error(exc) from exc
