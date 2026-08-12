@@ -13,8 +13,9 @@ import litellm
 from rich.markup import escape
 
 from nero.llm.ollama_adapter import OllamaModelError
-from nero.voice.audio_io import RECORD_SAMPLE_RATE
+from nero.voice.audio_io import RECORD_SAMPLE_RATE, listen_for_barge_in
 from nero.voice.errors import (
+    BargeIn,
     MicPermissionError,
     MicUnavailableError,
     PlaybackError,
@@ -67,6 +68,8 @@ class VoiceLoop:
         input_fn: Callable[[str], str] | None = None,
         once: bool = False,
         history=None,
+        vad=None,
+        barge_in: bool = False,
     ):
         self.client = client
         self.stt = stt
@@ -79,6 +82,11 @@ class VoiceLoop:
         self.once = once
         self.history = history
         self.messages: list[dict] = history.recent() if history else []
+        self.vad = vad
+        self.barge_in = barge_in
+        self._pending_prefix = None
+        self._barge_in_broken = False
+        self._hinted = False
 
     def run(self) -> None:
         self.console.print(
@@ -86,15 +94,17 @@ class VoiceLoop:
             "Say [dim]stop[/dim] or press Ctrl+C to leave.\n"
         )
         while True:
+            if self._pending_prefix is None:
+                try:
+                    self.input_fn("🎙️  Press Enter to start speaking... ")
+                except (KeyboardInterrupt, EOFError) as exc:
+                    if isinstance(exc, KeyboardInterrupt):
+                        _debug_dump_interrupt("interrupted at the prompt")
+                    self._goodbye()
+                    return
             try:
-                self.input_fn("🎙️  Press Enter to start speaking... ")
-            except (KeyboardInterrupt, EOFError) as exc:
-                if isinstance(exc, KeyboardInterrupt):
-                    _debug_dump_interrupt("interrupted at the prompt")
-                self._goodbye()
-                return
-            try:
-                audio = self.record()
+                prefix, self._pending_prefix = self._pending_prefix, None
+                audio = self.record(prefix=prefix)
             except MicPermissionError as exc:
                 self.console.print(
                     f"\n[red]Microphone access was denied by the OS.[/red] {exc}\n"
@@ -143,10 +153,38 @@ class VoiceLoop:
         logger.debug("STAGE 1c: player built, starting playback thread")  # DEBUG(hang)
         player.start()
 
+        barge_event = threading.Event()
+        stop_monitor = threading.Event()
+        monitor = None
+        prefix_holder: list = []
+
+        def on_barge_in(prefix):
+            prefix_holder.append(prefix)
+            barge_event.set()
+            player.stop_now()
+
+        def on_monitor_error(_exc):
+            # Announced immediately, on its own line: a notice that arrives after
+            # the reply is useless, because the interrupt window it warns about
+            # has already closed.
+            if not self._barge_in_broken:
+                self._barge_in_broken = True
+                self.console.print(
+                    "\n[dim]Barge-in stopped working this session "
+                    "(microphone unavailable). Press Ctrl+C to interrupt.[/dim]"
+                )
+
+        if self.barge_in and self.vad is not None and not self._barge_in_broken:
+            monitor = listen_for_barge_in(
+                self.vad, on_barge_in, stop_monitor, on_error=on_monitor_error
+            )
+
         _t_turn = time.monotonic()  # DEBUG(hang)
         _seen = {"first_chunk": False, "sentences": 0}  # DEBUG(hang)
 
         def tap(chunk: str) -> None:
+            if barge_event.is_set():
+                raise BargeIn
             if not _seen["first_chunk"]:  # DEBUG(hang) STAGE 3: first LLM chunk
                 _seen["first_chunk"] = True
                 logger.debug(
@@ -191,6 +229,8 @@ class VoiceLoop:
                 "STAGE 7b: turn complete, playback drained at %.2fs",
                 time.monotonic() - _t_turn,
             )
+            if barge_event.is_set():
+                raise BargeIn
             self.console.print()
             logger.debug("history after voice turn: %r", self.messages)
             # MAX_TOOL_ROUNDS exhaustion leaves a tool message last instead of
@@ -200,6 +240,24 @@ class VoiceLoop:
                     self.messages[turn_start]["content"],
                     self.messages[-1]["content"],
                 )
+            return True
+        except BargeIn:
+            spoken = player.spoken_text()
+            if prefix_holder:
+                self._pending_prefix = prefix_holder[-1]
+            if not spoken:
+                # Nothing reached the speaker: drop the whole turn, exactly like
+                # the Ctrl+C path. Persisting an assistant message with no
+                # content would leave a malformed exchange in context.
+                del self.messages[turn_start:]
+                return True
+            reply = f"{spoken} [interrupted]"
+            del self.messages[turn_start + 1 :]
+            self.messages.append({"role": "assistant", "content": reply})
+            self.console.print()
+            self._hint_once()
+            if self.history is not None:
+                self.history.append_turn(self.messages[turn_start]["content"], reply)
             return True
         except KeyboardInterrupt:
             _debug_dump_interrupt("interrupted during turn")
@@ -244,10 +302,27 @@ class VoiceLoop:
             self.console.print(f"\n[red]Something went wrong with that turn:[/red] {exc}")
             return True
         finally:
+            stop_monitor.set()
+            if monitor is not None:
+                monitor.join(timeout=2)
             # Safety net: on any abnormal exit (Ctrl+C, auth/network error) the
             # success path's close()/join() never ran, which would leave the
             # playback thread parked on the queue and hang interpreter shutdown.
             player.shutdown()
+
+    def _hint_once(self) -> None:
+        """Explain barge-in the first time it fires, then never again.
+
+        On laptop speakers Nero can hear itself; without this the behavior reads
+        as a bug rather than a toggle. Repeating it every turn would be noise.
+        """
+        if self._hinted:
+            return
+        self._hinted = True
+        self.console.print(
+            "[dim]Interrupted by voice. On speakers? Disable with "
+            "nero config set voice.barge_in false[/dim]"
+        )
 
     def _goodbye(self) -> None:
         self.console.print(f"\n[dim]{self.assistant_name} signing off. Bye![/dim]")

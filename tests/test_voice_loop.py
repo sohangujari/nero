@@ -1,5 +1,6 @@
 from rich.console import Console
 
+import nero.voice.voice_loop as voice_loop_module
 from nero.voice.errors import MicPermissionError, TTSLoadError
 from nero.voice.voice_loop import VoiceLoop
 
@@ -19,6 +20,8 @@ class FakePlayer:
         self.sentences = []
         self.started = self.closed = self.joined = False
         self.shutdown_called = False
+        self.stop_now_calls = 0
+        self._spoken = None
         FakePlayer.instances.append(self)
 
     def start(self):
@@ -37,6 +40,16 @@ class FakePlayer:
         # Always called from _handle_turn's finally, so an aborted turn can't
         # leave the playback thread parked.
         self.shutdown_called = True
+
+    def stop_now(self):
+        self.stop_now_calls += 1
+
+    def spoken_text(self):
+        # Barge-in tests set _spoken explicitly; otherwise derive it from
+        # whatever was actually enqueued, matching the real Player's semantics.
+        if self._spoken is not None:
+            return self._spoken
+        return " ".join(self.sentences)
 
 
 class FakeClient:
@@ -59,7 +72,7 @@ def make_loop(transcripts, chunks, once=False, record=None):
     return VoiceLoop(
         client=FakeClient(chunks),
         stt=FakeSTT(transcripts),
-        record=record or (lambda: object()),
+        record=record or (lambda prefix=None: object()),
         make_player=FakePlayer,
         console=Console(),
         assistant_name="Nero",
@@ -96,7 +109,7 @@ def test_exit_word_with_punctuation_exits():
 
 
 def test_mic_permission_error_is_friendly(capsys):
-    def boom():
+    def boom(prefix=None):
         raise MicPermissionError("denied")
 
     loop = make_loop(["unused"], ["unused"], record=boom)
@@ -188,7 +201,7 @@ def test_aborted_turn_still_shuts_player_down():
     inputs = iter([""] * 5)
     loop = VoiceLoop(
         client=InterruptingClient(), stt=FakeSTT(["hello"]),
-        record=lambda: object(), make_player=FakePlayer,
+        record=lambda prefix=None: object(), make_player=FakePlayer,
         console=Console(), assistant_name="Nero",
         input_fn=lambda *_a: next(inputs), once=True,
     )
@@ -220,7 +233,7 @@ def _run_failing_voice_turn(error):
     inputs = iter([""] * 5)
     VoiceLoop(
         client=FailingClient(), stt=FakeSTT(["hello"]),
-        record=lambda: object(), make_player=FakePlayer,
+        record=lambda prefix=None: object(), make_player=FakePlayer,
         console=console, assistant_name="Nero",
         input_fn=lambda *_a: next(inputs), once=True,
     ).run()
@@ -274,7 +287,7 @@ class FakeHistory:
 def _history_loop(transcripts, reply, history):
     return VoiceLoop(
         client=AppendingClient(reply), stt=FakeSTT(transcripts),
-        record=lambda: object(), make_player=FakePlayer,
+        record=lambda prefix=None: object(), make_player=FakePlayer,
         console=Console(), assistant_name="Nero",
         input_fn=lambda *_a: "", once=True, history=history,
     )
@@ -310,9 +323,109 @@ def test_voice_max_rounds_fallthrough_not_appended():
     hist = FakeHistory()
     loop = VoiceLoop(
         client=MaxRoundsClient(), stt=FakeSTT(["Hello."]),
-        record=lambda: object(), make_player=FakePlayer,
+        record=lambda prefix=None: object(), make_player=FakePlayer,
         console=Console(), assistant_name="Nero",
         input_fn=lambda *_a: "", once=True, history=hist,
     )
     loop.run()
     assert hist.appended == []
+
+
+# --- Barge-in: only what was heard is ever recorded ---
+def make_loop_with_barge_in(spoken="", generated=None, prefix_value=None, turns=1):
+    """A VoiceLoop wired for barge-in where the fake monitor interrupts every
+    turn immediately. `spoken` is what FakePlayer.spoken_text() reports back
+    (what actually reached the speaker); `generated` (defaults to `spoken`) is
+    what the fake client streams, standing in for LLM text that ran ahead of
+    playback. No real microphone/thread involved: `listen_for_barge_in` is
+    replaced with a fake that fires `on_detect` synchronously.
+    """
+    FakePlayer.instances = []
+    generated = spoken if generated is None else generated
+
+    def fake_listen_for_barge_in(vad, on_detect, stop, on_error=None):
+        on_detect(prefix_value)
+
+        class _DummyThread:
+            def join(self, timeout=None):
+                pass
+
+        return _DummyThread()
+
+    voice_loop_module.listen_for_barge_in = fake_listen_for_barge_in
+
+    recorded_prefixes: list = []
+
+    def record(prefix=None):
+        recorded_prefixes.append(prefix)
+        return object()
+
+    def make_player():
+        player = FakePlayer()
+        player._spoken = spoken
+        loop._last_player = player
+        return player
+
+    history = FakeHistory()
+    # One real "question" per turn, then "stop" to end the session cleanly.
+    transcripts = ["What's the weather?"] * turns + ["stop"]
+    inputs = iter([""] * 20)
+    loop = VoiceLoop(
+        client=FakeClient([generated]),
+        stt=FakeSTT(transcripts),
+        record=record,
+        make_player=make_player,
+        console=Console(width=200),
+        assistant_name="Nero",
+        input_fn=lambda *_a: next(inputs),
+        history=history,
+        vad=object(),
+        barge_in=True,
+    )
+    loop._recorded_prefixes = recorded_prefixes
+    return loop, history
+
+
+class TestBargeIn:
+    def test_spoken_text_plus_marker_is_recorded(self):
+        """What the user heard is what the model is told it said."""
+        loop, history = make_loop_with_barge_in(spoken="It's 14C in Oslo.")
+        loop.run()
+        assert history.appended
+        _user, assistant = history.appended[-1]
+        assert assistant == "It's 14C in Oslo. [interrupted]"
+
+    def test_unspoken_sentences_are_not_recorded(self):
+        loop, history = make_loop_with_barge_in(
+            spoken="It's 14C in Oslo.", generated="It's 14C in Oslo. Rain eases by six."
+        )
+        loop.run()
+        _user, assistant = history.appended[-1]
+        assert "Rain eases by six" not in assistant
+
+    def test_barge_in_before_any_sentence_rolls_back_entirely(self):
+        """Nothing spoken -> no assistant text -> the whole turn is dropped,
+        including the user message. A user turn with no reply is malformed."""
+        loop, history = make_loop_with_barge_in(spoken="")
+        loop.run()
+        assert history.appended == []
+        assert loop.messages == []
+
+    def test_barge_in_stops_the_player_immediately(self):
+        loop, _history = make_loop_with_barge_in(spoken="One.")
+        loop.run()
+        assert loop._last_player.stop_now_calls == 1
+
+    def test_prefix_audio_is_carried_into_the_next_recording(self):
+        loop, _history = make_loop_with_barge_in(spoken="One.", prefix_value=0.7)
+        loop.run()
+        assert loop._recorded_prefixes and loop._recorded_prefixes[-1] is not None
+
+    def test_first_barge_in_prints_the_speaker_hint_once(self, capsys):
+        """Spec D4: barge-in ships on, so a speaker user who sees Nero cut
+        itself off needs to know it is a setting. Once per session
+        only — a hint on every interruption becomes noise."""
+        loop, _history = make_loop_with_barge_in(spoken="One.", turns=2)
+        loop.run()
+        out = capsys.readouterr().out
+        assert out.count("voice.barge_in") == 1
