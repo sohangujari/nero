@@ -424,11 +424,15 @@ class TestBargeIn:
         """Fix 1: this is the empty/rollback path -- the self-trigger case a
         speaker user hits most often. It must not fall silent: the user needs
         to see something happened and learn barge-in is a setting they can
-        turn off, exactly like the non-empty branch already does."""
+        turn off, exactly like the non-empty branch already does. Per D3,
+        "Interrupted." must also appear -- it's what carries the signal on
+        the second and later self-triggers, once `_hint_once()` has already
+        spoken and gone quiet for the rest of the session."""
         loop, history = make_loop_with_barge_in(monkeypatch, spoken="")
         loop.run()
         out = capsys.readouterr().out
         assert "voice.barge_in" in out
+        assert "Interrupted." in out
         # Rollback behavior itself must be unchanged by the fix.
         assert history.appended == []
         assert loop.messages == []

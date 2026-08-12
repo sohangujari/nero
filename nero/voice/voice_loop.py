@@ -259,6 +259,16 @@ class VoiceLoop:
                 # the Ctrl+C path. Persisting an assistant message with no
                 # content would leave a malformed exchange in context.
                 del self.messages[turn_start:]
+                # Deliberately asymmetric with the non-empty branch below: this
+                # path has no truncated reply text on screen to make the
+                # interruption self-evident, and `_hint_once()` only speaks
+                # once per session -- on the second and later self-triggers it
+                # says nothing at all. "Interrupted." is what has to carry
+                # that signal every time, so it's printed here verbatim,
+                # matching the KeyboardInterrupt branch (spec D3). Do not add
+                # it to the non-empty branch below -- the visible truncated
+                # text already makes that case obvious, and it would be noise.
+                self.console.print("\n[dim]Interrupted.[/dim]")
                 return True
             reply = f"{spoken} [interrupted]"
             del self.messages[turn_start + 1 :]
