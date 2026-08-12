@@ -264,3 +264,44 @@ class TestBargeInActive:
             {"voice": {"barge_in": barge_in, "vad": {"enabled": vad_enabled}}}
         )
         assert config.voice.barge_in_active is expected
+
+
+class TestBuildVad:
+    def test_returns_none_and_warns_when_the_model_will_not_load(self, monkeypatch, capsys):
+        from nero import cli
+        from nero.config.schema import NeroConfig
+        from nero.voice.errors import VADUnavailableError
+        from rich.console import Console
+
+        monkeypatch.setattr(cli, "ensure_vad_model", lambda on_progress=None: "/nope.onnx")
+
+        def boom(*a, **k):
+            raise VADUnavailableError("corrupt")
+
+        monkeypatch.setattr(cli, "VoiceActivityDetector", boom)
+        console = Console()
+        assert cli._build_vad(NeroConfig(), console) is None
+        assert "press Enter" in capsys.readouterr().out
+
+    def test_returns_none_without_warning_when_vad_is_disabled(self, monkeypatch, capsys):
+        from nero import cli
+        from nero.config.schema import NeroConfig
+        from rich.console import Console
+
+        config = NeroConfig()
+        config.voice.vad.enabled = False
+        assert cli._build_vad(config, Console()) is None
+        assert capsys.readouterr().out == ""
+
+    def test_download_failure_also_degrades(self, monkeypatch, capsys):
+        import httpx
+        from nero import cli
+        from nero.config.schema import NeroConfig
+        from rich.console import Console
+
+        def boom(on_progress=None):
+            raise httpx.ConnectError("offline")
+
+        monkeypatch.setattr(cli, "ensure_vad_model", boom)
+        assert cli._build_vad(NeroConfig(), Console()) is None
+        assert "press Enter" in capsys.readouterr().out

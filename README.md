@@ -90,8 +90,28 @@ nero talk          # speak; Nero transcribes, answers, and speaks back
 nero talk --once   # a single exchange, then exit
 ```
 
-Press Enter to start recording, Enter again to stop. What Nero heard is printed
-before it replies. Say "stop" (or "exit") to leave, or press Ctrl+C.
+Press Enter to start speaking — Nero stops recording on its own when you stop
+talking. Talk over Nero while it's replying to interrupt it; it stops, and what
+it managed to say is kept in the conversation so your follow-up still makes
+sense.
+
+On laptop speakers Nero can occasionally hear itself and cut its own reply
+short. Headphones fix it, or turn it off with
+`nero config set voice.barge_in false`.
+
+Tuning (all optional):
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `voice.vad.enabled` | `true` | Master switch. `false` restores press-Enter-to-stop. |
+| `voice.barge_in` | `true` | Interrupt Nero by talking. Inert when `vad.enabled` is false. |
+| `voice.vad.silence_ms` | `800` | Silence that ends your turn. Raise it if you're cut off mid-thought. |
+| `voice.vad.threshold` | `0.5` | Speech sensitivity. Raise it in a noisy room. |
+| `voice.vad.max_utterance_seconds` | `180` | Hard cap on one recording. |
+| `voice.vad.wait_for_speech_seconds` | `30` | How long Nero waits for you to start. |
+
+What Nero heard is printed before it replies. Say "stop" (or "exit") to leave,
+or press Ctrl+C.
 
 The default voice is `af_bella` (female); the male equivalent is `am_michael`.
 Change it — along with the STT model and TTS engine — in `nero config` (the

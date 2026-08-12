@@ -37,10 +37,12 @@ from nero.llm.client import LLMClient
 from nero.memory.history_store import HistoryStore, default_history_path
 from nero.skills.registry import build_registry
 from nero.voice import audio_io
-from nero.voice.audio_io import Player
+from nero.voice.audio_io import Player, record_until_enter, record_until_silence
 from nero.voice.errors import TTSLoadError, VoiceDependencyError
+from nero.voice.models import ensure_vad_model
 from nero.voice.stt import FasterWhisperSTT
 from nero.voice.tts import VOICE_CATALOG, build_tts
+from nero.voice.vad import VoiceActivityDetector
 from nero.voice.voice_loop import VoiceLoop
 
 PROVIDERS = ["claude", "openai", "gemini", "ollama"]
@@ -54,6 +56,7 @@ app = typer.Typer(add_completion=False, invoke_without_command=True)
 config_app = typer.Typer(invoke_without_command=True, help="View and edit Nero's configuration.")
 app.add_typer(config_app, name="config")
 console = Console()
+logger = logging.getLogger("nero.cli")
 
 
 def _enable_debug_logging() -> None:
@@ -248,8 +251,20 @@ def talk(
     def make_player():
         return Player(tts, sample_rate=tts.SAMPLE_RATE)
 
-    def record():
-        return audio_io.record_until_enter(console, console.input)
+    vad = _build_vad(config, console)
+    if vad is not None:
+        def record(prefix=None):
+            return record_until_silence(
+                console,
+                vad,
+                silence_ms=config.voice.vad.silence_ms,
+                max_utterance_seconds=config.voice.vad.max_utterance_seconds,
+                wait_for_speech_seconds=config.voice.vad.wait_for_speech_seconds,
+                prefix=prefix,
+            )
+    else:
+        def record(prefix=None):
+            return record_until_enter(console, lambda: input())
 
     try:
         VoiceLoop(
@@ -262,6 +277,8 @@ def talk(
             sample_rate=audio_io.RECORD_SAMPLE_RATE,
             once=once,
             history=_build_history(config),
+            vad=vad,
+            barge_in=config.voice.barge_in_active and vad is not None,
         ).run()
     finally:
         # We're exiting; a further Ctrl+C would only corrupt teardown output.
@@ -279,6 +296,27 @@ def _build_history(config: NeroConfig) -> HistoryStore | None:
         session_id=uuid.uuid4().hex,
         max_turns=config.memory.max_history_turns,
     )
+
+
+def _build_vad(config: NeroConfig, console: Console) -> VoiceActivityDetector | None:
+    """The one place the VAD is constructed — both `nero talk` paths use it.
+
+    Returns None when VAD is off or unavailable. VAD is an enhancement, never a
+    prerequisite: no failure here may cost the user a conversation, so every
+    problem degrades to press-Enter-to-stop with a single printed line.
+    """
+    if not config.voice.vad.enabled:
+        return None
+    try:
+        path = ensure_vad_model()
+        return VoiceActivityDetector(path, threshold=config.voice.vad.threshold)
+    except Exception as exc:  # noqa: BLE001 — download, load, or disk failure all degrade
+        logger.debug("VAD unavailable: %s", exc, exc_info=True)
+        console.print(
+            "[yellow]Voice activity detection is unavailable "
+            f"({exc}).[/yellow] Falling back to press Enter to stop recording."
+        )
+        return None
 
 
 def _build_registry(manager: ConfigManager, config: NeroConfig):
@@ -510,6 +548,8 @@ def _config_table(manager: ConfigManager, config: NeroConfig) -> Table:
         table.add_row("STT Model", voice.stt.model)
         table.add_row("TTS Engine", voice.tts.engine)
         table.add_row("Voice", f"{voice.tts.voice_id} ({_voice_gender(voice.tts.voice_id)})")
+        table.add_row("VAD Auto-Stop", "yes" if voice.vad.enabled else "no")
+        table.add_row("Barge-in", "yes" if voice.barge_in_active else "no")
     enabled = [name for name, on in config.skills.enabled.model_dump().items() if on]
     table.add_row("Skills Enabled", ", ".join(enabled) if enabled else "none")
     if config.skills.weather.default_location:
@@ -559,6 +599,12 @@ def _interactive_menu() -> None:
         memory = config.memory
         body.add_row("12.", "Memory", f"{'yes' if memory.enabled else 'no'}  [dim]\\[toggle][/dim]")
         body.add_row("13.", "History Turns", str(memory.max_history_turns))
+        body.add_row(
+            "14.", "Barge-in", f"{'yes' if voice.barge_in_active else 'no'}  [dim]\\[toggle][/dim]"
+        )
+        body.add_row(
+            "15.", "VAD Auto-Stop", f"{'yes' if voice.vad.enabled else 'no'}  [dim]\\[toggle][/dim]"
+        )
         console.print(Panel(body, title="nero config", subtitle="Enter a number to edit, Enter to finish"))
 
         choice = Prompt.ask("Choice", default="", show_default=False, console=console).strip()
@@ -621,8 +667,12 @@ def _interactive_menu() -> None:
                     manager.set_value("memory.max_history_turns", new_turns)
                 except ConfigError:
                     console.print("[yellow]Enter a whole number of 0 or more.[/yellow]")
+        elif choice == "14":
+            manager.set_value("voice.barge_in", str(not voice.barge_in).lower())
+        elif choice == "15":
+            manager.set_value("voice.vad.enabled", str(not voice.vad.enabled).lower())
         else:
-            console.print("[yellow]Pick 1–13, or press Enter to finish.[/yellow]")
+            console.print("[yellow]Pick 1–15, or press Enter to finish.[/yellow]")
             continue
         console.print("[green]Saved.[/green]\n")
 
