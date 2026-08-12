@@ -155,29 +155,10 @@ class VoiceLoop:
 
         barge_event = threading.Event()
         stop_monitor = threading.Event()
+        # Initialised before the try so the finally block can always reference
+        # it safely, even if the monitor setup below raises.
         monitor = None
         prefix_holder: list = []
-
-        def on_barge_in(prefix):
-            prefix_holder.append(prefix)
-            barge_event.set()
-            player.stop_now()
-
-        def on_monitor_error(_exc):
-            # Announced immediately, on its own line: a notice that arrives after
-            # the reply is useless, because the interrupt window it warns about
-            # has already closed.
-            if not self._barge_in_broken:
-                self._barge_in_broken = True
-                self.console.print(
-                    "\n[dim]Barge-in stopped working this session "
-                    "(microphone unavailable). Press Ctrl+C to interrupt.[/dim]"
-                )
-
-        if self.barge_in and self.vad is not None and not self._barge_in_broken:
-            monitor = listen_for_barge_in(
-                self.vad, on_barge_in, stop_monitor, on_error=on_monitor_error
-            )
 
         _t_turn = time.monotonic()  # DEBUG(hang)
         _seen = {"first_chunk": False, "sentences": 0}  # DEBUG(hang)
@@ -206,6 +187,28 @@ class VoiceLoop:
 
         self.console.print(f"[bold magenta]{self.assistant_name}>[/bold magenta] ", end="")
         try:
+
+            def on_barge_in(prefix):
+                prefix_holder.append(prefix)
+                barge_event.set()
+                player.stop_now()
+
+            def on_monitor_error(_exc):
+                # Announced immediately, on its own line: a notice that arrives
+                # after the reply is useless, because the interrupt window it
+                # warns about has already closed.
+                if not self._barge_in_broken:
+                    self._barge_in_broken = True
+                    self.console.print(
+                        "\n[dim]Barge-in stopped working this session "
+                        "(microphone unavailable). Press Ctrl+C to interrupt.[/dim]"
+                    )
+
+            if self.barge_in and self.vad is not None and not self._barge_in_broken:
+                monitor = listen_for_barge_in(
+                    self.vad, on_barge_in, stop_monitor, on_error=on_monitor_error
+                )
+
             # DEBUG(hang) STAGE 2: about to hand the transcript to the LLM
             logger.debug(
                 "STAGE 2: sending to LLM (provider=%s, %d messages)",
@@ -305,6 +308,8 @@ class VoiceLoop:
             stop_monitor.set()
             if monitor is not None:
                 monitor.join(timeout=2)
+                if monitor.is_alive():
+                    logger.debug("barge-in monitor did not stop within 2.0s")
             # Safety net: on any abnormal exit (Ctrl+C, auth/network error) the
             # success path's close()/join() never ran, which would leave the
             # playback thread parked on the queue and hang interpreter shutdown.

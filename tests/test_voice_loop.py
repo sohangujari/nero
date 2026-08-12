@@ -332,13 +332,17 @@ def test_voice_max_rounds_fallthrough_not_appended():
 
 
 # --- Barge-in: only what was heard is ever recorded ---
-def make_loop_with_barge_in(spoken="", generated=None, prefix_value=None, turns=1):
+def make_loop_with_barge_in(monkeypatch, spoken="", generated=None, prefix_value=None, turns=1):
     """A VoiceLoop wired for barge-in where the fake monitor interrupts every
     turn immediately. `spoken` is what FakePlayer.spoken_text() reports back
     (what actually reached the speaker); `generated` (defaults to `spoken`) is
     what the fake client streams, standing in for LLM text that ran ahead of
     playback. No real microphone/thread involved: `listen_for_barge_in` is
     replaced with a fake that fires `on_detect` synchronously.
+
+    Uses the `monkeypatch` fixture (not a plain module assignment) so the fake
+    is torn down at test teardown — otherwise it would leak into every test
+    that runs afterwards in the same session, including Task 8's CLI tests.
     """
     FakePlayer.instances = []
     generated = spoken if generated is None else generated
@@ -350,9 +354,12 @@ def make_loop_with_barge_in(spoken="", generated=None, prefix_value=None, turns=
             def join(self, timeout=None):
                 pass
 
+            def is_alive(self):
+                return False
+
         return _DummyThread()
 
-    voice_loop_module.listen_for_barge_in = fake_listen_for_barge_in
+    monkeypatch.setattr(voice_loop_module, "listen_for_barge_in", fake_listen_for_barge_in)
 
     recorded_prefixes: list = []
 
@@ -387,45 +394,62 @@ def make_loop_with_barge_in(spoken="", generated=None, prefix_value=None, turns=
 
 
 class TestBargeIn:
-    def test_spoken_text_plus_marker_is_recorded(self):
+    def test_spoken_text_plus_marker_is_recorded(self, monkeypatch):
         """What the user heard is what the model is told it said."""
-        loop, history = make_loop_with_barge_in(spoken="It's 14C in Oslo.")
+        loop, history = make_loop_with_barge_in(monkeypatch, spoken="It's 14C in Oslo.")
         loop.run()
         assert history.appended
         _user, assistant = history.appended[-1]
         assert assistant == "It's 14C in Oslo. [interrupted]"
 
-    def test_unspoken_sentences_are_not_recorded(self):
+    def test_unspoken_sentences_are_not_recorded(self, monkeypatch):
         loop, history = make_loop_with_barge_in(
-            spoken="It's 14C in Oslo.", generated="It's 14C in Oslo. Rain eases by six."
+            monkeypatch,
+            spoken="It's 14C in Oslo.",
+            generated="It's 14C in Oslo. Rain eases by six.",
         )
         loop.run()
         _user, assistant = history.appended[-1]
         assert "Rain eases by six" not in assistant
 
-    def test_barge_in_before_any_sentence_rolls_back_entirely(self):
+    def test_barge_in_before_any_sentence_rolls_back_entirely(self, monkeypatch):
         """Nothing spoken -> no assistant text -> the whole turn is dropped,
         including the user message. A user turn with no reply is malformed."""
-        loop, history = make_loop_with_barge_in(spoken="")
+        loop, history = make_loop_with_barge_in(monkeypatch, spoken="")
         loop.run()
         assert history.appended == []
         assert loop.messages == []
 
-    def test_barge_in_stops_the_player_immediately(self):
-        loop, _history = make_loop_with_barge_in(spoken="One.")
+    def test_barge_in_stops_the_player_immediately(self, monkeypatch):
+        loop, _history = make_loop_with_barge_in(monkeypatch, spoken="One.")
         loop.run()
         assert loop._last_player.stop_now_calls == 1
 
-    def test_prefix_audio_is_carried_into_the_next_recording(self):
-        loop, _history = make_loop_with_barge_in(spoken="One.", prefix_value=0.7)
+    def test_prefix_audio_is_carried_into_the_next_recording(self, monkeypatch):
+        loop, _history = make_loop_with_barge_in(monkeypatch, spoken="One.", prefix_value=0.7)
         loop.run()
         assert loop._recorded_prefixes and loop._recorded_prefixes[-1] is not None
 
-    def test_first_barge_in_prints_the_speaker_hint_once(self, capsys):
+    def test_first_barge_in_prints_the_speaker_hint_once(self, monkeypatch, capsys):
         """Spec D4: barge-in ships on, so a speaker user who sees Nero cut
         itself off needs to know it is a setting. Once per session
         only — a hint on every interruption becomes noise."""
-        loop, _history = make_loop_with_barge_in(spoken="One.", turns=2)
+        loop, _history = make_loop_with_barge_in(monkeypatch, spoken="One.", turns=2)
         loop.run()
         out = capsys.readouterr().out
         assert out.count("voice.barge_in") == 1
+
+    def test_prompt_is_skipped_when_a_barge_in_prefix_is_pending(self, monkeypatch):
+        """Rule 3: barge-in hands off directly into recording. The turn that
+        begins with a pending prefix must not show "Press Enter to start
+        speaking" again -- that would throw away the words that triggered the
+        barge-in."""
+        loop, _history = make_loop_with_barge_in(monkeypatch, spoken="One.", prefix_value=0.7)
+        prompts = []
+        real_input_fn = loop.input_fn
+        loop.input_fn = lambda *a: (prompts.append(a), real_input_fn(*a))[-1]
+        loop.run()
+        # One barge-in turn, then the following "stop" turn: two iterations of
+        # the loop, but the prompt is only ever needed once -- the second
+        # iteration begins with a pending prefix and must skip it.
+        assert len(prompts) == 1
