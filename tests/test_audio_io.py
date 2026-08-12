@@ -402,11 +402,31 @@ class TestSpokenTracking:
         assert fake_sd.stop_calls == [True]
 
 
+class _ExhaustibleVAD(ScriptedVAD):
+    """ScriptedVAD that sets `stop` once its script runs out.
+
+    Lets a test end the watch thread deterministically, from the scripted
+    frame count, instead of from a wall-clock timer.
+    """
+
+    def __init__(self, verdicts, stop):
+        super().__init__(verdicts)
+        self._stop = stop
+
+    def is_speech(self, frame):
+        if not self._verdicts:
+            self._stop.set()
+            return False
+        return super().is_speech(frame)
+
+
 class TestBargeInMonitor:
     def test_sustained_speech_fires_with_buffered_prefix(self, monkeypatch):
         fake = make_fake_sd(frames=[np.full((512, 1), 0.4, dtype="float32")])
         monkeypatch.setitem(sys.modules, "sounddevice", fake)
-        # 400ms / 32ms = 13 frames of continuous speech required.
+        # 400ms / 32ms = 12.5 -> round() (banker's rounding on the .5 case)
+        # gives 12, not 13. 12 frames is ~384ms, still within the spec's
+        # "~400ms" sustained gate.
         vad = ScriptedVAD([True] * 20)
         fired = []
         stop = threading.Event()
@@ -421,11 +441,12 @@ class TestBargeInMonitor:
         sustained gate is what stops Nero interrupting itself."""
         fake = make_fake_sd(frames=[np.full((512, 1), 0.4, dtype="float32")])
         monkeypatch.setitem(sys.modules, "sounddevice", fake)
-        vad = ScriptedVAD(([True] * 5 + [False] * 5) * 20)
-        fired = []
         stop = threading.Event()
+        # The VAD itself ends the thread once its script is exhausted, so the
+        # test is bounded by a known frame count rather than the wall clock.
+        vad = _ExhaustibleVAD(([True] * 5 + [False] * 5) * 20, stop)
+        fired = []
         thread = audio_io.listen_for_barge_in(vad, fired.append, stop)
-        threading.Timer(0.3, stop.set).start()
         thread.join(timeout=5)
         assert fired == []
 
