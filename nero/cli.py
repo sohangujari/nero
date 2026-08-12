@@ -193,7 +193,7 @@ def talk(
         False, "--debug", help="Verbose per-stage voice pipeline logging (same as `nero --debug`)."
     ),
 ) -> None:
-    """Talk to Nero: speak, and it speaks back (press Enter to start/stop recording)."""
+    """Talk to Nero: recording stops on its own; talk over it to interrupt its reply."""
     if debug:  # DEBUG(hang): accept --debug after the subcommand too, not just before it.
         _enable_debug_logging()
     manager = ConfigManager()
@@ -599,8 +599,12 @@ def _interactive_menu() -> None:
         memory = config.memory
         body.add_row("12.", "Memory", f"{'yes' if memory.enabled else 'no'}  [dim]\\[toggle][/dim]")
         body.add_row("13.", "History Turns", str(memory.max_history_turns))
+        barge_in_hint = (
+            "  [dim](needs VAD auto-stop)[/dim]" if not voice.vad.enabled else ""
+        )
         body.add_row(
-            "14.", "Barge-in", f"{'yes' if voice.barge_in_active else 'no'}  [dim]\\[toggle][/dim]"
+            "14.", "Barge-in",
+            f"{'yes' if voice.barge_in_active else 'no'}  [dim]\\[toggle][/dim]{barge_in_hint}",
         )
         body.add_row(
             "15.", "VAD Auto-Stop", f"{'yes' if voice.vad.enabled else 'no'}  [dim]\\[toggle][/dim]"

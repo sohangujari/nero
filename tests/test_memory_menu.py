@@ -46,6 +46,26 @@ class TestMemoryInInteractiveMenu:
         assert manager.load().memory.max_history_turns == 5
 
 
+class TestBargeInRowHint:
+    """Row 14 displays barge_in_active but toggles the raw flag; when VAD is
+    off the row can never show "yes" no matter how often it's toggled, so it
+    must explain itself instead of looking stuck."""
+
+    def test_hint_appears_only_when_vad_disabled(self, monkeypatch, tmp_path, isolate_audit_log):
+        manager = _manager(tmp_path)
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+
+        assert manager.load().voice.vad.enabled is True
+        result = runner.invoke(cli.app, ["config"], input="\n")
+        assert "needs VAD auto-stop" not in result.stdout
+
+        config = manager.load()
+        config.voice.vad.enabled = False
+        manager.save(config)
+        result = runner.invoke(cli.app, ["config"], input="\n")
+        assert "needs VAD auto-stop" in result.stdout
+
+
 class TestInvalidMaxTurnsDoesNotCrash:
     def test_negative_is_rejected_gracefully(self, monkeypatch, tmp_path, isolate_audit_log):
         manager = _manager(tmp_path)
