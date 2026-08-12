@@ -331,6 +331,11 @@ class Player:
                 yield item
 
         async for audio in self._tts.synthesize_stream(sentences()):
+            if self._stop.is_set():
+                # An engine that yields ahead (batches/prefetches, like a real
+                # streaming TTS could) would otherwise keep playing every chunk
+                # it already produced after stop_now() fires, defeating barge-in.
+                break
             _chunks += 1  # DEBUG(hang)
             if _chunks == 1:  # DEBUG(hang) STAGE 5: first audio chunk out of TTS
                 logger.debug(

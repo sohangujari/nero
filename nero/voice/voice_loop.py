@@ -248,6 +248,12 @@ class VoiceLoop:
             spoken = player.spoken_text()
             if prefix_holder:
                 self._pending_prefix = prefix_holder[-1]
+            # Feedback runs on both branches: the empty case is the most likely
+            # barge-in of all (Nero hearing its own first sentence), and with no
+            # output here the user would see the prompt cut off mid-word with no
+            # sign anything happened and no hint that barge-in is a setting.
+            self.console.print()
+            self._hint_once()
             if not spoken:
                 # Nothing reached the speaker: drop the whole turn, exactly like
                 # the Ctrl+C path. Persisting an assistant message with no
@@ -257,8 +263,6 @@ class VoiceLoop:
             reply = f"{spoken} [interrupted]"
             del self.messages[turn_start + 1 :]
             self.messages.append({"role": "assistant", "content": reply})
-            self.console.print()
-            self._hint_once()
             if self.history is not None:
                 self.history.append_turn(self.messages[turn_start]["content"], reply)
             return True

@@ -420,6 +420,19 @@ class TestBargeIn:
         assert history.appended == []
         assert loop.messages == []
 
+    def test_barge_in_before_any_sentence_still_prints_the_hint(self, monkeypatch, capsys):
+        """Fix 1: this is the empty/rollback path -- the self-trigger case a
+        speaker user hits most often. It must not fall silent: the user needs
+        to see something happened and learn barge-in is a setting they can
+        turn off, exactly like the non-empty branch already does."""
+        loop, history = make_loop_with_barge_in(monkeypatch, spoken="")
+        loop.run()
+        out = capsys.readouterr().out
+        assert "voice.barge_in" in out
+        # Rollback behavior itself must be unchanged by the fix.
+        assert history.appended == []
+        assert loop.messages == []
+
     def test_barge_in_stops_the_player_immediately(self, monkeypatch):
         loop, _history = make_loop_with_barge_in(monkeypatch, spoken="One.")
         loop.run()

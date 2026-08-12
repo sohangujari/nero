@@ -232,7 +232,13 @@ class TestRecordUntilSilence:
             Console(file=io.StringIO()), vad, silence_ms=800
         )
         assert audio.ndim == 1
-        assert audio.size > 0
+        # 2 speech frames + 25 silence frames are each appended to `blocks`
+        # before the 25th silent frame trips `silent_run >= silent_needed`
+        # (silent_needed = round(800/1000 * 16000/512) = 25) and breaks the
+        # loop. 27 frames * 512 samples/frame = 13824. Asserting the exact
+        # count (not just `> 0`) is what actually proves the silence-break
+        # fired, rather than the 180s frame cap.
+        assert audio.size == 27 * 512 == 13824
 
     def test_prefix_audio_lands_at_the_head(self, monkeypatch):
         """Barge-in hands its buffered audio forward; without this the user's
@@ -389,6 +395,38 @@ class TestSpokenTracking:
         release.set()
         player.join(timeout=5)
         assert player.spoken_text() == "First. Second. Third."
+
+    def test_stop_now_prevents_already_buffered_chunks_from_playing(self, monkeypatch):
+        """Fix 2: PrefetchingTTS pulls all 3 sentences and has all 3 audio
+        chunks ready to hand out before the outer loop has dispatched more
+        than one to `_play`. If `_consume` only checked `_stop` inside
+        `_next_item` (queue reads), it would still play chunks 2 and 3 once
+        the first `_play` call unblocks, because they don't require another
+        queue read. stop_now() must cut that off too."""
+        monkeypatch.setitem(sys.modules, "sounddevice", make_fake_sd())
+        played = []
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocking_play(audio, sr):
+            played.append(audio)
+            started.set()
+            release.wait(timeout=5)
+
+        player = Player(PrefetchingTTS(), 24000, play_fn=blocking_play)
+        player.start()
+        player.enqueue("First.")
+        player.enqueue("Second.")
+        player.enqueue("Third.")
+        player.close()
+        assert started.wait(timeout=5)
+        # First chunk is mid-play; the engine already has chunks 2 and 3 ready
+        # to yield with no further queue read required.
+        player.stop_now()
+        release.set()
+        player.join(timeout=5)
+        assert len(played) == 1
+        assert np.allclose(played[0], np.full(4, len("First."), dtype=np.float32))
 
     def test_stop_now_halts_playback(self, monkeypatch):
         fake_sd = make_fake_sd()
