@@ -5,6 +5,7 @@ import logging  # DEBUG(hang)
 import queue
 import threading
 import time  # DEBUG(hang)
+from collections import deque
 from collections.abc import Callable
 
 from nero.voice.errors import (
@@ -19,6 +20,56 @@ logger = logging.getLogger("nero.voice.audio")  # DEBUG(hang)
 RECORD_SAMPLE_RATE = 16000
 _BLOCK = 1600  # 0.1s blocks at 16 kHz
 VAD_FRAME = 512  # 32 ms at 16 kHz — the only size silero accepts at this rate
+
+_INDICATOR_FRAMES = 20  # ~20 VAD frames * 32ms = ~0.6s of rolling history shown
+
+
+def _indicator_text(window: "deque[bool]"):
+    from rich.text import Text
+
+    text = Text("  ")
+    for speech in window:
+        text.append("●" if speech else "·", style="bold red" if speech else "dim")
+    return text
+
+
+def _start_indicator(console, window: "deque[bool]"):
+    """Best-effort live speech-activity strip; None if not a real terminal.
+
+    Purely cosmetic — every call site guards against this raising, because a
+    rendering hiccup must never cost a turn. In non-terminal contexts (tests,
+    piped output) this returns None and callers fall back to the plain
+    "Listening" line already printed, so nothing new is emitted there.
+    """
+    if not console.is_terminal:
+        return None
+    try:
+        from rich.live import Live
+
+        live = Live(_indicator_text(window), console=console, refresh_per_second=15, transient=True)
+        live.start()
+        return live
+    except Exception:  # noqa: BLE001 — cosmetic only, must never break recording
+        return None
+
+
+def _update_indicator(live, window: "deque[bool]", speech: bool) -> None:
+    if live is None:
+        return
+    window.append(speech)
+    try:
+        live.update(_indicator_text(window))
+    except Exception:  # noqa: BLE001 — cosmetic only, must never break recording
+        pass
+
+
+def _stop_indicator(live) -> None:
+    if live is None:
+        return
+    try:
+        live.stop()
+    except Exception:  # noqa: BLE001 — cosmetic only, must never break recording
+        pass
 
 
 def _import_sd():
@@ -106,6 +157,8 @@ def record_until_silence(
 
     started = False
     silent_run = 0
+    window: deque = deque(maxlen=_INDICATOR_FRAMES)
+    live = _start_indicator(console, window)
     try:
         with sd.InputStream(
             samplerate=RECORD_SAMPLE_RATE, channels=1, dtype="float32"
@@ -114,6 +167,7 @@ def record_until_silence(
                 data, _ = stream.read(VAD_FRAME)
                 frame = np.asarray(data, dtype=np.float32).reshape(-1)
                 speech = vad.is_speech(frame)
+                _update_indicator(live, window, speech)
                 if speech:
                     started = True
                     silent_run = 0
@@ -131,6 +185,8 @@ def record_until_silence(
                     return np.zeros(0, dtype=np.float32)
     except sd.PortAudioError as exc:
         raise _mic_error(exc) from exc
+    finally:
+        _stop_indicator(live)
 
     if not blocks:
         return np.zeros(0, dtype=np.float32)

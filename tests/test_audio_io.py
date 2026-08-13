@@ -302,6 +302,41 @@ class TestRecordUntilSilence:
                 Console(file=io.StringIO()), ScriptedVAD([]), silence_ms=800
             )
 
+    def test_indicator_is_silent_on_a_non_terminal_console(self, monkeypatch):
+        """Tests and piped output are not a terminal; a Live region there would
+        spam output, so the indicator must stay off and fall back to the plain
+        'Listening' line already printed."""
+        fake = make_fake_sd(frames=vad_frames(1))
+        monkeypatch.setitem(sys.modules, "sounddevice", fake)
+        vad = ScriptedVAD([True, True] + [False] * 25)
+        out = io.StringIO()
+        console = Console(file=out, force_terminal=False)
+        audio_io.record_until_silence(console, vad, silence_ms=800)
+        output = out.getvalue()
+        assert "Listening" in output
+        # No cursor-control / ANSI escapes -- proof no Live region ever opened.
+        assert "\x1b[" not in output
+
+    def test_indicator_on_a_terminal_does_not_change_returned_audio(self, monkeypatch):
+        fake = make_fake_sd(frames=vad_frames(1))
+        monkeypatch.setitem(sys.modules, "sounddevice", fake)
+
+        vad_plain = ScriptedVAD([True, True] + [False] * 25)
+        audio_plain = audio_io.record_until_silence(
+            Console(file=io.StringIO(), force_terminal=False), vad_plain, silence_ms=800
+        )
+
+        vad_terminal = ScriptedVAD([True, True] + [False] * 25)
+        terminal_out = io.StringIO()
+        console = Console(file=terminal_out, force_terminal=True, width=80)
+        audio_terminal = audio_io.record_until_silence(
+            console, vad_terminal, silence_ms=800
+        )
+
+        assert np.array_equal(audio_plain, audio_terminal)
+        # On a real terminal the Live region does render something.
+        assert terminal_out.getvalue() != ""
+
 
 class SentenceTTS:
     """One audio chunk per sentence, mirroring the real TTSEngine contract."""
