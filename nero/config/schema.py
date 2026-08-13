@@ -65,6 +65,14 @@ class VoiceConfig(BaseModel):
     enabled: bool = True
     input_mode: Literal["press_to_talk", "text_only"] = "press_to_talk"
     barge_in: bool = True
+    # Nero's own TTS output leaking through built-in speakers into the mic
+    # reads as continuous human speech, so barge-in is auto-suppressed on
+    # built-in speakers (see audio_io.output_is_builtin_speakers). This
+    # bypasses that suppression for users whose speakers sit far enough from
+    # the mic that self-hearing isn't a problem. Does not affect
+    # `barge_in_active` -- the speaker check is a device-level concern
+    # layered on top at the call site, not part of the config truth table.
+    force_barge_in: bool = False
     vad: VADConfig = VADConfig()
     stt: STTConfig = STTConfig()
     tts: TTSConfig = TTSConfig()

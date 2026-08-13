@@ -305,3 +305,87 @@ class TestBuildVad:
         monkeypatch.setattr(cli, "ensure_vad_model", boom)
         assert cli._build_vad(NeroConfig(), Console()) is None
         assert "press Enter" in capsys.readouterr().out
+
+
+class TestBargeInSpeakerSuppression:
+    """`talk` must not start barge-in on built-in speakers unless overridden."""
+
+    def _prep_talk(self, monkeypatch, tmp_path, config: NeroConfig):
+        from nero import cli
+
+        monkeypatch.setattr(cli, "ConfigManager", lambda: _fake_manager(tmp_path, config))
+        monkeypatch.setattr(cli, "FasterWhisperSTT", lambda model: object())
+        monkeypatch.setattr(cli, "_build_registry", lambda manager, config: object())
+        monkeypatch.setattr(cli, "_preflight_voice_models", lambda engine: None)
+
+        class FakeTTS:
+            SAMPLE_RATE = 24000
+
+        monkeypatch.setattr(cli, "build_tts", lambda engine, voice_id: FakeTTS())
+        # A real VAD detector so `vad is not None` -- the model/onnx pieces
+        # are irrelevant to this test, only that a detector exists.
+        monkeypatch.setattr(cli, "_build_vad", lambda config, console: object())
+
+        captured = {}
+
+        class FakeLoop:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+            def run(self):
+                captured["ran"] = True
+
+        monkeypatch.setattr(cli, "VoiceLoop", FakeLoop)
+        return captured
+
+    def test_suppressed_on_builtin_speakers_and_explains_why(self, monkeypatch, tmp_path):
+        from nero import cli
+
+        config = NeroConfig()  # barge_in=True, force_barge_in=False by default
+        captured = self._prep_talk(monkeypatch, tmp_path, config)
+        monkeypatch.setattr(cli.audio_io, "output_is_builtin_speakers", lambda: True)
+
+        result = runner.invoke(cli.app, ["talk", "--once"])
+        assert result.exit_code == 0
+        assert captured["barge_in"] is False
+        assert "force_barge_in" in result.stdout
+        assert "headphones" in result.stdout.lower()
+
+    def test_force_barge_in_overrides_suppression_and_prints_nothing(self, monkeypatch, tmp_path):
+        from nero import cli
+
+        config = NeroConfig()
+        config.voice.force_barge_in = True
+        captured = self._prep_talk(monkeypatch, tmp_path, config)
+        monkeypatch.setattr(cli.audio_io, "output_is_builtin_speakers", lambda: True)
+
+        result = runner.invoke(cli.app, ["talk", "--once"])
+        assert result.exit_code == 0
+        assert captured["barge_in"] is True
+        assert "force_barge_in" not in result.stdout
+
+    def test_non_builtin_output_stays_enabled_and_prints_nothing(self, monkeypatch, tmp_path):
+        from nero import cli
+
+        config = NeroConfig()
+        captured = self._prep_talk(monkeypatch, tmp_path, config)
+        monkeypatch.setattr(cli.audio_io, "output_is_builtin_speakers", lambda: False)
+
+        result = runner.invoke(cli.app, ["talk", "--once"])
+        assert result.exit_code == 0
+        assert captured["barge_in"] is True
+        assert "force_barge_in" not in result.stdout
+
+    def test_barge_in_already_off_prints_nothing(self, monkeypatch, tmp_path):
+        from nero import cli
+
+        config = NeroConfig()
+        config.voice.barge_in = False
+        captured = self._prep_talk(monkeypatch, tmp_path, config)
+        # Even if the device looks built-in, there's nothing to suppress or explain.
+        monkeypatch.setattr(cli.audio_io, "output_is_builtin_speakers", lambda: True)
+
+        result = runner.invoke(cli.app, ["talk", "--once"])
+        assert result.exit_code == 0
+        assert captured["barge_in"] is False
+        assert "force_barge_in" not in result.stdout

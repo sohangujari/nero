@@ -95,9 +95,14 @@ talking. Talk over Nero while it's replying to interrupt it; it stops, and what
 it managed to say is kept in the conversation so your follow-up still makes
 sense.
 
-On laptop speakers Nero can occasionally hear itself and cut its own reply
-short. Headphones fix it, or turn it off with
-`nero config set voice.barge_in false`.
+Barge-in needs headphones in practice: on built-in speakers, Nero hears its
+own reply through the mic and interrupts itself almost every time, so Nero
+auto-disables barge-in when the default output device looks like built-in
+speakers and prints one line explaining why. Headphones re-enable it
+automatically (no acoustic path from speaker to mic). If your speakers sit
+far enough from the mic that self-hearing genuinely isn't a problem, force it
+back on with `nero config set voice.force_barge_in true`. To turn barge-in
+off entirely instead, use `nero config set voice.barge_in false`.
 
 Tuning (all optional):
 
@@ -105,6 +110,7 @@ Tuning (all optional):
 | --- | --- | --- |
 | `voice.vad.enabled` | `true` | Master switch. `false` restores press-Enter-to-stop. |
 | `voice.barge_in` | `true` | Interrupt Nero by talking. Inert when `vad.enabled` is false. |
+| `voice.force_barge_in` | `false` | Bypass the built-in-speaker auto-suppression above. |
 | `voice.vad.silence_ms` | `800` | Silence that ends your turn. Raise it if you're cut off mid-thought. |
 | `voice.vad.threshold` | `0.5` | Speech sensitivity. Raise it in a noisy room. |
 | `voice.vad.max_utterance_seconds` | `180` | Hard cap on one recording. |

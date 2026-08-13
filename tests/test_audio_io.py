@@ -592,3 +592,58 @@ class TestBargeInMonitor:
         )
         thread.join(timeout=5)
         assert len(errors) == 1
+
+
+class TestOutputIsBuiltinSpeakers:
+    """Name heuristic used to auto-suppress barge-in on built-in speakers."""
+
+    @staticmethod
+    def _fake_sd_with_output(name):
+        fake = types.ModuleType("sounddevice")
+
+        def query_devices(kind=None):
+            assert kind == "output"
+            return {"name": name}
+
+        fake.query_devices = query_devices
+        return fake
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "MacBook Air Speakers",
+            "MacBook Pro Speakers",
+            "iMac Speakers",
+            "Built-in Output",
+            "Built-in Audio",
+            "Internal Speakers",
+            "Speakers (Realtek High Definition Audio)",
+            # case-insensitive match
+            "macbook air speakers",
+        ],
+    )
+    def test_matches_known_builtin_shapes(self, monkeypatch, name):
+        install(monkeypatch, self._fake_sd_with_output(name))
+        assert audio_io.output_is_builtin_speakers() is True
+
+    @pytest.mark.parametrize(
+        "name",
+        ["AirPods Pro", "External Headphones", "USB Audio Device"],
+    )
+    def test_does_not_match_headphone_like_names(self, monkeypatch, name):
+        install(monkeypatch, self._fake_sd_with_output(name))
+        assert audio_io.output_is_builtin_speakers() is False
+
+    def test_fails_open_when_device_enumeration_raises(self, monkeypatch):
+        fake = types.ModuleType("sounddevice")
+
+        def query_devices(kind=None):
+            raise RuntimeError("no default output device")
+
+        fake.query_devices = query_devices
+        install(monkeypatch, fake)
+        assert audio_io.output_is_builtin_speakers() is False
+
+    def test_fails_open_when_sounddevice_unavailable(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "sounddevice", None)
+        assert audio_io.output_is_builtin_speakers() is False

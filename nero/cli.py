@@ -266,6 +266,19 @@ def talk(
         def record(prefix=None):
             return record_until_enter(console, lambda: input())
 
+    barge_in = config.voice.barge_in_active and vad is not None
+    if (
+        barge_in
+        and not config.voice.force_barge_in
+        and audio_io.output_is_builtin_speakers()
+    ):
+        barge_in = False
+        console.print(
+            "[dim]Barge-in is off: on built-in speakers Nero would hear (and "
+            "interrupt) itself. Headphones re-enable it, or force it with "
+            "nero config set voice.force_barge_in true.[/dim]"
+        )
+
     try:
         VoiceLoop(
             client=client,
@@ -278,7 +291,7 @@ def talk(
             once=once,
             history=_build_history(config),
             vad=vad,
-            barge_in=config.voice.barge_in_active and vad is not None,
+            barge_in=barge_in,
         ).run()
     finally:
         # We're exiting; a further Ctrl+C would only corrupt teardown output.

@@ -259,6 +259,43 @@ def listen_for_barge_in(vad, on_detect, stop, on_error=None) -> threading.Thread
     return thread
 
 
+# Name-substring patterns for the default OUTPUT device that indicate
+# built-in laptop/desktop speakers, across the platforms this project
+# supports. Matched case-insensitively as substrings of the device name.
+_BUILTIN_SPEAKER_PATTERNS = (
+    "macbook air speakers",
+    "macbook pro speakers",
+    "imac speakers",
+    "built-in output",
+    "built-in audio",
+    "internal speakers",
+    "speakers (realtek",
+)
+
+
+def output_is_builtin_speakers() -> bool:
+    """Best-effort guess: is the default OUTPUT device built-in speakers?
+
+    A name heuristic, not a real capability check — it knows a handful of
+    English device-name shapes (see `_BUILTIN_SPEAKER_PATTERNS`) and nothing
+    else. It will miss non-English device names, external speakers with a
+    generic name, and HDMI/monitor audio pretending to be something else.
+    `voice.force_barge_in` is the escape hatch for anyone this heuristic
+    gets wrong.
+
+    Fails OPEN: on any error (no sounddevice, no default device, headless
+    machine, whatever) this returns False so barge-in stays enabled rather
+    than silently disabling a feature the user asked for.
+    """
+    try:
+        sd = _import_sd()
+        device = sd.query_devices(kind="output")
+        name = str(device["name"]).lower()
+    except Exception:  # noqa: BLE001 — any failure must fail open, not raise
+        return False
+    return any(pattern in name for pattern in _BUILTIN_SPEAKER_PATTERNS)
+
+
 def _mic_error(exc: Exception) -> Exception:
     if "permission" in str(exc).lower():
         return MicPermissionError(
