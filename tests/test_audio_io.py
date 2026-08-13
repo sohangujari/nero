@@ -24,6 +24,7 @@ class FakeInputStream:
         self._frames = frames
         self._raise = raise_on_start
         self._i = 0
+        self.read_count = 0
 
     def __enter__(self):
         if self._raise:
@@ -34,6 +35,7 @@ class FakeInputStream:
         return False
 
     def read(self, n):
+        self.read_count += 1
         block = self._frames[self._i]
         self._i = (self._i + 1) % len(self._frames)
         return block, False
@@ -49,8 +51,12 @@ def make_fake_sd(frames=None, input_error_msg=None, play_error=None):
     frames = frames if frames is not None else [np.zeros((160, 1), dtype="float32")]
     input_error = PortAudioError(input_error_msg) if input_error_msg else None
 
+    fake.streams = []
+
     def InputStream(**kwargs):
-        return FakeInputStream(frames, raise_on_start=input_error, **kwargs)
+        stream = FakeInputStream(frames, raise_on_start=input_error, **kwargs)
+        fake.streams.append(stream)
+        return stream
 
     fake.InputStream = InputStream
     fake.played = []
@@ -293,6 +299,47 @@ class TestRecordUntilSilence:
             Console(file=io.StringIO()), vad, wait_for_speech_seconds=1, prefix=prefix
         )
         assert audio.size == 0
+
+    def test_prefix_followup_wait_uses_the_short_window(self, monkeypatch):
+        """A barge-in handoff (prefix given) with no real speech following
+        must give up after the short BARGE_IN_FOLLOWUP_SECONDS window, not
+        the long wait_for_speech_seconds one -- otherwise a spurious trigger
+        (Nero hearing itself) strands the session for the full 30s."""
+        fake = make_fake_sd(frames=vad_frames(1))
+        monkeypatch.setitem(sys.modules, "sounddevice", fake)
+        vad = ScriptedVAD([False] * 5000)
+        prefix = np.full(512, 0.7, dtype=np.float32)
+        audio = audio_io.record_until_silence(
+            Console(file=io.StringIO()),
+            vad,
+            wait_for_speech_seconds=30,
+            prefix=prefix,
+        )
+        assert audio.size == 0
+        expected_frames = (
+            round(
+                audio_io.BARGE_IN_FOLLOWUP_SECONDS
+                * audio_io.RECORD_SAMPLE_RATE
+                / audio_io.VAD_FRAME
+            )
+            + 1
+        )
+        assert fake.streams[-1].read_count == expected_frames
+
+    def test_no_prefix_wait_still_uses_wait_for_speech_seconds(self, monkeypatch):
+        """Without a prefix (a deliberate Enter press), the long
+        wait_for_speech_seconds window must apply unchanged."""
+        fake = make_fake_sd(frames=vad_frames(1))
+        monkeypatch.setitem(sys.modules, "sounddevice", fake)
+        vad = ScriptedVAD([False] * 5000)
+        audio = audio_io.record_until_silence(
+            Console(file=io.StringIO()),
+            vad,
+            wait_for_speech_seconds=5,
+        )
+        assert audio.size == 0
+        expected_frames = round(5 * audio_io.RECORD_SAMPLE_RATE / audio_io.VAD_FRAME) + 1
+        assert fake.streams[-1].read_count == expected_frames
 
     def test_mic_permission_error_is_translated(self, monkeypatch):
         fake = make_fake_sd(frames=vad_frames(1), input_error_msg="Permission denied")

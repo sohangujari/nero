@@ -128,7 +128,16 @@ class VoiceLoop:
                 transcript,
             )
             if not transcript:
-                self.console.print("[yellow]I didn't catch that — let's try again.[/yellow]")
+                if prefix is not None and audio.size == 0:
+                    # The barge-in handoff came back empty: nothing followed
+                    # the trigger, so it was almost certainly Nero hearing
+                    # its own voice, not the user. Not the "I didn't catch
+                    # that" case -- the user never said anything to catch.
+                    self.console.print(
+                        "[dim]That was probably me hearing myself — ignoring it.[/dim]"
+                    )
+                else:
+                    self.console.print("[yellow]I didn't catch that — let's try again.[/yellow]")
                 continue
             self.console.print(f"[dim]🗣  heard:[/dim] {transcript}")
 

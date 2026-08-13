@@ -138,11 +138,12 @@ def record_until_silence(
     Returns mono float32 at 16 kHz, empty if speech never started. `prefix` is
     prepended verbatim — barge-in passes the audio it already buffered so the
     interrupting word is not clipped. Exception: if no real speech follows
-    `prefix` before `wait_for_speech_seconds` elapses, `prefix` is discarded
-    and empty audio is returned. This matters because barge-in can fire on
-    Nero hearing its own voice through the speakers; without this, a spurious
-    trigger with no real user speech would hand Nero's own words back to the
-    STT engine as if the user had said them.
+    `prefix`, `prefix` is discarded and empty audio is returned. This matters
+    because barge-in can fire on Nero hearing its own voice through the
+    speakers; without this, a spurious trigger with no real user speech would
+    hand Nero's own words back to the STT engine as if the user had said
+    them. When `prefix` is given, the wait uses `BARGE_IN_FOLLOWUP_SECONDS`
+    instead of `wait_for_speech_seconds` — see that constant's comment.
     """
     import numpy as np
 
@@ -153,7 +154,14 @@ def record_until_silence(
     blocks: list = list([] if prefix is None else [np.asarray(prefix, dtype=np.float32).reshape(-1)])
     silent_needed = max(1, round(silence_ms / 1000 * RECORD_SAMPLE_RATE / VAD_FRAME))
     max_frames = round(max_utterance_seconds * RECORD_SAMPLE_RATE / VAD_FRAME)
-    wait_frames = round(wait_for_speech_seconds * RECORD_SAMPLE_RATE / VAD_FRAME)
+    # Other half of the discard-on-timeout policy below: when a prefix is
+    # supplied the caller (the barge-in monitor) already detected sustained
+    # speech moments ago, so this is only confirming the user is still
+    # talking, not waiting out a fresh user-initiated pause. Use the short
+    # follow-up window instead of the long one, or a spurious trigger (Nero
+    # hearing itself) strands the session for the full 30s.
+    wait_seconds = BARGE_IN_FOLLOWUP_SECONDS if prefix is not None else wait_for_speech_seconds
+    wait_frames = round(wait_seconds * RECORD_SAMPLE_RATE / VAD_FRAME)
 
     started = False
     silent_run = 0
@@ -199,6 +207,15 @@ def record_until_silence(
 # number needs tuning the heuristic is wrong and the honest fix is
 # `voice.barge_in = false`, not a knob.
 BARGE_IN_SUSTAINED_MS = 400
+
+# How long `record_until_silence` waits for real speech after a barge-in
+# handoff (`prefix` given), instead of `wait_for_speech_seconds`. The caller
+# already detected sustained speech moments ago to trigger the handoff, so
+# this only needs to confirm the user is still talking -- if they are not,
+# the trigger was Nero hearing itself, and waiting the full user-initiated
+# window would strand the session for nothing. Deliberately a constant, not
+# config, for the same reason as BARGE_IN_SUSTAINED_MS above.
+BARGE_IN_FOLLOWUP_SECONDS = 2.0
 
 
 def listen_for_barge_in(vad, on_detect, stop, on_error=None) -> threading.Thread:

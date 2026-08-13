@@ -1,3 +1,4 @@
+import numpy as np
 from rich.console import Console
 
 import nero.voice.voice_loop as voice_loop_module
@@ -94,6 +95,41 @@ def test_empty_transcript_reprompts_without_sending():
     loop = make_loop(["", "Open calculator."], ["Opening."], once=True)
     loop.run()
     assert loop.messages[0]["content"] == "Open calculator."
+
+
+def test_ordinary_empty_transcript_prints_i_didnt_catch_that(capsys):
+    """No prefix, no speech: the ordinary case keeps its existing message."""
+    loop = make_loop(["", "Open calculator."], ["Opening."], once=True)
+    loop.run()
+    out = capsys.readouterr().out
+    assert "I didn't catch that" in out
+    assert "hearing myself" not in out.lower()
+
+
+def test_prefix_empty_audio_prints_self_voice_message_not_i_didnt_catch(capsys):
+    """A barge-in handoff (prefix supplied) that comes back empty means Nero
+    heard itself, not the user -- a distinct message must explain that
+    instead of the generic (and misleading) "I didn't catch that"."""
+
+    def record(prefix=None):
+        return np.zeros(0, dtype=np.float32)
+
+    prompts = []
+    loop = make_loop(["", "stop"], ["should not stream"], record=record)
+    real_input_fn = loop.input_fn
+    loop.input_fn = lambda *a: (prompts.append(a), real_input_fn(*a))[-1]
+    loop._pending_prefix = np.full(4, 0.5, dtype=np.float32)
+
+    loop.run()
+
+    out = capsys.readouterr().out
+    assert "I didn't catch that" not in out
+    assert "hearing myself" in out.lower() or "self" in out.lower()
+    # `_pending_prefix` must be cleared before the *next* prompt: the second
+    # turn ("stop") should see the normal "Press Enter" prompt again, proving
+    # the prefix consumed on turn one didn't leak into turn two.
+    assert len(prompts) == 1
+    assert "Press Enter" in prompts[0][0]
 
 
 def test_stop_word_exits_without_sending():
