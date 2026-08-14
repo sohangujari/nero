@@ -5,3 +5,9 @@ __pycache__/
 .DS_Store
 dist/
 build/
+
+# subagent-driven-development scratch workspace (ledger, briefs, review diffs)
+.superpowers/
+
+# specs/plans/PRDs — local working notes, never committed
+docs/
