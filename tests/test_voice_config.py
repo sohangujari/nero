@@ -33,7 +33,7 @@ def test_voice_roundtrips_through_full_config():
 from typer.testing import CliRunner
 
 from nero import cli
-from nero.llm import providers
+from nero.config.manager import ConfigManager
 
 runner = CliRunner()
 
@@ -53,9 +53,18 @@ def _fake_manager(tmp_path, config: NeroConfig):
             return "sk-ant-...test"
 
         def provider_needs_key(self, provider):
-            return providers.get(provider).keyring_entry is not None
+            # Delegate rather than reimplement: this is the one behaviour a
+            # double must not get subtly wrong, and the real method already
+            # answers False (not KeyError) for an unknown provider.
+            return ConfigManager.provider_needs_key(provider)
 
     return M()
+
+
+def test_fake_manager_matches_real_provider_needs_key_for_unknown_provider(tmp_path):
+    # The delegation, not a reimplementation, is what's under test here: an
+    # unknown provider must answer False, not raise.
+    assert _fake_manager(tmp_path, NeroConfig()).provider_needs_key("nonesuch") is False
 
 
 def test_talk_disabled_points_to_config(monkeypatch, tmp_path):
