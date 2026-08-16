@@ -446,12 +446,14 @@ def config_set(key: str, value: str) -> None:
         console.print(f"[red]{exc}[/red]")
         console.print(
             "Valid keys include: [bold]assistant.name[/bold], "
-            "[bold]llm.provider[/bold] (claude|openai|gemini|ollama), [bold]llm.model[/bold]"
+            f"[bold]llm.provider[/bold] ({'|'.join(providers.names())}), "
+            "[bold]llm.model[/bold]"
         )
         raise typer.Exit(1) from exc
     console.print(f"[green]Saved:[/green] {key} = {value}")
     if key in ("llm.model", "llm.provider"):
         _warn_if_no_tool_support(manager)
+        _warn_if_model_mismatched(manager)
 
 
 def _warn_if_no_tool_support(manager: ConfigManager) -> None:
@@ -472,6 +474,30 @@ def _warn_if_no_tool_support(manager: ConfigManager) -> None:
             "General conversation is fine. [bold]phi4-mini[/bold] or "
             "[bold]qwen3[/bold] are good choices if you want skills."
         )
+
+
+def _warn_if_model_mismatched(manager: ConfigManager) -> None:
+    """Say so when llm.model plainly belongs to a different provider.
+
+    Only fires when the model sits in another provider's curated list — that's
+    a fact, not a guess. Unknown models stay silent: the same "better quiet
+    than a false alarm" rule as _warn_if_no_tool_support, and consulting
+    LiteLLM's catalog to settle more cases would put a 1.4-2.9s import on a
+    command scripts call in a loop.
+
+    Warns only. Never rewrites the model: a script that sets a provider and
+    then sets a model must not race against a silent correction.
+    """
+    config = manager.load()
+    owners = [info.name for info in providers.PROVIDERS if config.llm.model in info.models]
+    if not owners or config.llm.provider in owners:
+        return
+    console.print(
+        f"[yellow]Heads up:[/yellow] [bold]{config.llm.model}[/bold] belongs to "
+        f"[bold]{owners[0]}[/bold], not [bold]{config.llm.provider}[/bold]. "
+        f"Set a model with [bold]nero config set llm.model <name>[/bold] "
+        f"or pick one in [bold]nero config[/bold]."
+    )
 
 
 @config_app.command("show")

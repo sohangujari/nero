@@ -78,3 +78,29 @@ class TestOllamaModelRow:
         manager.save(config)
         runner.invoke(cli.app, ["config"], input="3\nphi4-mini\n\n")
         assert manager.load().llm.model == "phi4-mini"
+
+
+class TestMismatchWarning:
+    def test_warns_when_the_model_belongs_to_another_provider(self, manager):
+        # Default config is claude/claude-sonnet-5; switching only the provider
+        # leaves a model openai cannot serve.
+        result = runner.invoke(cli.app, ["config", "set", "llm.provider", "openai"])
+        assert result.exit_code == 0
+        assert "claude-sonnet-5" in result.stdout
+        assert "openai" in result.stdout
+
+    def test_silent_when_the_model_matches(self, manager):
+        runner.invoke(cli.app, ["config", "set", "llm.model", "gpt-5"])
+        result = runner.invoke(cli.app, ["config", "set", "llm.provider", "openai"])
+        assert "belongs to" not in result.stdout
+
+    def test_silent_for_an_unknown_model(self, manager):
+        """Better quiet than a false alarm — the same rule _warn_if_no_tool_support
+        follows. An unrecognised model may be perfectly valid."""
+        runner.invoke(cli.app, ["config", "set", "llm.model", "some-new-model"])
+        result = runner.invoke(cli.app, ["config", "set", "llm.provider", "mistral"])
+        assert "belongs to" not in result.stdout
+
+    def test_the_model_is_never_changed_automatically(self, manager):
+        runner.invoke(cli.app, ["config", "set", "llm.provider", "openai"])
+        assert manager.load().llm.model == "claude-sonnet-5"
