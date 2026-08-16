@@ -112,3 +112,38 @@ def get(name: str) -> ProviderInfo:
 
 def names() -> tuple[str, ...]:
     return tuple(info.name for info in PROVIDERS)
+
+
+def catalog_models(name: str) -> list[str]:
+    """Every tool-capable chat model LiteLLM knows for this provider, bare.
+
+    The import is deliberately lazy and inside the function: importing litellm
+    costs a measured 1.4-2.9s, and `nero config` must not pay that just to draw
+    a menu the user may never expand.
+
+    Returns [] on anything going wrong — unknown provider, missing litellm, a
+    catalog shape that changed under us. Every caller degrades to free-text
+    entry, because no failure here may cost the user the task.
+    """
+    try:
+        info = get(name)
+    except KeyError:
+        return []
+    try:
+        import litellm
+
+        found = set()
+        for model, meta in litellm.model_cost.items():
+            if meta.get("litellm_provider") != info.catalog_key:
+                continue
+            # Both filters matter: the catalog carries TTS models
+            # (minimax/speech-02-hd) and toolless safety classifiers
+            # (groq/…llama-prompt-guard) that would be noise in a picker.
+            if not meta.get("supports_function_calling"):
+                continue
+            if meta.get("mode") != "chat":
+                continue
+            found.add(model.removeprefix(info.prefix) if info.prefix else model)
+        return sorted(found)
+    except Exception:  # noqa: BLE001 — any catalog failure degrades to free text
+        return []
