@@ -49,7 +49,19 @@ class TestCatalog:
         assert "qwen3-max" in models
 
     def test_excludes_non_chat_models(self):
-        """MiniMax's catalog is mostly speech synthesis — mode != chat."""
+        """The mode filter is load-bearing for openai, which lists 37 tool-capable
+        realtime/responses models. minimax's speech models cannot prove this — they
+        lack supports_function_calling, so the first filter already removed them."""
+        models = providers.catalog_models("openai")
+        assert models, "openai should have tool-capable chat models"
+        assert "gpt-4o-realtime-preview" not in models
+        assert "codex-mini-latest" not in models
+        assert "gpt-5" in models
+
+    def test_excludes_speech_models(self):
+        """MiniMax's catalog is mostly speech synthesis. This passes via the
+        supports_function_calling filter, not the mode filter — see
+        test_excludes_non_chat_models for the mode filter's own guard."""
         assert not any(m.startswith("speech-") for m in providers.catalog_models("minimax"))
 
     def test_excludes_models_without_tool_support(self):
