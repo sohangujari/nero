@@ -33,6 +33,7 @@ def test_voice_roundtrips_through_full_config():
 from typer.testing import CliRunner
 
 from nero import cli
+from nero.llm import providers
 
 runner = CliRunner()
 
@@ -50,6 +51,9 @@ def _fake_manager(tmp_path, config: NeroConfig):
 
         def mask_api_key(self, key):
             return "sk-ant-...test"
+
+        def provider_needs_key(self, provider):
+            return providers.get(provider).keyring_entry is not None
 
     return M()
 

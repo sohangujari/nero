@@ -20,7 +20,7 @@ from rich.progress import (
 from rich.prompt import Prompt
 from rich.table import Table
 
-from nero import __version__
+from nero import __version__, ui
 from nero._runtime import check_python_version
 from nero.config.manager import ConfigError, ConfigManager
 from nero.config.schema import NeroConfig, STTConfig, TTSConfig
@@ -32,7 +32,7 @@ from nero.hardware.detector import (
     recommend_model,
     recommend_voice,
 )
-from nero.llm import ollama
+from nero.llm import ollama, providers
 from nero.llm.client import LLMClient
 from nero.memory.history_store import HistoryStore, default_history_path
 from nero.skills.registry import build_registry
@@ -44,13 +44,6 @@ from nero.voice.stt import FasterWhisperSTT
 from nero.voice.tts import VOICE_CATALOG, build_tts
 from nero.voice.vad import VoiceActivityDetector
 from nero.voice.voice_loop import VoiceLoop
-
-PROVIDERS = ["claude", "openai", "gemini", "ollama"]
-DEFAULT_MODELS = {
-    "claude": "claude-sonnet-5",
-    "openai": "gpt-5",
-    "gemini": "gemini-2.5-pro",
-}
 
 app = typer.Typer(add_completion=False, invoke_without_command=True)
 config_app = typer.Typer(invoke_without_command=True, help="View and edit Nero's configuration.")
@@ -210,7 +203,7 @@ def talk(
 
     provider = config.llm.provider
     api_key = None
-    if provider == "ollama":
+    if not manager.provider_needs_key(provider):
         _ollama_preflight(config.llm.model)
     else:
         api_key = manager.get_api_key(provider)
@@ -359,7 +352,7 @@ def _run_chat() -> None:
     provider = config.llm.provider
 
     api_key = None
-    if provider == "ollama":
+    if not manager.provider_needs_key(provider):
         _ollama_preflight(config.llm.model)
     else:
         api_key = manager.get_api_key(provider)
@@ -418,13 +411,18 @@ def _first_time_setup(manager: ConfigManager) -> None:
         f"[bold]{specs.cpu_cores} cores[/bold] — "
         f"recommended local model: [bold]{recommendation}[/bold]\n"
     )
-    provider = Prompt.ask("Provider", choices=PROVIDERS, default="claude", console=console)
+    provider = ui.pick(
+        "Provider",
+        [(info.name, info.label) for info in providers.PROVIDERS],
+        default="claude",
+        console=console,
+    ) or "claude"
     config.llm.provider = provider
     if provider == "ollama":
         config.llm.model = Prompt.ask("Local model", default=recommendation, console=console)
         console.print("Ollama runs locally — no key needed.")
     else:
-        config.llm.model = DEFAULT_MODELS[provider]
+        config.llm.model = providers.get(provider).default_model
         api_key = typer.prompt(f"{provider} API key", hide_input=True).strip()
         manager.set_api_key(provider, api_key)
     manager.save(config)
@@ -536,7 +534,7 @@ def _voice_gender(voice_id: str) -> str:
 
 
 def _key_display(manager: ConfigManager, provider: str, masked: bool = True) -> str:
-    if provider == "ollama":
+    if not manager.provider_needs_key(provider):
         return "[dim]not needed[/dim]"
     api_key = manager.get_api_key(provider)
     if not api_key:
@@ -631,17 +629,19 @@ def _interactive_menu() -> None:
             new_name = Prompt.ask("Assistant name", default=config.assistant.name, console=console)
             manager.set_value("assistant.name", new_name.strip() or config.assistant.name)
         elif choice == "2":
-            new_provider = Prompt.ask(
-                "Provider", choices=PROVIDERS, default=provider, console=console
+            new_provider = ui.pick(
+                "LLM Provider",
+                [(info.name, info.label) for info in providers.PROVIDERS],
+                default=provider,
+                console=console,
             )
-            if new_provider != provider:
+            if new_provider and new_provider != provider:
                 _switch_provider(manager, config, new_provider)
         elif choice == "3":
-            new_model = Prompt.ask("LLM model", default=config.llm.model, console=console)
-            manager.set_value("llm.model", new_model.strip() or config.llm.model)
+            _pick_model(manager, provider, config.llm.model)
             _warn_if_no_tool_support(manager)
         elif choice == "4":
-            if provider == "ollama":
+            if not manager.provider_needs_key(provider):
                 console.print("Ollama runs locally — no API key needed.")
                 continue
             new_key = typer.prompt(f"{provider} API key", hide_input=True).strip()
@@ -712,6 +712,56 @@ def _pick_voice(manager: ConfigManager, current: str) -> None:
     manager.set_value("voice.tts.voice_id", voice_id)
 
 
+# Sentinels for the model picker's non-model rows. "\0" can't collide with a
+# real model name, so the caller can tell a chosen model from a chosen action.
+_CATALOG_ROW = "\0catalog"
+_CUSTOM_ROW = "\0custom"
+
+
+def _pick_model(manager: ConfigManager, provider: str, current: str) -> None:
+    """Curated shortlist first, the full LiteLLM catalog and free text behind it.
+
+    The catalog is only fetched when its row is chosen — the litellm import
+    costs 1.4-2.9s and drawing a menu must not pay it.
+    """
+    info = providers.get(provider)
+    if not info.models:
+        # ollama: the model comes from hardware detection, not a cloud list.
+        recommended = manager.load().hardware.recommended_local_model
+        new_model = Prompt.ask(
+            "Local model", default=current or recommended or "", console=console
+        ).strip()
+        if new_model:
+            manager.set_value("llm.model", new_model)
+        return
+
+    rows = [(model, model) for model in info.models]
+    rows.append((_CATALOG_ROW, "Show all models from LiteLLM's catalog…"))
+    rows.append((_CUSTOM_ROW, "Type a model name…"))
+    picked = ui.pick(f"LLM Model — {info.label}", rows, default=current, console=console)
+
+    if picked == _CATALOG_ROW:
+        catalog = providers.catalog_models(provider)
+        if catalog:
+            picked = ui.pick(
+                f"LLM Model — {info.label} ({len(catalog)} from LiteLLM)",
+                [(model, model) for model in catalog],
+                default=current,
+                console=console,
+            )
+        else:
+            console.print(
+                "[yellow]Couldn't read LiteLLM's catalog.[/yellow] Type the model name instead."
+            )
+            picked = _CUSTOM_ROW
+
+    if picked == _CUSTOM_ROW:
+        picked = Prompt.ask("Model name", default=current, console=console).strip()
+
+    if picked and not picked.startswith("\0"):
+        manager.set_value("llm.model", picked)
+
+
 def _skills_summary(config: NeroConfig) -> str:
     toggles = config.skills.enabled.model_dump()
     enabled = [name for name, on in toggles.items() if on]
@@ -763,9 +813,10 @@ def _switch_provider(manager: ConfigManager, config: NeroConfig, new_provider: s
         )
         _warn_if_no_tool_support(manager)
         return
-    default_model = DEFAULT_MODELS[new_provider]
+    default_model = providers.get(new_provider).default_model
     manager.set_value("llm.model", default_model)
-    console.print(f"Model set to [bold]{default_model}[/bold] — edit via option 3 if needed.")
+    console.print(f"Model set to [bold]{default_model}[/bold].")
+    _pick_model(manager, new_provider, default_model)
     if not manager.get_api_key(new_provider):
         new_key = typer.prompt(f"{new_provider} API key", hide_input=True).strip()
         if new_key:
