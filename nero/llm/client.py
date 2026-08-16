@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import litellm
 
 from nero.config.schema import LLMConfig
-from nero.llm import ollama
+from nero.llm import ollama, providers
 from nero.llm.ollama_adapter import (
     ToolCallOutcome,
     ToolCallRequest,
@@ -21,11 +21,6 @@ logger = logging.getLogger("nero.llm")
 MAX_TOKENS = 8192
 # Safety bound on tool-call round trips within a single user turn.
 MAX_TOOL_ROUNDS = 10
-
-# LiteLLM routes bare claude-*/gpt-* names natively; gemini needs a prefix.
-# ollama keeps its prefix for display/config purposes but never goes through
-# LiteLLM — see stream_chat.
-LITELLM_PREFIXES = {"claude": "", "openai": "", "gemini": "gemini/", "ollama": "ollama/"}
 
 APOLOGY = "I didn't quite catch that — could you rephrase?"
 
@@ -102,7 +97,7 @@ class _JsonGate:
 
 
 class LLMClient:
-    """Provider-agnostic chat client: claude/openai/gemini via LiteLLM,
+    """Provider-agnostic chat client: cloud providers via LiteLLM,
     ollama via its native /api/chat endpoint (LiteLLM's ollama path routes to
     the legacy /api/generate endpoint and mis-maps tool_calls into content)."""
 
@@ -152,7 +147,14 @@ class LLMClient:
 
     @property
     def litellm_model(self) -> str:
-        prefix = LITELLM_PREFIXES[self.config.provider]
+        """The config's provider+model as a LiteLLM model string.
+
+        Providers LiteLLM routes bare (claude, openai) carry prefix "". The
+        startswith guard keeps a user who typed the fully-qualified name —
+        "dashscope/qwen3-max" — from getting it applied twice, and leaves
+        nested names like "anthropic/claude-sonnet-4.6" under openrouter/ intact.
+        """
+        prefix = providers.get(self.config.provider).prefix
         model = self.config.model
         if prefix and not model.startswith(prefix):
             return prefix + model

@@ -86,7 +86,7 @@ PROVIDERS: tuple[ProviderInfo, ...] = (
     ),
     ProviderInfo(
         "openrouter", "OpenRouter", "openrouter/", "openrouter", "openrouter_api_key",
-        ("openrouter/auto", "anthropic/claude-sonnet-4.6", "openai/gpt-5.2",
+        ("auto", "anthropic/claude-sonnet-4.6", "openai/gpt-5.2",
          "deepseek/deepseek-v3.2"),
     ),
     ProviderInfo(
