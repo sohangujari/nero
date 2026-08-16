@@ -38,6 +38,10 @@ datas += collect_data_files("litellm")
 # keyring resolves OS backends via entry points at runtime.
 hiddenimports += collect_submodules("keyring")
 
+# questionary's picker is prompt_toolkit; its key bindings and terminal
+# backends resolve at runtime, so static analysis misses them.
+hiddenimports += collect_submodules("prompt_toolkit")
+
 a = Analysis(
     ["../nero/__main__.py"],
     pathex=[".."],
