@@ -7,14 +7,9 @@ from platformdirs import user_config_dir
 from pydantic import ValidationError
 
 from nero.config.schema import NeroConfig
+from nero.llm import providers
 
 KEYRING_SERVICE = "nero"
-# One keyring entry per cloud provider; ollama is local and keyless.
-KEYRING_ENTRIES = {
-    "claude": "anthropic_api_key",
-    "openai": "openai_api_key",
-    "gemini": "gemini_api_key",
-}
 
 
 class ConfigError(Exception):
@@ -67,11 +62,24 @@ class ConfigManager:
         return config
 
     @staticmethod
+    def _entry(provider: str) -> str | None:
+        """The keyring entry for a provider, or None if it needs no key.
+
+        Unknown providers answer None rather than raising: `config show` and the
+        menu both render through here, and a config holding a name this build
+        doesn't know must not crash the display.
+        """
+        try:
+            return providers.get(provider).keyring_entry
+        except KeyError:
+            return None
+
+    @staticmethod
     def provider_needs_key(provider: str) -> bool:
-        return provider in KEYRING_ENTRIES
+        return ConfigManager._entry(provider) is not None
 
     def get_api_key(self, provider: str = "claude") -> str | None:
-        entry = KEYRING_ENTRIES.get(provider)
+        entry = self._entry(provider)
         if entry is None:
             return None
         try:
@@ -85,7 +93,7 @@ class ConfigManager:
             return None
 
     def set_api_key(self, provider: str, value: str) -> None:
-        entry = KEYRING_ENTRIES.get(provider)
+        entry = self._entry(provider)
         if entry is None:
             raise ConfigError(f"Provider {provider!r} does not use an API key.")
         keyring.set_password(KEYRING_SERVICE, entry, value)

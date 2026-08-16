@@ -4,6 +4,7 @@ from pydantic import ValidationError
 
 from nero.config.manager import ConfigError, ConfigManager
 from nero.config.schema import AssistantConfig, LLMConfig, NeroConfig
+from nero.llm import providers
 
 
 class TestSchema:
@@ -282,3 +283,46 @@ class TestCLI:
         assert result.exit_code == 1
         assert "openai" in result.output
         assert "nero config" in result.output
+
+
+class TestKeyringAcrossProviders:
+    def test_every_cloud_provider_needs_a_key(self, manager):
+        for info in providers.PROVIDERS:
+            expected = info.name != "ollama"
+            assert manager.provider_needs_key(info.name) is expected, info.name
+
+    def test_keys_round_trip_per_provider(self, manager, monkeypatch):
+        store = {}
+        monkeypatch.setattr(
+            "keyring.set_password", lambda service, entry, value: store.__setitem__((service, entry), value)
+        )
+        monkeypatch.setattr("keyring.get_password", lambda service, entry: store.get((service, entry)))
+        for info in providers.PROVIDERS:
+            if info.keyring_entry is None:
+                continue
+            manager.set_api_key(info.name, f"key-for-{info.name}")
+        for info in providers.PROVIDERS:
+            if info.keyring_entry is None:
+                continue
+            assert manager.get_api_key(info.name) == f"key-for-{info.name}"
+
+    def test_existing_entry_names_are_preserved(self, manager, monkeypatch):
+        """A key stored before Phase 6 must still be found — no migration."""
+        monkeypatch.setattr(
+            "keyring.get_password",
+            lambda service, entry: "old-key" if (service, entry) == ("nero", "anthropic_api_key") else None,
+        )
+        assert manager.get_api_key("claude") == "old-key"
+
+    def test_friendly_names_map_to_upstream_entries(self):
+        assert providers.get("qwen").keyring_entry == "dashscope_api_key"
+        assert providers.get("glm").keyring_entry == "zai_api_key"
+        assert providers.get("kimi").keyring_entry == "moonshot_api_key"
+
+    def test_keyless_provider_rejects_a_key(self, manager):
+        with pytest.raises(ConfigError):
+            manager.set_api_key("ollama", "nope")
+
+    def test_unknown_provider_has_no_key(self, manager):
+        assert manager.provider_needs_key("nonesuch") is False
+        assert manager.get_api_key("nonesuch") is None
