@@ -2,7 +2,13 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-Provider = Literal["claude", "openai", "gemini", "ollama"]
+# Kept hand-written because pydantic needs the Literal at the type level; it
+# cannot be generated from nero.llm.providers.PROVIDERS without losing static
+# typing. tests/test_providers.py asserts the two stay identical.
+Provider = Literal[
+    "claude", "openai", "gemini", "ollama", "mistral", "deepseek", "minimax",
+    "kimi", "qwen", "xai", "glm", "openrouter", "groq",
+]
 Mode = Literal["online", "offline"]
 
 

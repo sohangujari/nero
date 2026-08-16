@@ -29,10 +29,10 @@ class TestSchema:
         assert config.llm.provider == "claude"
 
     def test_provider_literal(self):
-        for provider in ("claude", "openai", "gemini", "ollama"):
+        for provider in ("claude", "openai", "gemini", "ollama", "mistral", "glm", "qwen"):
             assert NeroConfig.model_validate({"llm": {"provider": provider}}).llm.provider == provider
         with pytest.raises(ValidationError):
-            NeroConfig.model_validate({"llm": {"provider": "grok"}})
+            NeroConfig.model_validate({"llm": {"provider": "nonesuch"}})
 
     def test_hardware_defaults_to_undetected(self):
         hardware = NeroConfig().hardware
