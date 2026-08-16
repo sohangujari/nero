@@ -86,8 +86,12 @@ PROVIDERS: tuple[ProviderInfo, ...] = (
     ),
     ProviderInfo(
         "openrouter", "OpenRouter", "openrouter/", "openrouter", "openrouter_api_key",
-        ("auto", "anthropic/claude-sonnet-4.6", "openai/gpt-5.2",
-         "deepseek/deepseek-v3.2"),
+        # LiteLLM's router meta-model is "openrouter/openrouter/auto", whose bare form
+        # begins with this provider's own prefix — the startswith guard in
+        # LLMClient.litellm_model would then leave it half-qualified. Left off the
+        # shortlist rather than branching the prefix path for one entry; it is still
+        # reachable by typing the full name.
+        ("anthropic/claude-sonnet-4.6", "openai/gpt-5.2", "deepseek/deepseek-v3.2"),
     ),
     ProviderInfo(
         "groq", "Groq", "groq/", "groq", "groq_api_key",
