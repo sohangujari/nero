@@ -91,6 +91,17 @@ class TestTTYPath:
         assert ui.pick("Provider", CHOICES, default="claude") is None
 
 
+class TestArrowPickerFailure:
+    def test_terminal_failure_degrades_to_the_numbered_prompt(self, terminal, monkeypatch):
+        """A prompt_toolkit failure must cost the user a nicer picker, never the task."""
+        def boom(*args, **kwargs):
+            raise RuntimeError("no console screen buffer")
+
+        monkeypatch.setattr(ui, "_pick_arrows", boom)
+        monkeypatch.setattr(ui.Prompt, "ask", lambda *a, **k: "2")
+        assert ui.pick("Provider", CHOICES, default="claude") == "mistral"
+
+
 class TestEmptyChoices:
     def test_no_choices_means_no_change(self, piped):
         assert ui.pick("Provider", [], default=None) is None

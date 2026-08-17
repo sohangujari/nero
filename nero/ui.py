@@ -27,7 +27,10 @@ def pick(
     if not choices:
         return None
     if _interactive():
-        return _pick_arrows(title, choices, default)
+        try:
+            return _pick_arrows(title, choices, default)
+        except Exception:  # noqa: BLE001 — no terminal failure may cost the user the task
+            pass
     return _pick_numbered(title, choices, default, console or Console())
 
 
@@ -60,6 +63,8 @@ def _pick_numbered(
     answer = Prompt.ask(
         "Number (Enter to keep current)", default="", show_default=False, console=console
     ).strip()
-    if not answer.isdigit() or not 1 <= int(answer) <= len(choices):
+    if not answer.isdecimal() or not 1 <= int(answer) <= len(choices):
+        if answer:
+            console.print(f"[yellow]Pick 1–{len(choices)}.[/yellow]")
         return None
     return choices[int(answer) - 1][0]

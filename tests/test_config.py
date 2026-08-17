@@ -231,9 +231,10 @@ class TestCLI:
 
     def test_first_run_setup_saves_key_config_and_hardware(self, cli_env, detected):
         tmp_path, store = cli_env
-        # Input: Enter accepts the default provider (claude), then the API key.
+        # Input: Enter accepts the default provider (claude), Enter again keeps
+        # the default model in the model picker, then the API key.
         # After setup the chat loop starts; EOF on stdin ends it cleanly.
-        result = runner.invoke(cli.app, [], input="\nsk-ant-first-run-key\n")
+        result = runner.invoke(cli.app, [], input="\n\nsk-ant-first-run-key\n")
         assert "Nero is ready" in result.output
         assert store[("nero", "anthropic_api_key")] == "sk-ant-first-run-key"
         loaded = ConfigManager(config_dir=tmp_path).load()

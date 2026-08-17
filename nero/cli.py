@@ -420,12 +420,14 @@ def _first_time_setup(manager: ConfigManager) -> None:
     config.llm.provider = provider
     if provider == "ollama":
         config.llm.model = Prompt.ask("Local model", default=recommendation, console=console)
+        manager.save(config)
         console.print("Ollama runs locally — no key needed.")
     else:
         config.llm.model = providers.get(provider).default_model
+        manager.save(config)
+        _pick_model(manager, provider, config.llm.model)
         api_key = typer.prompt(f"{provider} API key", hide_input=True).strip()
         manager.set_api_key(provider, api_key)
-    manager.save(config)
     console.print("[bold green]Nero is ready.[/bold green]\n")
 
 
@@ -481,9 +483,11 @@ def _warn_if_model_mismatched(manager: ConfigManager) -> None:
 
     Only fires when the model sits in another provider's curated list — that's
     a fact, not a guess. Unknown models stay silent: the same "better quiet
-    than a false alarm" rule as _warn_if_no_tool_support, and consulting
-    LiteLLM's catalog to settle more cases would put a 1.4-2.9s import on a
-    command scripts call in a loop.
+    than a false alarm" rule as _warn_if_no_tool_support. This deliberately
+    doesn't reach for catalog_models to settle more cases: that import is lazy
+    so nero.llm.providers stays importable and testable without litellm
+    installed, not so call sites like this one can dodge a startup cost —
+    cli.py already pays the litellm import via LLMClient at module load.
 
     Warns only. Never rewrites the model: a script that sets a provider and
     then sets a model must not race against a silent correction.
@@ -668,7 +672,7 @@ def _interactive_menu() -> None:
             _warn_if_no_tool_support(manager)
         elif choice == "4":
             if not manager.provider_needs_key(provider):
-                console.print("Ollama runs locally — no API key needed.")
+                console.print(f"{provider} runs locally — no API key needed.")
                 continue
             new_key = typer.prompt(f"{provider} API key", hide_input=True).strip()
             if new_key:
@@ -747,8 +751,9 @@ _CUSTOM_ROW = "\0custom"
 def _pick_model(manager: ConfigManager, provider: str, current: str) -> None:
     """Curated shortlist first, the full LiteLLM catalog and free text behind it.
 
-    The catalog is only fetched when its row is chosen — the litellm import
-    costs 1.4-2.9s and drawing a menu must not pay it.
+    The catalog is only fetched when its row is chosen — the lazy import keeps
+    `nero.llm.providers` free of a litellm dependency at import time, which
+    keeps it independently importable and testable.
     """
     info = providers.get(provider)
     if not info.models:
@@ -784,7 +789,7 @@ def _pick_model(manager: ConfigManager, provider: str, current: str) -> None:
     if picked == _CUSTOM_ROW:
         picked = Prompt.ask("Model name", default=current, console=console).strip()
 
-    if picked and not picked.startswith("\0"):
+    if picked and picked not in (_CATALOG_ROW, _CUSTOM_ROW):
         manager.set_value("llm.model", picked)
 
 
@@ -819,7 +824,7 @@ def _skills_menu(manager: ConfigManager, config: NeroConfig) -> None:
     ).strip()
     if not choice:
         return
-    if not choice.isdigit() or not 1 <= int(choice) <= len(names):
+    if not choice.isdecimal() or not 1 <= int(choice) <= len(names):
         console.print(f"[yellow]Pick 1–{len(names)}.[/yellow]")
         return
     name = names[int(choice) - 1]

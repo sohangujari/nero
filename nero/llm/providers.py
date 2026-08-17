@@ -117,9 +117,9 @@ def names() -> tuple[str, ...]:
 def catalog_models(name: str) -> list[str]:
     """Every tool-capable chat model LiteLLM knows for this provider, bare.
 
-    The import is deliberately lazy and inside the function: importing litellm
-    costs a measured 1.4-2.9s, and `nero config` must not pay that just to draw
-    a menu the user may never expand.
+    The import is deliberately lazy and inside the function: it keeps this
+    module free of a litellm dependency at import time, so `nero.llm.providers`
+    stays importable and testable without litellm installed.
 
     Returns [] on anything going wrong — unknown provider, missing litellm, a
     catalog shape that changed under us. Every caller degrades to free-text
@@ -143,7 +143,14 @@ def catalog_models(name: str) -> list[str]:
                 continue
             if meta.get("mode") != "chat":
                 continue
-            found.add(model.removeprefix(info.prefix) if info.prefix else model)
+            bare = model.removeprefix(info.prefix) if info.prefix else model
+            # Self-prefixed names (openrouter/auto) would keep their own provider
+            # prefix as the bare form, and LLMClient.litellm_model's startswith
+            # guard would then leave them half-qualified. Same reason openrouter/auto
+            # is off the curated shortlist.
+            if info.prefix and bare.startswith(info.prefix):
+                continue
+            found.add(bare)
         return sorted(found)
     except Exception:  # noqa: BLE001 — any catalog failure degrades to free text
         return []

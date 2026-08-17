@@ -75,6 +75,14 @@ class TestCatalog:
     def test_unknown_provider_returns_empty(self):
         assert providers.catalog_models("nonesuch") == []
 
+    def test_excludes_self_prefixed_models(self):
+        """openrouter/auto's bare form still starts with "openrouter/", so the
+        startswith guard in litellm_model would leave it half-qualified. Dropped
+        from the curated list for this reason; the catalog must drop it too."""
+        models = providers.catalog_models("openrouter")
+        assert models, "openrouter should have tool-capable chat models"
+        assert not any(m.startswith("openrouter/") for m in models)
+
     def test_import_failure_degrades_to_empty(self, monkeypatch):
         """A broken/absent litellm must cost the user free-text entry, never a
         crash in the config menu."""

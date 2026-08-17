@@ -65,9 +65,9 @@ class ConfigManager:
     def _entry(provider: str) -> str | None:
         """The keyring entry for a provider, or None if it needs no key.
 
-        Unknown providers answer None rather than raising: `config show` and the
-        menu both render through here, and a config holding a name this build
-        doesn't know must not crash the display.
+        Unknown providers answer None rather than raising: this keeps the
+        function total for callers that pass an unvalidated string, rather than
+        one already checked against the `Provider` Literal.
         """
         try:
             return providers.get(provider).keyring_entry
