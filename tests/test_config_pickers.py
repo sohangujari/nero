@@ -111,29 +111,39 @@ class TestSkillsCheckbox:
     def test_toggling_off_writes_only_the_changed_key(
         self, monkeypatch, tmp_path, isolate_audit_log
     ):
+        """A broken rewrite of the loop could write every toggle back with
+        correct values and still pass a state-only assertion. Spy on
+        set_value so a regression that rewrites all four keys — not just the
+        one that changed — fails here even though the resulting state would
+        look right."""
         manager = _manager(tmp_path)
         assert manager.load().skills.enabled.open_app is True
         assert manager.load().skills.enabled.play_music is True
+        set_calls = []
+        original_set_value = manager.set_value
+
+        def spy_set_value(key, *a, **kw):
+            set_calls.append(key)
+            return original_set_value(key, *a, **kw)
+
+        monkeypatch.setattr(manager, "set_value", spy_set_value)
         monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
         # Row 10, then numbered choice 1 (open_app), then Enter to leave the
         # submenu, then blank to finish.
         runner.invoke(cli.app, ["config"], input="10\n1\n\n")
+        assert set_calls == ["skills.enabled.open_app"]
         after = manager.load().skills.enabled
         assert after.open_app is False
         assert after.play_music is True
 
-    def test_toggling_on_restores_a_disabled_skill(
-        self, monkeypatch, tmp_path, isolate_audit_log
-    ):
-        manager = _manager(tmp_path)
-        manager.set_value("skills.enabled.open_app", "false")
-        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
-        runner.invoke(cli.app, ["config"], input="10\n1\n\n")
-        assert manager.load().skills.enabled.open_app is True
-
     def test_enter_at_the_submenu_changes_nothing(
         self, monkeypatch, tmp_path, isolate_audit_log
     ):
+        """Guards the most dangerous failure mode in this task: collapsing
+        `None` (leave the config alone) into an empty set (disable every
+        skill). If a future edit dropped the `if picked is None: return`
+        guard, Enter at the submenu would silently disable all four skills
+        instead of changing nothing — this is what would catch that."""
         manager = _manager(tmp_path)
         before = manager.load().skills.enabled.model_dump()
         monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
