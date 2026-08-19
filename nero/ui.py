@@ -68,3 +68,65 @@ def _pick_numbered(
             console.print(f"[yellow]Pick 1–{len(choices)}.[/yellow]")
         return None
     return choices[int(answer) - 1][0]
+
+
+def pick_many(
+    title: str,
+    choices: list[tuple[str, str]],
+    selected: set[str],
+    console: Console | None = None,
+) -> set[str] | None:
+    """Choose any number of values from (value, label) pairs.
+
+    Returns the chosen set, or None meaning "no change" — a blank answer, an
+    out-of-range answer, and Esc/Ctrl-C on the checkbox. None is not the same
+    answer as an empty set: None leaves the config alone, an empty set turns
+    everything off. Callers must not collapse the two.
+    """
+    if not choices:
+        return None
+    if _interactive():
+        try:
+            return _pick_many_arrows(title, choices, selected)
+        except Exception:  # noqa: BLE001 — no terminal failure may cost the user the task
+            pass
+    return _pick_many_numbered(title, choices, selected, console or Console())
+
+
+def _pick_many_arrows(
+    title: str, choices: list[tuple[str, str]], selected: set[str]
+) -> set[str] | None:
+    # Imported here so a headless or piped run never loads prompt_toolkit.
+    import questionary
+
+    options = [
+        questionary.Choice(title=label, value=value, checked=value in selected)
+        for value, label in choices
+    ]
+    answer = questionary.checkbox(title, choices=options, qmark="").ask()
+    # ask() returns None on Esc/Ctrl-C and a list otherwise — including [].
+    return None if answer is None else set(answer)
+
+
+def _pick_many_numbered(
+    title: str, choices: list[tuple[str, str]], selected: set[str], console: Console
+) -> set[str] | None:
+    """One toggle per call, matching the numbered menu this replaces: scripted
+    runs and every existing test type a single number, not a list."""
+    table = Table(title=title, show_header=False, box=None, padding=(0, 2))
+    for index, (value, label) in enumerate(choices, start=1):
+        # Escaped: rich would read a bare [x] as a style tag and fail on it.
+        marker = "\\[x]" if value in selected else "\\[ ]"
+        table.add_row(f"{index}.", marker, label)
+    console.print(table)
+    answer = Prompt.ask(
+        "Toggle which number? (Enter to go back)",
+        default="",
+        show_default=False,
+        console=console,
+    ).strip()
+    if not answer.isdecimal() or not 1 <= int(answer) <= len(choices):
+        if answer:
+            console.print(f"[yellow]Pick 1–{len(choices)}.[/yellow]")
+        return None
+    return selected ^ {choices[int(answer) - 1][0]}
