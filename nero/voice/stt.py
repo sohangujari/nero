@@ -4,6 +4,18 @@ from abc import ABC, abstractmethod
 
 from nero.voice.errors import VoiceDependencyError
 
+# Curated faster-whisper sizes for the `nero config` picker. Deliberately not
+# exhaustive — the picker keeps a free-text escape row for distil-* builds and
+# Hugging Face repo ids, so this list only has to cover the common choices.
+STT_MODELS: list[tuple[str, str]] = [
+    ("tiny", "fastest, least accurate"),
+    ("base", "fast, fine for short commands"),
+    ("small", "balanced"),
+    ("medium", "slower, more accurate"),
+    ("large-v3", "slowest, most accurate"),
+    ("large-v3-turbo", "large-v3 accuracy at roughly small's speed"),
+]
+
 
 class STTEngine(ABC):
     @abstractmethod

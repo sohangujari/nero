@@ -40,7 +40,7 @@ from nero.voice import audio_io
 from nero.voice.audio_io import Player, record_until_enter, record_until_silence
 from nero.voice.errors import TTSLoadError, VoiceDependencyError
 from nero.voice.models import ensure_vad_model
-from nero.voice.stt import FasterWhisperSTT
+from nero.voice.stt import STT_MODELS, FasterWhisperSTT
 from nero.voice.tts import VOICE_CATALOG, build_tts
 from nero.voice.vad import VoiceActivityDetector
 from nero.voice.voice_loop import VoiceLoop
@@ -680,8 +680,15 @@ def _interactive_menu() -> None:
         elif choice == "5":
             manager.set_value("voice.enabled", str(not voice.enabled).lower())
         elif choice == "6":
-            new_model = Prompt.ask("STT model", default=voice.stt.model, console=console)
-            manager.set_value("voice.stt.model", new_model.strip() or voice.stt.model)
+            rows = [(model, f"{model}  ({note})") for model, note in STT_MODELS]
+            rows.append((_CUSTOM_ROW, "Type a model name…"))
+            picked = ui.pick("STT Model", rows, default=voice.stt.model, console=console)
+            if picked == _CUSTOM_ROW:
+                picked = Prompt.ask(
+                    "STT model", default=voice.stt.model, console=console
+                ).strip()
+            if picked and picked != _CUSTOM_ROW:
+                manager.set_value("voice.stt.model", picked)
         elif choice == "7":
             new_engine = Prompt.ask(
                 "TTS engine", choices=["kokoro", "chatterbox", "cloud"],
