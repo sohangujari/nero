@@ -147,7 +147,8 @@ class TestSkillsCheckbox:
         manager = _manager(tmp_path)
         before = manager.load().skills.enabled.model_dump()
         monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
-        runner.invoke(cli.app, ["config"], input="10\n\n\n")
+        result = runner.invoke(cli.app, ["config"], input="10\n\n\n")
+        assert result.exit_code == 0
         assert manager.load().skills.enabled.model_dump() == before
 
     def test_the_submenu_renders_checkbox_markers(
