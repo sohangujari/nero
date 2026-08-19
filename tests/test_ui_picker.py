@@ -1,6 +1,8 @@
 """The non-TTY fallback is a correctness requirement, not polish: every config
 menu test drives stdin through a pipe, and so does anyone scripting the menu."""
 
+import sys
+
 import pytest
 from rich.console import Console
 
@@ -193,3 +195,110 @@ class TestPickManyFailure:
 class TestPickManyEmptyChoices:
     def test_no_choices_means_no_change(self, piped):
         assert ui.pick_many("Skills", [], set()) is None
+
+
+# --- Fake `questionary`, for exercising the arrow-picker bodies themselves ---
+#
+# Every TTY-path test above monkeypatches `_pick_arrows`/`_pick_many_arrows`
+# wholesale, so those functions' own bodies never run in the suite. `import
+# questionary` inside them consults `sys.modules`, so installing a fake there
+# lets the real bodies execute without a terminal. This is the smallest fake
+# that satisfies both call sites: a `Choice` that records what it was built
+# with, and `select`/`checkbox` calls that record their arguments and hand
+# back a canned answer via `.ask()`.
+
+
+class FakeChoice:
+    def __init__(self, title, value, checked=False):
+        self.title = title
+        self.value = value
+        self.checked = checked
+
+
+class FakeQuestion:
+    def __init__(self, answer):
+        self._answer = answer
+
+    def ask(self):
+        return self._answer
+
+
+class FakeQuestionary:
+    Choice = FakeChoice
+
+    def __init__(self, answer):
+        self.answer = answer
+        self.select_calls = []
+        self.checkbox_calls = []
+
+    def select(self, title, choices, default=None, qmark=""):
+        self.select_calls.append(
+            {"title": title, "choices": choices, "default": default, "qmark": qmark}
+        )
+        return FakeQuestion(self.answer)
+
+    def checkbox(self, title, choices, qmark=""):
+        self.checkbox_calls.append({"title": title, "choices": choices, "qmark": qmark})
+        return FakeQuestion(self.answer)
+
+
+@pytest.fixture
+def fake_questionary(monkeypatch):
+    """Installs a `FakeQuestionary` under `sys.modules["questionary"]` and
+    returns it so the test can inspect what was called and set the answer
+    `.ask()` will hand back."""
+
+    def install(answer):
+        fake = FakeQuestionary(answer)
+        monkeypatch.setitem(sys.modules, "questionary", fake)
+        return fake
+
+    return install
+
+
+class TestPickArrowsBody:
+    """`_pick_arrows` is a near pass-through, so this only pins the two things
+    that matter: the chosen value comes back, and Esc/Ctrl-C (`None`) stays
+    `None` rather than being coerced into something else."""
+
+    def test_the_chosen_value_comes_back(self, fake_questionary):
+        fake_questionary("mistral")
+        assert ui._pick_arrows("Provider", CHOICES, "claude") == "mistral"
+
+    def test_none_answer_stays_none(self, fake_questionary):
+        fake_questionary(None)
+        assert ui._pick_arrows("Provider", CHOICES, "claude") is None
+
+
+class TestPickManyArrowsBody:
+    """Runs the real `_pick_many_arrows` body — the one path the rest of the
+    suite cannot reach, since every other test monkeypatches this function
+    away. This is where the phase's headline bug would actually surface: an
+    implementation written as `set(answer) if answer else None` returns the
+    same `None` as Esc/Ctrl-C for "I selected nothing", silently leaving the
+    config unchanged instead of disabling every skill — and every other test
+    in this file, which stubs this function out, would stay green."""
+
+    def test_empty_answer_list_returns_an_empty_set_not_none(self, fake_questionary):
+        fake_questionary([])
+        result = ui._pick_many_arrows("Skills", MANY, {"open_app"})
+        assert result == set()
+        assert result is not None
+
+    def test_none_answer_returns_none(self, fake_questionary):
+        fake_questionary(None)
+        assert ui._pick_many_arrows("Skills", MANY, {"open_app"}) is None
+
+    def test_non_empty_answer_returns_exactly_that_set(self, fake_questionary):
+        fake_questionary(["get_weather", "play_music"])
+        result = ui._pick_many_arrows("Skills", MANY, {"open_app"})
+        assert result == {"get_weather", "play_music"}
+
+    def test_choices_are_checked_for_exactly_the_selected_values(self, fake_questionary):
+        fake = fake_questionary([])
+        ui._pick_many_arrows("Skills", MANY, {"open_app", "play_music"})
+        (call,) = fake.checkbox_calls
+        checked = {choice.value for choice in call["choices"] if choice.checked}
+        unchecked = {choice.value for choice in call["choices"] if not choice.checked}
+        assert checked == {"open_app", "play_music"}
+        assert unchecked == {"get_weather"}
