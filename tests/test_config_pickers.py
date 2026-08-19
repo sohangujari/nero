@@ -53,3 +53,33 @@ class TestSTTModelPicker:
         # Row 6, then Enter at the picker, then blank to finish.
         runner.invoke(cli.app, ["config"], input="6\n\n\n")
         assert "voice.stt.model" not in set_calls
+
+
+class TestTTSEnginePicker:
+    def test_rows_match_the_schema_literal(self):
+        """The picker table is presentation text; the Literal is the source of
+        truth. Adding an engine to either side alone must fail this."""
+        from typing import get_args
+
+        from nero.config.schema import TTSConfig
+
+        assert [engine for engine, _label in cli.TTS_ENGINES] == list(
+            get_args(TTSConfig.model_fields["engine"].annotation)
+        )
+
+    def test_picking_a_row_writes_the_engine(self, monkeypatch, tmp_path, isolate_audit_log):
+        manager = _manager(tmp_path)
+        assert manager.load().voice.tts.engine == "kokoro"
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        # Row 7, then numbered choice 2 (chatterbox), then blank to finish.
+        runner.invoke(cli.app, ["config"], input="7\n2\n\n")
+        assert manager.load().voice.tts.engine == "chatterbox"
+
+    def test_enter_leaves_the_engine_alone(self, monkeypatch, tmp_path, isolate_audit_log):
+        manager = _manager(tmp_path)
+        set_calls = []
+        monkeypatch.setattr(manager, "set_value", lambda key, *a, **kw: set_calls.append(key))
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        # Row 7, then Enter at the picker, then blank to finish.
+        runner.invoke(cli.app, ["config"], input="7\n\n\n")
+        assert "voice.tts.engine" not in set_calls

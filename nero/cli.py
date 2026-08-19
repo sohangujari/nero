@@ -690,11 +690,11 @@ def _interactive_menu() -> None:
             if picked and picked != _CUSTOM_ROW:
                 manager.set_value("voice.stt.model", picked)
         elif choice == "7":
-            new_engine = Prompt.ask(
-                "TTS engine", choices=["kokoro", "chatterbox", "cloud"],
-                default=voice.tts.engine, console=console,
+            new_engine = ui.pick(
+                "TTS Engine", TTS_ENGINES, default=voice.tts.engine, console=console
             )
-            manager.set_value("voice.tts.engine", new_engine)
+            if new_engine:
+                manager.set_value("voice.tts.engine", new_engine)
         elif choice == "8":
             _pick_voice(manager, voice.tts.voice_id)
         elif choice == "9":
@@ -753,6 +753,14 @@ def _pick_voice(manager: ConfigManager, current: str) -> None:
 # real model name, so the caller can tell a chosen model from a chosen action.
 _CATALOG_ROW = "\0catalog"
 _CUSTOM_ROW = "\0custom"
+
+# What the row 7 picker shows. This is presentation text; the Literal on
+# TTSConfig is the source of truth, and a test asserts the two stay in step.
+TTS_ENGINES: list[tuple[str, str]] = [
+    ("kokoro", "Kokoro — local, fast, no network"),
+    ("chatterbox", "Chatterbox — local, more expressive, heavier"),
+    ("cloud", "Cloud — network required"),
+]
 
 
 def _pick_model(manager: ConfigManager, provider: str, current: str) -> None:
