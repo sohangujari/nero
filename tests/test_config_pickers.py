@@ -47,8 +47,9 @@ class TestSTTModelPicker:
 
     def test_enter_leaves_the_model_alone(self, monkeypatch, tmp_path, isolate_audit_log):
         manager = _manager(tmp_path)
-        before = manager.load().voice.stt.model
+        set_calls = []
+        monkeypatch.setattr(manager, "set_value", lambda key, *a, **kw: set_calls.append(key))
         monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
         # Row 6, then Enter at the picker, then blank to finish.
         runner.invoke(cli.app, ["config"], input="6\n\n\n")
-        assert manager.load().voice.stt.model == before
+        assert "voice.stt.model" not in set_calls
