@@ -63,11 +63,22 @@ def _pick_numbered(
     answer = Prompt.ask(
         "Number (Enter to keep current)", default="", show_default=False, console=console
     ).strip()
-    if not answer.isdecimal() or not 1 <= int(answer) <= len(choices):
-        if answer:
-            console.print(f"[yellow]Pick 1–{len(choices)}.[/yellow]")
+    index = _parse_selection(answer, len(choices), console)
+    if index is None:
         return None
-    return choices[int(answer) - 1][0]
+    return choices[index][0]
+
+
+def _parse_selection(answer: str, count: int, console: Console) -> int | None:
+    """Validate a numbered-prompt answer, printing the `Pick 1-N.` warning on
+    a non-empty invalid answer. Returns the 0-based index, or None on a blank
+    or out-of-range answer — shared by `_pick_numbered` and
+    `_pick_many_numbered` so the range check can't drift between them."""
+    if not answer.isdecimal() or not 1 <= int(answer) <= count:
+        if answer:
+            console.print(f"[yellow]Pick 1–{count}.[/yellow]")
+        return None
+    return int(answer) - 1
 
 
 def pick_many(
@@ -125,8 +136,7 @@ def _pick_many_numbered(
         show_default=False,
         console=console,
     ).strip()
-    if not answer.isdecimal() or not 1 <= int(answer) <= len(choices):
-        if answer:
-            console.print(f"[yellow]Pick 1–{len(choices)}.[/yellow]")
+    index = _parse_selection(answer, len(choices), console)
+    if index is None:
         return None
-    return selected ^ {choices[int(answer) - 1][0]}
+    return selected ^ {choices[index][0]}
