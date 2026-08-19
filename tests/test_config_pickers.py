@@ -105,3 +105,61 @@ class TestVoicePicker:
         monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
         result = runner.invoke(cli.app, ["config"], input="8\n\n\n")
         assert "Bella (female)" in result.stdout
+
+
+class TestSkillsCheckbox:
+    def test_toggling_off_writes_only_the_changed_key(
+        self, monkeypatch, tmp_path, isolate_audit_log
+    ):
+        manager = _manager(tmp_path)
+        assert manager.load().skills.enabled.open_app is True
+        assert manager.load().skills.enabled.play_music is True
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        # Row 10, then numbered choice 1 (open_app), then Enter to leave the
+        # submenu, then blank to finish.
+        runner.invoke(cli.app, ["config"], input="10\n1\n\n")
+        after = manager.load().skills.enabled
+        assert after.open_app is False
+        assert after.play_music is True
+
+    def test_toggling_on_restores_a_disabled_skill(
+        self, monkeypatch, tmp_path, isolate_audit_log
+    ):
+        manager = _manager(tmp_path)
+        manager.set_value("skills.enabled.open_app", "false")
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        runner.invoke(cli.app, ["config"], input="10\n1\n\n")
+        assert manager.load().skills.enabled.open_app is True
+
+    def test_enter_at_the_submenu_changes_nothing(
+        self, monkeypatch, tmp_path, isolate_audit_log
+    ):
+        manager = _manager(tmp_path)
+        before = manager.load().skills.enabled.model_dump()
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        runner.invoke(cli.app, ["config"], input="10\n\n\n")
+        assert manager.load().skills.enabled.model_dump() == before
+
+    def test_the_submenu_renders_checkbox_markers(
+        self, monkeypatch, tmp_path, isolate_audit_log
+    ):
+        """The discriminating test for this task. The old submenu rendered a
+        four-column table with yes/no cells under an "enabled" header; the
+        pick_many fallback renders [x]/[ ] markers instead."""
+        manager = _manager(tmp_path)
+        manager.set_value("skills.enabled.open_app", "false")
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        result = runner.invoke(cli.app, ["config"], input="10\n\n\n")
+        assert "[x]" in result.stdout
+        assert "[ ]" in result.stdout
+
+    def test_network_needing_skills_are_labelled_in_plain_text(
+        self, monkeypatch, tmp_path, isolate_audit_log
+    ):
+        """questionary renders rich markup literally, so the annotation must
+        not be wrapped in [dim]...[/dim]."""
+        manager = _manager(tmp_path)
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        result = runner.invoke(cli.app, ["config"], input="10\n\n\n")
+        assert "get_weather (needs network)" in result.stdout
+        assert "[dim]" not in result.stdout

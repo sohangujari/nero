@@ -809,34 +809,23 @@ def _skills_summary(config: NeroConfig) -> str:
 
 def _skills_menu(manager: ConfigManager, config: NeroConfig) -> None:
     toggles = config.skills.enabled.model_dump()
-    names = list(toggles)
     # Ask the registry rather than hardcoding which skills need the network —
     # SkillMeta is the single source of truth.
     registry = build_registry(config)
-    table = Table(title="skills", show_header=True)
-    table.add_column("#")
-    table.add_column("skill")
-    table.add_column("enabled")
-    table.add_column("needs network")
-    for index, name in enumerate(names, start=1):
+    rows = []
+    for name in toggles:
         skill = registry.get(name)
         needs_network = skill is not None and skill.meta.requires_network
-        table.add_row(
-            str(index), name,
-            "yes" if toggles[name] else "no",
-            "yes" if needs_network else "no",
-        )
-    console.print(table)
-    choice = Prompt.ask(
-        "Toggle which skill? (Enter to go back)", default="", show_default=False, console=console
-    ).strip()
-    if not choice:
+        # Plain text: questionary does not parse rich markup.
+        rows.append((name, f"{name} (needs network)" if needs_network else name))
+    picked = ui.pick_many(
+        "Skills", rows, {name for name, on in toggles.items() if on}, console=console
+    )
+    if picked is None:
         return
-    if not choice.isdecimal() or not 1 <= int(choice) <= len(names):
-        console.print(f"[yellow]Pick 1–{len(names)}.[/yellow]")
-        return
-    name = names[int(choice) - 1]
-    manager.set_value(f"skills.enabled.{name}", str(not toggles[name]).lower())
+    for name, was_on in toggles.items():
+        if (name in picked) != was_on:
+            manager.set_value(f"skills.enabled.{name}", str(name in picked).lower())
 
 
 def _switch_provider(manager: ConfigManager, config: NeroConfig, new_provider: str) -> None:
