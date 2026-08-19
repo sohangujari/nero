@@ -687,7 +687,7 @@ def _interactive_menu() -> None:
                 picked = Prompt.ask(
                     "STT model", default=voice.stt.model, console=console
                 ).strip()
-            if picked and picked != _CUSTOM_ROW:
+            if picked:
                 manager.set_value("voice.stt.model", picked)
         elif choice == "7":
             new_engine = ui.pick(
