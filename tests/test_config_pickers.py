@@ -83,3 +83,25 @@ class TestTTSEnginePicker:
         # Row 7, then Enter at the picker, then blank to finish.
         runner.invoke(cli.app, ["config"], input="7\n\n\n")
         assert "voice.tts.engine" not in set_calls
+
+
+class TestVoicePicker:
+    def test_enter_does_not_silently_reassign_the_voice(
+        self, monkeypatch, tmp_path, isolate_audit_log
+    ):
+        """The old numbered table defaulted to row 1, so Enter overwrote a
+        non-default voice with Bella."""
+        manager = _manager(tmp_path)
+        manager.set_value("voice.tts.voice_id", "bm_george")
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        # Row 8, then Enter at the picker, then blank to finish.
+        runner.invoke(cli.app, ["config"], input="8\n\n\n")
+        assert manager.load().voice.tts.voice_id == "bm_george"
+
+    def test_the_picker_labels_carry_the_gender(
+        self, monkeypatch, tmp_path, isolate_audit_log
+    ):
+        manager = _manager(tmp_path)
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        result = runner.invoke(cli.app, ["config"], input="8\n\n\n")
+        assert "Bella (female)" in result.stdout

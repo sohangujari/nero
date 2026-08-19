@@ -732,21 +732,14 @@ def _interactive_menu() -> None:
 
 
 def _pick_voice(manager: ConfigManager, current: str) -> None:
-    table = Table(title="voices", show_header=True)
-    table.add_column("#")
-    table.add_column("id")
-    table.add_column("name")
-    table.add_column("gender")
-    for i, (vid, name, gender) in enumerate(VOICE_CATALOG, start=1):
-        marker = " (current)" if vid == current else ""
-        table.add_row(str(i), vid, name + marker, gender)
-    console.print(table)
-    choice = Prompt.ask(
-        "Voice number", choices=[str(i) for i in range(1, len(VOICE_CATALOG) + 1)],
-        default="1", console=console,
+    picked = ui.pick(
+        "Voice",
+        [(vid, f"{name} ({gender})") for vid, name, gender in VOICE_CATALOG],
+        default=current,
+        console=console,
     )
-    voice_id = VOICE_CATALOG[int(choice) - 1][0]
-    manager.set_value("voice.tts.voice_id", voice_id)
+    if picked:
+        manager.set_value("voice.tts.voice_id", picked)
 
 
 # Sentinels for the model picker's non-model rows. "\0" can't collide with a
