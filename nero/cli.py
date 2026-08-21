@@ -565,11 +565,11 @@ def _voice_gender(voice_id: str) -> str:
 
 def _key_display(manager: ConfigManager, provider: str, masked: bool = True) -> str:
     if not manager.provider_needs_key(provider):
-        return "[dim]not needed[/dim]"
+        return "not needed"
     api_key = manager.get_api_key(provider)
     if not api_key:
-        return "[dim]not set[/dim]"
-    return manager.mask_api_key(api_key) if masked else "[green]configured[/green]"
+        return "not set"
+    return manager.mask_api_key(api_key) if masked else "configured"
 
 
 def _config_table(manager: ConfigManager, config: NeroConfig) -> Table:
@@ -608,52 +608,49 @@ def _interactive_menu() -> None:
         config = _load_or_exit(manager)
         provider = config.llm.provider
 
-        body = Table(show_header=False, box=None, padding=(0, 2))
         hardware = config.hardware
         if hardware.detected_ram_gb is not None:
-            body.add_row(
-                "", "Detected",
-                f"{hardware.detected_ram_gb:g} GB RAM, {hardware.detected_cpu_cores} cores",
+            console.print(
+                f"[dim]{hardware.detected_ram_gb:g} GB RAM, {hardware.detected_cpu_cores} cores"
+                f" — recommended local model: {hardware.recommended_local_model or '-'}[/dim]"
             )
-            body.add_row("", "Recommended local model", hardware.recommended_local_model or "-")
         else:
-            body.add_row("", "Hardware", "[dim]not detected — run `nero detect`[/dim]")
-        body.add_row("", "", "")
-        body.add_row("1.", "Assistant Name", config.assistant.name)
-        body.add_row("2.", "LLM Provider", f"{provider}  [dim]\\[change][/dim]")
-        body.add_row("3.", "LLM Model", config.llm.model)
-        body.add_row("4.", f"API Key ({provider})", _key_display(manager, provider, masked=False))
-        voice = config.voice
-        body.add_row("5.", "Voice Enabled", "yes" if voice.enabled else "no")
-        body.add_row("6.", "STT Model", f"{voice.stt.model}  [dim]\\[auto][/dim]")
-        body.add_row("7.", "TTS Engine", voice.tts.engine)
-        body.add_row(
-            "8.", "Voice",
-            f"{voice.tts.voice_id} ({_voice_gender(voice.tts.voice_id)})  [dim]\\[change][/dim]",
-        )
-        body.add_row("9.", "Mode", f"{config.mode}  [dim]\\[toggle][/dim]")
-        body.add_row("10.", "Skills", _skills_summary(config))
-        body.add_row(
-            "11.", "Weather Location",
-            config.skills.weather.default_location or "[dim]not set[/dim]",
-        )
-        memory = config.memory
-        body.add_row("12.", "Memory", f"{'yes' if memory.enabled else 'no'}  [dim]\\[toggle][/dim]")
-        body.add_row("13.", "History Turns", str(memory.max_history_turns))
-        barge_in_hint = (
-            "  [dim](needs VAD auto-stop)[/dim]" if not voice.vad.enabled else ""
-        )
-        body.add_row(
-            "14.", "Barge-in",
-            f"{'yes' if voice.barge_in_active else 'no'}  [dim]\\[toggle][/dim]{barge_in_hint}",
-        )
-        body.add_row(
-            "15.", "VAD Auto-Stop", f"{'yes' if voice.vad.enabled else 'no'}  [dim]\\[toggle][/dim]"
-        )
-        console.print(Panel(body, title="nero config", subtitle="Enter a number to edit, Enter to finish"))
+            console.print("[dim]Hardware not detected — run `nero detect`[/dim]")
 
-        choice = Prompt.ask("Choice", default="", show_default=False, console=console).strip()
-        if choice == "":
+        voice = config.voice
+        memory = config.memory
+        barge_in_hint = "" if voice.vad.enabled else "  (needs VAD auto-stop)"
+        # Plain text, no rich markup: questionary renders labels verbatim, and
+        # a bare [x] would be a style tag to the numbered fallback's table.
+        rows = [
+            ("1", "Assistant Name", config.assistant.name),
+            ("2", "LLM Provider", f"{provider}  (change)"),
+            ("3", "LLM Model", config.llm.model),
+            ("4", f"API Key ({provider})", _key_display(manager, provider, masked=False)),
+            ("5", "Voice Enabled", "yes" if voice.enabled else "no"),
+            ("6", "STT Model", f"{voice.stt.model}  (auto)"),
+            ("7", "TTS Engine", voice.tts.engine),
+            ("8", "Voice", f"{voice.tts.voice_id} ({_voice_gender(voice.tts.voice_id)})"),
+            ("9", "Mode", f"{config.mode}  (toggle)"),
+            ("10", "Skills", _skills_summary(config)),
+            ("11", "Weather Location", config.skills.weather.default_location or "not set"),
+            ("12", "Memory", f"{'yes' if memory.enabled else 'no'}  (toggle)"),
+            ("13", "History Turns", str(memory.max_history_turns)),
+            (
+                "14", "Barge-in",
+                f"{'yes' if voice.barge_in_active else 'no'}  (toggle){barge_in_hint}",
+            ),
+            ("15", "VAD Auto-Stop", f"{'yes' if voice.vad.enabled else 'no'}  (toggle)"),
+        ]
+        # "" is the Done row: falsy, so it exits on the same branch Esc does,
+        # and so does the blank answer the numbered fallback still accepts.
+        choice = ui.pick(
+            "nero config",
+            [(value, f"{name:<20}  {text}") for value, name, text in rows] + [("", "Done")],
+            console=console,
+            prompt="Number (Enter to finish)",
+        )
+        if not choice:
             return
         if choice == "1":
             new_name = Prompt.ask("Assistant name", default=config.assistant.name, console=console)
@@ -725,9 +722,6 @@ def _interactive_menu() -> None:
             manager.set_value("voice.barge_in", str(not voice.barge_in).lower())
         elif choice == "15":
             manager.set_value("voice.vad.enabled", str(not voice.vad.enabled).lower())
-        else:
-            console.print("[yellow]Pick 1–15, or press Enter to finish.[/yellow]")
-            continue
         console.print("[green]Saved.[/green]\n")
 
 
@@ -804,7 +798,7 @@ def _pick_model(manager: ConfigManager, provider: str, current: str) -> None:
 def _skills_summary(config: NeroConfig) -> str:
     toggles = config.skills.enabled.model_dump()
     enabled = [name for name, on in toggles.items() if on]
-    return f"{len(enabled)}/{len(toggles)} enabled  [dim]\\[change][/dim]"
+    return f"{len(enabled)}/{len(toggles)} enabled  (change)"
 
 
 def _skills_menu(manager: ConfigManager, config: NeroConfig) -> None:

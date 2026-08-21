@@ -17,6 +17,7 @@ def pick(
     choices: list[tuple[str, str]],
     default: str | None = None,
     console: Console | None = None,
+    prompt: str = "Number (Enter to keep current)",
 ) -> str | None:
     """Choose one value from (value, label) pairs.
 
@@ -31,7 +32,7 @@ def pick(
             return _pick_arrows(title, choices, default)
         except Exception:  # noqa: BLE001 — no terminal failure may cost the user the task
             pass
-    return _pick_numbered(title, choices, default, console or Console())
+    return _pick_numbered(title, choices, default, console or Console(), prompt)
 
 
 def _interactive() -> bool:
@@ -53,16 +54,18 @@ def _pick_arrows(
 
 
 def _pick_numbered(
-    title: str, choices: list[tuple[str, str]], default: str | None, console: Console
+    title: str,
+    choices: list[tuple[str, str]],
+    default: str | None,
+    console: Console,
+    prompt: str,
 ) -> str | None:
     table = Table(title=title, show_header=False, box=None, padding=(0, 2))
     for index, (value, label) in enumerate(choices, start=1):
         marker = "  [dim](current)[/dim]" if value == default else ""
         table.add_row(f"{index}.", label + marker)
     console.print(table)
-    answer = Prompt.ask(
-        "Number (Enter to keep current)", default="", show_default=False, console=console
-    ).strip()
+    answer = Prompt.ask(prompt, default="", show_default=False, console=console).strip()
     index = _parse_selection(answer, len(choices), console)
     if index is None:
         return None

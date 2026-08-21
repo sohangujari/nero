@@ -174,3 +174,40 @@ class TestSkillsCheckbox:
         result = runner.invoke(cli.app, ["config"], input="10\n\n\n")
         assert "get_weather (needs network)" in result.stdout
         assert "[dim]" not in result.stdout
+
+
+class TestOuterMenuPicker:
+    """v1.5.3: the top-level row list is a picker too. Piped runs still type a
+    number — the numbered fallback is what every other menu test drives."""
+
+    def test_the_outer_menu_goes_through_ui_pick(self, monkeypatch, tmp_path, isolate_audit_log):
+        manager = _manager(tmp_path)
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        offered = []
+        answers = iter(["12", None])  # toggle Memory, then Esc out of the menu
+
+        def fake_pick(title, choices, **kwargs):
+            offered.append(choices)
+            return next(answers)
+
+        monkeypatch.setattr(cli.ui, "pick", fake_pick)
+        result = runner.invoke(cli.app, ["config"])
+
+        assert result.exit_code == 0
+        # Row values stay "1".."15" so the picker feeds the same dispatch chain.
+        assert [value for value, _label in offered[0][:15]] == [str(n) for n in range(1, 16)]
+        # A falsy last row is the whole exit contract: it and Esc share `not choice`.
+        assert offered[0][-1] == ("", "Done")
+        assert manager.load().memory.enabled is False
+
+    def test_a_piped_run_still_gets_the_numbered_rows(self, monkeypatch, tmp_path, isolate_audit_log):
+        """The arrow picker is invisible to scripts; the fallback is the whole
+        menu for them, so it must list every row and say how to leave."""
+        manager = _manager(tmp_path)
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        result = runner.invoke(cli.app, ["config"], input="\n")
+
+        assert result.exit_code == 0
+        assert "Assistant Name" in result.stdout
+        assert "VAD Auto-Stop" in result.stdout
+        assert "Enter to finish" in result.stdout
