@@ -421,3 +421,121 @@ class TestSurfaces:
         )
         assert result.exit_code == 0
         assert "belongs to" not in result.output
+
+
+def _anthropic_manager(tmp_path, base_url="https://api.moonshot.ai/anthropic"):
+    manager = ConfigManager(config_dir=tmp_path)
+    manager.save(
+        NeroConfig.model_validate(
+            {"llm": {"provider": "custom_anthropic", "model": "kimi-k2.5",
+                     "base_url": base_url}}
+        )
+    )
+    return manager
+
+
+class TestAnthropicStartupGate:
+    def test_a_keyless_anthropic_endpoint_starts(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cli, "ConfigManager", lambda: _anthropic_manager(tmp_path))
+        result = runner.invoke(cli.app, [])
+        assert result.exit_code == 0
+        assert "API key" not in result.output
+
+    def test_an_anthropic_endpoint_without_a_url_exits_with_the_right_message(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(cli, "ConfigManager", lambda: _anthropic_manager(tmp_path, None))
+        result = runner.invoke(cli.app, [])
+        assert result.exit_code == 1
+        assert "Endpoint URL" in result.output
+        assert "API key" not in result.output
+
+
+class TestAnthropicPicker:
+    def test_the_anthropic_fetcher_is_used(self, monkeypatch, tmp_path):
+        manager = _anthropic_manager(tmp_path)
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+
+        def wrong_fetcher(url, key=None):
+            raise AssertionError("OpenAI-dialect fetch_models called for custom_anthropic")
+
+        monkeypatch.setattr(cli.openai_compat, "fetch_models", wrong_fetcher)
+        monkeypatch.setattr(
+            cli.openai_compat, "fetch_models_anthropic",
+            lambda url, key=None: (url, ["kimi-k2.5", "kimi-latest"]),
+        )
+        # Menu row 3 -> picker row 1 (fetch) -> model row 2 -> finish.
+        runner.invoke(cli.app, ["config"], input="3\n1\n2\n\n")
+        assert manager.load().llm.model == "kimi-latest"
+
+    def test_a_corrected_anthropic_url_is_offered_and_stored(self, monkeypatch, tmp_path):
+        """A pasted OpenAI-style …/v1 base gets the suffix stripped."""
+        manager = _anthropic_manager(tmp_path, "http://localhost:8080/v1")
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        monkeypatch.setattr(
+            cli.openai_compat, "fetch_models_anthropic",
+            lambda url, key=None: (url.removesuffix("/v1"), ["m1"]),
+        )
+        # Fetch -> accept the correction (blank takes the yes default) -> model 1.
+        runner.invoke(cli.app, ["config"], input="3\n1\n\n1\n\n")
+        assert manager.load().llm.base_url == "http://localhost:8080"
+        assert manager.load().llm.model == "m1"
+
+
+class TestAnthropicSetupAndSurfaces:
+    def test_first_run_with_custom_anthropic_completes(self, monkeypatch, tmp_path):
+        manager = ConfigManager(config_dir=tmp_path)
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        monkeypatch.setattr(
+            cli, "detect_hardware",
+            lambda: HardwareSpecs(ram_gb=16.0, cpu_cores=8, os="Darwin", has_ollama=False),
+        )
+        # Provider row 15 (custom_anthropic, appended last) -> URL -> model row 2
+        # (type a name) -> name -> blank key. EOF then ends the chat loop.
+        result = runner.invoke(
+            cli.app, [],
+            input="15\nhttps://api.moonshot.ai/anthropic\n2\nkimi-k2.5\n\n",
+        )
+        assert result.exit_code == 0
+        assert "Traceback" not in result.output
+        loaded = manager.load()
+        assert loaded.llm.provider == "custom_anthropic"
+        assert loaded.llm.base_url == "https://api.moonshot.ai/anthropic"
+        assert loaded.llm.model == "kimi-k2.5"
+
+    def test_row_16_shows_for_custom_anthropic(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cli, "ConfigManager", lambda: _anthropic_manager(tmp_path))
+        result = runner.invoke(cli.app, ["config"], input="\n")
+        assert "Endpoint URL" in result.stdout
+
+    def test_config_show_lists_the_endpoint_for_custom_anthropic(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cli, "ConfigManager", lambda: _anthropic_manager(tmp_path))
+        result = runner.invoke(cli.app, ["config", "show"])
+        assert "https://api.moonshot.ai/anthropic" in result.output
+
+    def test_no_inert_warning_under_custom_anthropic(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cli, "ConfigManager", lambda: _anthropic_manager(tmp_path))
+        result = runner.invoke(
+            cli.app, ["config", "set", "llm.base_url", "https://api.z.ai/api/anthropic"]
+        )
+        assert "will not be used" not in result.output
+
+    def test_no_ownership_warning_under_custom_anthropic(self, monkeypatch, tmp_path):
+        """claude-sonnet-5 sits in claude's curated list, but a custom endpoint
+        can serve any model id — ownership means nothing there."""
+        monkeypatch.setattr(cli, "ConfigManager", lambda: _anthropic_manager(tmp_path))
+        result = runner.invoke(cli.app, ["config", "set", "llm.model", "claude-sonnet-5"])
+        assert "belongs to" not in result.output
+
+    def test_switching_between_dialects_keeps_the_url(self, monkeypatch, tmp_path):
+        """One slot, shared: moving custom -> custom_anthropic offers the same
+        URL as the prompt default and nothing clears it."""
+        manager = _custom_manager(tmp_path)
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        # Row 2 -> provider row 15 (custom_anthropic) -> accept URL default ->
+        # model row 2 -> name -> blank key -> finish.
+        result = runner.invoke(cli.app, ["config"], input="2\n15\n\n2\nkimi-k2.5\n\n\n")
+        assert result.exit_code == 0
+        loaded = manager.load()
+        assert loaded.llm.provider == "custom_anthropic"
+        assert loaded.llm.base_url == "http://localhost:1234/v1"

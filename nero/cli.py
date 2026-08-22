@@ -366,7 +366,7 @@ def _provider_preflight(manager: ConfigManager, config: NeroConfig) -> str | Non
     if provider == "ollama":
         _ollama_preflight(config.llm.model)
         return None
-    if provider == "custom" and not config.llm.base_url:
+    if provider in providers.CUSTOM_PROVIDERS and not config.llm.base_url:
         console.print(
             "[red]No Endpoint URL configured.[/red] Run [bold]nero config[/bold] "
             "and set the Endpoint URL."
@@ -429,9 +429,9 @@ def _first_time_setup(manager: ConfigManager) -> None:
         config.llm.model = Prompt.ask("Local model", default=recommendation, console=console)
         manager.save(config)
         console.print("Ollama runs locally — no key needed.")
-    elif provider == "custom":
+    elif provider in providers.CUSTOM_PROVIDERS:
         manager.save(config)  # provider only; the model is written by the helper
-        _setup_custom_endpoint(manager, None)
+        _setup_custom_endpoint(manager, provider, None)
     else:
         config.llm.model = providers.get(provider).default_model
         manager.save(config)
@@ -505,7 +505,7 @@ def _warn_if_model_mismatched(manager: ConfigManager) -> None:
     then sets a model must not race against a silent correction.
     """
     config = manager.load()
-    if config.llm.provider == "custom":
+    if config.llm.provider in providers.CUSTOM_PROVIDERS:
         return  # a custom endpoint can serve any model id; ownership means nothing there
     owners = [info.name for info in providers.PROVIDERS if config.llm.model in info.models]
     if not owners or config.llm.provider in owners:
@@ -526,12 +526,13 @@ def _warn_if_base_url_inert(manager: ConfigManager) -> None:
     mutation `_warn_if_model_mismatched` exists to avoid.
     """
     config = manager.load()
-    if config.llm.base_url is None or config.llm.provider == "custom":
+    if config.llm.base_url is None or config.llm.provider in providers.CUSTOM_PROVIDERS:
         return
     console.print(
         f"[yellow]Heads up:[/yellow] [bold]llm.base_url[/bold] applies only when "
-        f"[bold]llm.provider[/bold] is [bold]custom[/bold]; it is currently "
-        f"[bold]{config.llm.provider}[/bold], so this endpoint will not be used."
+        f"[bold]llm.provider[/bold] is a custom endpoint (custom, custom_anthropic); "
+        f"it is currently [bold]{config.llm.provider}[/bold], so this endpoint "
+        "will not be used."
     )
 
 
@@ -608,7 +609,7 @@ def _config_table(manager: ConfigManager, config: NeroConfig) -> Table:
     table.add_row("Assistant Name", config.assistant.name)
     table.add_row("LLM Provider", config.llm.provider)
     table.add_row("LLM Model", config.llm.model)
-    if config.llm.provider == "custom":
+    if config.llm.provider in providers.CUSTOM_PROVIDERS:
         table.add_row("Endpoint URL", config.llm.base_url or "not set")
     table.add_row("Mode", config.mode)
     table.add_row(f"API Key ({config.llm.provider})", _key_display(manager, config.llm.provider))
@@ -675,7 +676,7 @@ def _interactive_menu() -> None:
             ),
             ("15", "VAD Auto-Stop", f"{'yes' if voice.vad.enabled else 'no'}  (toggle)"),
         ]
-        if provider == "custom":
+        if provider in providers.CUSTOM_PROVIDERS:
             rows.append(("16", "Endpoint URL", config.llm.base_url or "not set"))
         # "" is the Done row: falsy, so it exits on the same branch Esc does,
         # and so does the blank answer the numbered fallback still accepts.
@@ -780,13 +781,18 @@ def _pick_voice(manager: ConfigManager, current: str) -> None:
         manager.set_value("voice.tts.voice_id", picked)
 
 
-def _pick_custom_model(manager: ConfigManager, current: str) -> None:
+def _pick_custom_model(manager: ConfigManager, provider: str, current: str) -> None:
     """Free-text model entry, with an opt-in fetch from the endpoint itself.
 
     The LiteLLM catalog row is deliberately absent: a custom endpoint's models
     come from the endpoint, and offering OpenAI's catalog for a vLLM box would
     be worse than offering nothing.
     """
+    fetch = (
+        openai_compat.fetch_models
+        if provider == "custom"
+        else openai_compat.fetch_models_anthropic
+    )
     base_url = manager.load().llm.base_url
     picked = ui.pick(
         "LLM Model — custom endpoint",
@@ -803,9 +809,7 @@ def _pick_custom_model(manager: ConfigManager, current: str) -> None:
         if not base_url:
             console.print("[yellow]Set the Endpoint URL first.[/yellow]")
         else:
-            answered, models = openai_compat.fetch_models(
-                base_url, manager.get_api_key("custom")
-            )
+            answered, models = fetch(base_url, manager.get_api_key(provider))
             if answered != base_url:
                 console.print(
                     f"That server answered at [bold]{answered}[/bold], not "
@@ -847,8 +851,8 @@ def _pick_model(manager: ConfigManager, provider: str, current: str) -> None:
     `nero.llm.providers` free of a litellm dependency at import time, which
     keeps it independently importable and testable.
     """
-    if provider == "custom":
-        _pick_custom_model(manager, current)
+    if provider in providers.CUSTOM_PROVIDERS:
+        _pick_custom_model(manager, provider, current)
         return
     info = providers.get(provider)
     if not info.models:
@@ -915,14 +919,23 @@ def _skills_menu(manager: ConfigManager, config: NeroConfig) -> None:
             manager.set_value(f"skills.enabled.{name}", str(name in picked).lower())
 
 
-def _setup_custom_endpoint(manager: ConfigManager, current_url: str | None) -> None:
+def _setup_custom_endpoint(
+    manager: ConfigManager, provider: str, current_url: str | None
+) -> None:
     """Prompt for endpoint URL, model, and optional key.
 
     Shared by first-run setup and provider switching, which otherwise differ
-    only in framing.
+    only in framing. The URL example forks per dialect because the canonical
+    shapes are opposites: OpenAI-compatible bases end with /v1, Anthropic-
+    compatible bases must not have it (LiteLLM appends /v1/messages itself).
     """
+    example = (
+        "e.g. http://localhost:1234/v1"
+        if provider == "custom"
+        else "e.g. https://api.moonshot.ai/anthropic — no /v1"
+    )
     url = Prompt.ask(
-        "Endpoint base URL (e.g. http://localhost:1234/v1)",
+        f"Endpoint base URL ({example})",
         default=current_url or "",
         console=console,
     ).strip()
@@ -933,7 +946,7 @@ def _setup_custom_endpoint(manager: ConfigManager, current_url: str | None) -> N
             # A malformed URL must not kill the menu, exactly as an out-of-range
             # memory.max_history_turns doesn't.
             console.print(f"[yellow]{exc}[/yellow]")
-    _pick_custom_model(manager, manager.load().llm.model)
+    _pick_custom_model(manager, provider, manager.load().llm.model)
     key = typer.prompt(
         "API key (blank if this endpoint needs none)",
         hide_input=True,
@@ -941,13 +954,13 @@ def _setup_custom_endpoint(manager: ConfigManager, current_url: str | None) -> N
         show_default=False,
     ).strip()
     if key:
-        manager.set_api_key("custom", key)
+        manager.set_api_key(provider, key)
 
 
 def _switch_provider(manager: ConfigManager, config: NeroConfig, new_provider: str) -> None:
-    if new_provider == "custom":
-        manager.set_value("llm.provider", "custom")
-        _setup_custom_endpoint(manager, config.llm.base_url)
+    if new_provider in providers.CUSTOM_PROVIDERS:
+        manager.set_value("llm.provider", new_provider)
+        _setup_custom_endpoint(manager, new_provider, config.llm.base_url)
         return
     manager.set_value("llm.provider", new_provider)
     if new_provider == "ollama":
