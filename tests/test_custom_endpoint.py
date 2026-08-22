@@ -5,6 +5,7 @@ import pytest
 from pydantic import ValidationError
 
 from nero.config.schema import LLMConfig, Provider
+from nero.hardware.detector import HardwareSpecs
 from nero.llm import providers
 
 
@@ -236,3 +237,74 @@ class TestCustomModelPicker:
         monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
         result = runner.invoke(cli.app, ["config"], input="3\n2\nx\n\n")
         assert "LiteLLM" not in result.output
+
+
+class TestCustomSetup:
+    def test_first_run_with_custom_completes(self, monkeypatch, tmp_path):
+        """`nero`, not `nero config`, is what runs first-time setup — and only
+        when no config file exists yet; the `config` callback goes straight to
+        the menu. Pre-task this path saves model=None and dies in validation.
+
+        Requires `from nero.hardware.detector import HardwareSpecs` at the top
+        of the file; all four fields are required by the model.
+        """
+        manager = ConfigManager(config_dir=tmp_path)
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        monkeypatch.setattr(
+            cli,
+            "detect_hardware",
+            lambda: HardwareSpecs(ram_gb=16.0, cpu_cores=8, os="Darwin", has_ollama=False),
+        )
+        # Provider row 14 (custom) -> URL -> model row 2 (type) -> name -> blank
+        # key. Setup then starts the chat loop; EOF on stdin ends it cleanly.
+        result = runner.invoke(
+            cli.app, [], input="14\nhttp://localhost:1234/v1\n2\nllama-3.1-8b\n\n"
+        )
+        assert result.exit_code == 0
+        assert "Traceback" not in result.output
+        loaded = manager.load()
+        assert loaded.llm.provider == "custom"
+        assert loaded.llm.base_url == "http://localhost:1234/v1"
+        assert loaded.llm.model == "llama-3.1-8b"
+
+    def test_switching_away_keeps_the_url_and_does_not_raise(self, monkeypatch, tmp_path):
+        """Nothing clears base_url on a switch: it persists inertly and comes
+        back if the user returns to custom. The guard is LLMClient.api_base."""
+        manager = _custom_manager(tmp_path)
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        # Row 2 -> provider row 1 (claude) -> keep the default model -> key -> finish.
+        result = runner.invoke(cli.app, ["config"], input="2\n1\n\nsk-test\n\n")
+        assert result.exit_code == 0
+        loaded = manager.load()
+        assert loaded.llm.provider == "claude"
+        assert loaded.llm.base_url == "http://localhost:1234/v1"
+
+    def test_a_malformed_url_warns_and_keeps_the_menu_alive(self, monkeypatch, tmp_path):
+        manager = _custom_manager(tmp_path)
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        # Row 16 -> a URL with no scheme -> finish.
+        result = runner.invoke(cli.app, ["config"], input="16\nlocalhost:1234\n\n")
+        assert result.exit_code == 0
+        assert "Traceback" not in result.output
+        assert manager.load().llm.base_url == "http://localhost:1234/v1"  # unchanged
+
+
+class TestEndpointRow:
+    def test_row_16_shows_for_custom(self, monkeypatch, tmp_path):
+        manager = _custom_manager(tmp_path)
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        result = runner.invoke(cli.app, ["config"], input="\n")
+        assert "Endpoint URL" in result.stdout
+
+    def test_row_16_is_absent_for_a_named_provider(self, monkeypatch, tmp_path):
+        manager = ConfigManager(config_dir=tmp_path)
+        manager.save(NeroConfig())
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        result = runner.invoke(cli.app, ["config"], input="\n")
+        assert "Endpoint URL" not in result.stdout
+
+    def test_row_16_writes_the_url(self, monkeypatch, tmp_path):
+        manager = _custom_manager(tmp_path)
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        runner.invoke(cli.app, ["config"], input="16\nhttp://10.0.0.5:8000/v1\n\n")
+        assert manager.load().llm.base_url == "http://10.0.0.5:8000/v1"

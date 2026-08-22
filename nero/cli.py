@@ -429,6 +429,9 @@ def _first_time_setup(manager: ConfigManager) -> None:
         config.llm.model = Prompt.ask("Local model", default=recommendation, console=console)
         manager.save(config)
         console.print("Ollama runs locally — no key needed.")
+    elif provider == "custom":
+        manager.save(config)  # provider only; the model is written by the helper
+        _setup_custom_endpoint(manager, None)
     else:
         config.llm.model = providers.get(provider).default_model
         manager.save(config)
@@ -649,6 +652,8 @@ def _interactive_menu() -> None:
             ),
             ("15", "VAD Auto-Stop", f"{'yes' if voice.vad.enabled else 'no'}  (toggle)"),
         ]
+        if provider == "custom":
+            rows.append(("16", "Endpoint URL", config.llm.base_url or "not set"))
         # "" is the Done row: falsy, so it exits on the same branch Esc does,
         # and so does the blank answer the numbered fallback still accepts.
         choice = ui.pick(
@@ -729,6 +734,15 @@ def _interactive_menu() -> None:
             manager.set_value("voice.barge_in", str(not voice.barge_in).lower())
         elif choice == "15":
             manager.set_value("voice.vad.enabled", str(not voice.vad.enabled).lower())
+        elif choice == "16":
+            new_url = Prompt.ask(
+                "Endpoint base URL", default=config.llm.base_url or "", console=console
+            ).strip()
+            if new_url:
+                try:
+                    manager.set_value("llm.base_url", new_url)
+                except ConfigError as exc:
+                    console.print(f"[yellow]{exc}[/yellow]")
         console.print("[green]Saved.[/green]\n")
 
 
@@ -878,7 +892,40 @@ def _skills_menu(manager: ConfigManager, config: NeroConfig) -> None:
             manager.set_value(f"skills.enabled.{name}", str(name in picked).lower())
 
 
+def _setup_custom_endpoint(manager: ConfigManager, current_url: str | None) -> None:
+    """Prompt for endpoint URL, model, and optional key.
+
+    Shared by first-run setup and provider switching, which otherwise differ
+    only in framing.
+    """
+    url = Prompt.ask(
+        "Endpoint base URL (e.g. http://localhost:1234/v1)",
+        default=current_url or "",
+        console=console,
+    ).strip()
+    if url:
+        try:
+            manager.set_value("llm.base_url", url)
+        except ConfigError as exc:
+            # A malformed URL must not kill the menu, exactly as an out-of-range
+            # memory.max_history_turns doesn't.
+            console.print(f"[yellow]{exc}[/yellow]")
+    _pick_custom_model(manager, manager.load().llm.model)
+    key = typer.prompt(
+        "API key (blank if this endpoint needs none)",
+        hide_input=True,
+        default="",
+        show_default=False,
+    ).strip()
+    if key:
+        manager.set_api_key("custom", key)
+
+
 def _switch_provider(manager: ConfigManager, config: NeroConfig, new_provider: str) -> None:
+    if new_provider == "custom":
+        manager.set_value("llm.provider", "custom")
+        _setup_custom_endpoint(manager, config.llm.base_url)
+        return
     manager.set_value("llm.provider", new_provider)
     if new_provider == "ollama":
         recommendation = config.hardware.recommended_local_model
