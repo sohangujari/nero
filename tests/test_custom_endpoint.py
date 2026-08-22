@@ -308,3 +308,36 @@ class TestEndpointRow:
         monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
         runner.invoke(cli.app, ["config"], input="16\nhttp://10.0.0.5:8000/v1\n\n")
         assert manager.load().llm.base_url == "http://10.0.0.5:8000/v1"
+
+
+class TestSurfaces:
+    def test_config_show_lists_the_endpoint_for_custom(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cli, "ConfigManager", lambda: _custom_manager(tmp_path))
+        result = runner.invoke(cli.app, ["config", "show"])
+        assert "http://localhost:1234/v1" in result.output
+
+    def test_config_show_omits_the_endpoint_for_a_named_provider(self, monkeypatch, tmp_path):
+        manager = ConfigManager(config_dir=tmp_path)
+        manager.save(NeroConfig())
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        assert "Endpoint URL" not in runner.invoke(cli.app, ["config", "show"]).output
+
+    def test_setting_an_inert_url_warns_but_keeps_it(self, monkeypatch, tmp_path):
+        """Warn only, never mutate — the same rule _warn_if_model_mismatched
+        follows. The value is kept because switching to custom brings it back."""
+        manager = ConfigManager(config_dir=tmp_path)
+        manager.save(NeroConfig())
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        result = runner.invoke(
+            cli.app, ["config", "set", "llm.base_url", "http://localhost:1234/v1"]
+        )
+        assert result.exit_code == 0
+        assert "custom" in result.output
+        assert manager.load().llm.base_url == "http://localhost:1234/v1"
+
+    def test_no_warning_when_the_provider_is_custom(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cli, "ConfigManager", lambda: _custom_manager(tmp_path))
+        result = runner.invoke(
+            cli.app, ["config", "set", "llm.base_url", "http://10.0.0.5:8000/v1"]
+        )
+        assert "will not be used" not in result.output

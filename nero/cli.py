@@ -466,6 +466,8 @@ def config_set(key: str, value: str) -> None:
     if key in ("llm.model", "llm.provider"):
         _warn_if_no_tool_support(manager)
         _warn_if_model_mismatched(manager)
+    if key in ("llm.base_url", "llm.provider"):
+        _warn_if_base_url_inert(manager)
 
 
 def _warn_if_no_tool_support(manager: ConfigManager) -> None:
@@ -511,6 +513,23 @@ def _warn_if_model_mismatched(manager: ConfigManager) -> None:
         f"[bold]{owners[0]}[/bold], not [bold]{config.llm.provider}[/bold]. "
         f"Set a model with [bold]nero config set llm.model <name>[/bold] "
         f"or pick one in [bold]nero config[/bold]."
+    )
+
+
+def _warn_if_base_url_inert(manager: ConfigManager) -> None:
+    """Say so when a base URL is set that the current provider will not use.
+
+    Warns only. The value is kept: switching to the custom provider later
+    brings it back, and silently discarding it would be the side-effect
+    mutation `_warn_if_model_mismatched` exists to avoid.
+    """
+    config = manager.load()
+    if config.llm.base_url is None or config.llm.provider == "custom":
+        return
+    console.print(
+        f"[yellow]Heads up:[/yellow] [bold]llm.base_url[/bold] applies only when "
+        f"[bold]llm.provider[/bold] is [bold]custom[/bold]; it is currently "
+        f"[bold]{config.llm.provider}[/bold], so this endpoint will not be used."
     )
 
 
@@ -587,6 +606,8 @@ def _config_table(manager: ConfigManager, config: NeroConfig) -> Table:
     table.add_row("Assistant Name", config.assistant.name)
     table.add_row("LLM Provider", config.llm.provider)
     table.add_row("LLM Model", config.llm.model)
+    if config.llm.provider == "custom":
+        table.add_row("Endpoint URL", config.llm.base_url or "not set")
     table.add_row("Mode", config.mode)
     table.add_row(f"API Key ({config.llm.provider})", _key_display(manager, config.llm.provider))
     hardware = config.hardware
