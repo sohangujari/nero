@@ -97,3 +97,57 @@ class TestFetchModels:
         calls.clear()
         openai_compat.fetch_models("http://x/v1")
         assert calls[-1][1] == {}
+
+
+class TestFetchModelsAnthropic:
+    def test_a_clean_base_passes_through(self, fake_http):
+        routes, _ = fake_http
+        routes["https://api.moonshot.ai/anthropic/v1/models"] = _models("kimi-k2.5")
+        answered, models = openai_compat.fetch_models_anthropic(
+            "https://api.moonshot.ai/anthropic"
+        )
+        assert answered == "https://api.moonshot.ai/anthropic"
+        assert models == ["kimi-k2.5"]
+
+    def test_a_v1_suffix_is_corrected_by_stripping(self, fake_http):
+        """The inverse of the LM Studio gap: LiteLLM appends /v1/messages
+        itself, so a pasted OpenAI-style …/v1 base would double the path."""
+        routes, _ = fake_http
+        routes["http://localhost:8080/v1/models"] = _models("m1")
+        answered, models = openai_compat.fetch_models_anthropic("http://localhost:8080/v1")
+        assert answered == "http://localhost:8080"
+        assert models == ["m1"]
+
+    def test_the_given_base_is_tried_first(self, fake_http):
+        """A server genuinely living under …/v1 must not be 'corrected'."""
+        routes, _ = fake_http
+        routes["http://h/v1/v1/models"] = _models("m1")
+        answered, _models_ = openai_compat.fetch_models_anthropic("http://h/v1")
+        assert answered == "http://h/v1"
+
+    def test_sends_the_anthropic_headers(self, fake_http):
+        routes, calls = fake_http
+        routes["https://api.moonshot.ai/anthropic/v1/models"] = _models("kimi-k2.5")
+        openai_compat.fetch_models_anthropic(
+            "https://api.moonshot.ai/anthropic", api_key="sk-test"
+        )
+        _url, headers = calls[0]
+        assert headers["anthropic-version"] == openai_compat.ANTHROPIC_VERSION
+        assert headers["x-api-key"] == "sk-test"
+        assert "Authorization" not in headers
+
+    def test_no_key_sends_no_auth_header(self, fake_http):
+        routes, calls = fake_http
+        routes["http://h/v1/models"] = _models("m")
+        openai_compat.fetch_models_anthropic("http://h")
+        _url, headers = calls[0]
+        assert "x-api-key" not in headers
+
+    def test_a_dead_server_returns_the_base_and_no_models(self, fake_http):
+        assert openai_compat.fetch_models_anthropic("http://h") == ("http://h", [])
+
+    def test_a_non_object_body_degrades_to_no_models(self, fake_http):
+        """The d21c6a6 regression class: a body of [1,2,3] has no .get."""
+        routes, _ = fake_http
+        routes["http://h/v1/models"] = FakeResponse([1, 2, 3])
+        assert openai_compat.fetch_models_anthropic("http://h") == ("http://h", [])
