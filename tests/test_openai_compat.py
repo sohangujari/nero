@@ -121,9 +121,10 @@ class TestFetchModelsAnthropic:
     def test_the_given_base_is_tried_first(self, fake_http):
         """A server genuinely living under …/v1 must not be 'corrected'."""
         routes, _ = fake_http
-        routes["http://h/v1/v1/models"] = _models("m1")
-        answered, _models_ = openai_compat.fetch_models_anthropic("http://h/v1")
-        assert answered == "http://h/v1"
+        routes["http://h/v1/v1/models"] = _models("real")
+        routes["http://h/v1/models"] = _models("stripped")
+        answered, got = openai_compat.fetch_models_anthropic("http://h/v1")
+        assert (answered, got) == ("http://h/v1", ["real"])
 
     def test_sends_the_anthropic_headers(self, fake_http):
         routes, calls = fake_http

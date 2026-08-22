@@ -330,6 +330,7 @@ class TestCustomSetup:
         )
         assert result.exit_code == 0
         assert "Traceback" not in result.output
+        assert "localhost:1234/v1" in result.output
         loaded = manager.load()
         assert loaded.llm.provider == "custom"
         assert loaded.llm.base_url == "http://localhost:1234/v1"
@@ -452,21 +453,26 @@ class TestAnthropicStartupGate:
 
 
 class TestAnthropicPicker:
-    def test_the_anthropic_fetcher_is_used(self, monkeypatch, tmp_path):
+    def test_the_anthropic_fetcher_is_used(self, monkeypatch, tmp_path, isolate_keyring):
         manager = _anthropic_manager(tmp_path)
         monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        isolate_keyring[("nero", "custom_anthropic_api_key")] = "sk-a"
 
         def wrong_fetcher(url, key=None):
             raise AssertionError("OpenAI-dialect fetch_models called for custom_anthropic")
 
+        seen_keys = {}
+
+        def fake_anthropic_fetch(url, key=None):
+            seen_keys["key"] = key
+            return (url, ["kimi-k2.5", "kimi-latest"])
+
         monkeypatch.setattr(cli.openai_compat, "fetch_models", wrong_fetcher)
-        monkeypatch.setattr(
-            cli.openai_compat, "fetch_models_anthropic",
-            lambda url, key=None: (url, ["kimi-k2.5", "kimi-latest"]),
-        )
+        monkeypatch.setattr(cli.openai_compat, "fetch_models_anthropic", fake_anthropic_fetch)
         # Menu row 3 -> picker row 1 (fetch) -> model row 2 -> finish.
         runner.invoke(cli.app, ["config"], input="3\n1\n2\n\n")
         assert manager.load().llm.model == "kimi-latest"
+        assert seen_keys["key"] == manager.get_api_key("custom_anthropic") == "sk-a"
 
     def test_a_corrected_anthropic_url_is_offered_and_stored(self, monkeypatch, tmp_path):
         """A pasted OpenAI-style …/v1 base gets the suffix stripped."""
@@ -483,7 +489,9 @@ class TestAnthropicPicker:
 
 
 class TestAnthropicSetupAndSurfaces:
-    def test_first_run_with_custom_anthropic_completes(self, monkeypatch, tmp_path):
+    def test_first_run_with_custom_anthropic_completes(
+        self, monkeypatch, tmp_path, isolate_keyring
+    ):
         manager = ConfigManager(config_dir=tmp_path)
         monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
         monkeypatch.setattr(
@@ -491,17 +499,19 @@ class TestAnthropicSetupAndSurfaces:
             lambda: HardwareSpecs(ram_gb=16.0, cpu_cores=8, os="Darwin", has_ollama=False),
         )
         # Provider row 15 (custom_anthropic, appended last) -> URL -> model row 2
-        # (type a name) -> name -> blank key. EOF then ends the chat loop.
+        # (type a name) -> name -> a key. EOF then ends the chat loop.
         result = runner.invoke(
             cli.app, [],
-            input="15\nhttps://api.moonshot.ai/anthropic\n2\nkimi-k2.5\n\n",
+            input="15\nhttps://api.moonshot.ai/anthropic\n2\nkimi-k2.5\nsk-anth\n",
         )
         assert result.exit_code == 0
         assert "Traceback" not in result.output
+        assert "no /v1" in result.output
         loaded = manager.load()
         assert loaded.llm.provider == "custom_anthropic"
         assert loaded.llm.base_url == "https://api.moonshot.ai/anthropic"
         assert loaded.llm.model == "kimi-k2.5"
+        assert isolate_keyring == {("nero", "custom_anthropic_api_key"): "sk-anth"}
 
     def test_row_16_shows_for_custom_anthropic(self, monkeypatch, tmp_path):
         monkeypatch.setattr(cli, "ConfigManager", lambda: _anthropic_manager(tmp_path))
