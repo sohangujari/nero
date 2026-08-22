@@ -505,6 +505,8 @@ def _warn_if_model_mismatched(manager: ConfigManager) -> None:
     then sets a model must not race against a silent correction.
     """
     config = manager.load()
+    if config.llm.provider == "custom":
+        return  # a custom endpoint can serve any model id; ownership means nothing there
     owners = [info.name for info in providers.PROVIDERS if config.llm.model in info.models]
     if not owners or config.llm.provider in owners:
         return

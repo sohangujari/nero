@@ -341,3 +341,15 @@ class TestSurfaces:
             cli.app, ["config", "set", "llm.base_url", "http://10.0.0.5:8000/v1"]
         )
         assert "will not be used" not in result.output
+
+    def test_no_ownership_warning_for_a_custom_endpoint_model(self, monkeypatch, tmp_path):
+        """openai/gpt-oss-120b is a legitimate id on a custom endpoint (it's the
+        Together example in the double-prefix comment) even though it sits in
+        groq's curated list — a custom endpoint can serve any model id, so
+        curated-list ownership means nothing there."""
+        monkeypatch.setattr(cli, "ConfigManager", lambda: _custom_manager(tmp_path))
+        result = runner.invoke(
+            cli.app, ["config", "set", "llm.model", "openai/gpt-oss-120b"]
+        )
+        assert result.exit_code == 0
+        assert "belongs to" not in result.output
