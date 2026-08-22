@@ -478,6 +478,9 @@ def _first_time_setup(manager: ConfigManager) -> None:
     elif provider in providers.CUSTOM_PROVIDERS:
         manager.save(config)  # provider only; the model is written by the helper
         _setup_custom_endpoint(manager, provider, None)
+    elif provider == "bedrock":
+        manager.save(config)  # provider only; region and model come from the helper
+        _setup_bedrock(manager, None)
     else:
         config.llm.model = providers.get(provider).default_model
         manager.save(config)
@@ -514,6 +517,8 @@ def config_set(key: str, value: str) -> None:
         _warn_if_model_mismatched(manager)
     if key in ("llm.base_url", "llm.provider"):
         _warn_if_base_url_inert(manager)
+    if key in ("llm.aws_region", "llm.provider"):
+        _warn_if_aws_region_inert(manager)
 
 
 def _warn_if_no_tool_support(manager: ConfigManager) -> None:
@@ -579,6 +584,21 @@ def _warn_if_base_url_inert(manager: ConfigManager) -> None:
         f"[bold]llm.provider[/bold] is a custom endpoint (custom, custom_anthropic); "
         f"it is currently [bold]{config.llm.provider}[/bold], so this endpoint "
         "will not be used."
+    )
+
+
+def _warn_if_aws_region_inert(manager: ConfigManager) -> None:
+    """Say so when an AWS region is set that the current provider will not use.
+
+    Warns only; the value is kept — the same rule llm.base_url follows.
+    """
+    config = manager.load()
+    if config.llm.aws_region is None or config.llm.provider == "bedrock":
+        return
+    console.print(
+        f"[yellow]Heads up:[/yellow] [bold]llm.aws_region[/bold] applies only "
+        f"when [bold]llm.provider[/bold] is [bold]bedrock[/bold]; it is "
+        f"currently [bold]{config.llm.provider}[/bold], so it will not be used."
     )
 
 
@@ -657,6 +677,8 @@ def _config_table(manager: ConfigManager, config: NeroConfig) -> Table:
     table.add_row("LLM Model", config.llm.model)
     if config.llm.provider in providers.CUSTOM_PROVIDERS:
         table.add_row("Endpoint URL", config.llm.base_url or "not set")
+    elif config.llm.provider == "bedrock":
+        table.add_row("AWS Region", config.llm.aws_region or "not set")
     table.add_row("Mode", config.mode)
     table.add_row(f"API Key ({config.llm.provider})", _key_display(manager, config.llm.provider))
     hardware = config.hardware
@@ -724,6 +746,8 @@ def _interactive_menu() -> None:
         ]
         if provider in providers.CUSTOM_PROVIDERS:
             rows.append(("16", "Endpoint URL", config.llm.base_url or "not set"))
+        elif provider == "bedrock":
+            rows.append(("16", "AWS Region", config.llm.aws_region or "not set"))
         # "" is the Done row: falsy, so it exits on the same branch Esc does,
         # and so does the blank answer the numbered fallback still accepts.
         choice = ui.pick(
@@ -751,7 +775,12 @@ def _interactive_menu() -> None:
             _warn_if_no_tool_support(manager)
         elif choice == "4":
             if not manager.provider_needs_key(provider):
-                console.print(f"{provider} runs locally — no API key needed.")
+                if provider == "bedrock":
+                    console.print(
+                        "Bedrock uses your AWS credentials — no API key stored here."
+                    )
+                else:
+                    console.print(f"{provider} runs locally — no API key needed.")
                 continue
             new_key = typer.prompt(f"{provider} API key", hide_input=True).strip()
             if new_key:
@@ -805,14 +834,22 @@ def _interactive_menu() -> None:
         elif choice == "15":
             manager.set_value("voice.vad.enabled", str(not voice.vad.enabled).lower())
         elif choice == "16":
-            new_url = Prompt.ask(
-                "Endpoint base URL", default=config.llm.base_url or "", console=console
-            ).strip()
-            if new_url:
-                try:
-                    manager.set_value("llm.base_url", new_url)
-                except ConfigError as exc:
-                    console.print(f"[yellow]{exc}[/yellow]")
+            if provider == "bedrock":
+                new_region = Prompt.ask(
+                    "AWS region", default=config.llm.aws_region or "us-east-1",
+                    console=console,
+                ).strip()
+                if new_region:
+                    manager.set_value("llm.aws_region", new_region)
+            else:
+                new_url = Prompt.ask(
+                    "Endpoint base URL", default=config.llm.base_url or "", console=console
+                ).strip()
+                if new_url:
+                    try:
+                        manager.set_value("llm.base_url", new_url)
+                    except ConfigError as exc:
+                        console.print(f"[yellow]{exc}[/yellow]")
         console.print("[green]Saved.[/green]\n")
 
 
@@ -965,6 +1002,24 @@ def _skills_menu(manager: ConfigManager, config: NeroConfig) -> None:
             manager.set_value(f"skills.enabled.{name}", str(name in picked).lower())
 
 
+def _setup_bedrock(manager: ConfigManager, current_region: str | None) -> None:
+    """Prompt for region and model. Credentials come from the ambient AWS
+    chain (aws configure, env vars, SSO) — Nero never stores them."""
+    region = Prompt.ask(
+        "AWS region", default=current_region or "us-east-1", console=console
+    ).strip()
+    if region:
+        manager.set_value("llm.aws_region", region)
+    default_model = providers.get("bedrock").default_model
+    manager.set_value("llm.model", default_model)
+    console.print(f"Model set to [bold]{default_model}[/bold].")
+    _pick_model(manager, "bedrock", default_model)
+    console.print(
+        "Bedrock uses your AWS credentials (aws configure / env vars) — "
+        "no key is stored by Nero."
+    )
+
+
 def _setup_custom_endpoint(
     manager: ConfigManager, provider: str, current_url: str | None
 ) -> None:
@@ -1007,6 +1062,10 @@ def _switch_provider(manager: ConfigManager, config: NeroConfig, new_provider: s
     if new_provider in providers.CUSTOM_PROVIDERS:
         manager.set_value("llm.provider", new_provider)
         _setup_custom_endpoint(manager, new_provider, config.llm.base_url)
+        return
+    if new_provider == "bedrock":
+        manager.set_value("llm.provider", "bedrock")
+        _setup_bedrock(manager, config.llm.aws_region)
         return
     manager.set_value("llm.provider", new_provider)
     if new_provider == "ollama":

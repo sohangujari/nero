@@ -161,3 +161,101 @@ class TestBedrockStartupGate:
 
         monkeypatch.setattr(cli, "_ollama_preflight", fail)
         assert runner.invoke(cli.app, []).exit_code == 0
+
+
+from nero.hardware.detector import HardwareSpecs
+
+
+class TestBedrockFlows:
+    def test_switching_to_bedrock_writes_region_and_model_and_asks_no_key(
+        self, monkeypatch, tmp_path
+    ):
+        manager = ConfigManager(config_dir=tmp_path)
+        manager.save(NeroConfig())
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        # Row 2 -> provider row 16 (bedrock) -> accept region default (us-east-1)
+        # -> keep the default model (blank) -> finish. A key prompt would
+        # consume input that isn't there and derail the sequence.
+        result = runner.invoke(cli.app, ["config"], input="2\n16\n\n\n\n")
+        assert result.exit_code == 0
+        loaded = manager.load()
+        assert loaded.llm.provider == "bedrock"
+        assert loaded.llm.aws_region == "us-east-1"
+        assert loaded.llm.model == "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+        assert "AWS credentials" in result.output
+        assert "API key" not in result.output
+
+    def test_first_run_with_bedrock_completes(self, monkeypatch, tmp_path):
+        manager = ConfigManager(config_dir=tmp_path)
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        monkeypatch.setattr(cli, "_bedrock_credentials_present", lambda: True)
+        monkeypatch.setattr(
+            cli, "detect_hardware",
+            lambda: HardwareSpecs(ram_gb=16.0, cpu_cores=8, os="Darwin", has_ollama=False),
+        )
+        # Provider row 16 (bedrock) -> region eu-west-1 -> keep default model
+        # (blank) -> chat loop EOF.
+        result = runner.invoke(cli.app, [], input="16\neu-west-1\n\n\n")
+        assert result.exit_code == 0
+        assert "Traceback" not in result.output
+        loaded = manager.load()
+        assert loaded.llm.provider == "bedrock"
+        assert loaded.llm.aws_region == "eu-west-1"
+        assert loaded.llm.model == "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+
+    def test_row_16_shows_and_edits_the_region_under_bedrock(self, monkeypatch, tmp_path):
+        manager = _bedrock_manager(tmp_path)
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        result = runner.invoke(cli.app, ["config"], input="16\nap-southeast-2\n\n")
+        assert "AWS Region" in result.stdout
+        assert manager.load().llm.aws_region == "ap-southeast-2"
+
+    def test_row_16_is_absent_for_a_named_provider(self, monkeypatch, tmp_path):
+        manager = ConfigManager(config_dir=tmp_path)
+        manager.save(NeroConfig())
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        result = runner.invoke(cli.app, ["config"], input="\n")
+        assert "AWS Region" not in result.stdout
+
+    def test_row_4_under_bedrock_talks_credentials_not_locally(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cli, "ConfigManager", lambda: _bedrock_manager(tmp_path))
+        result = runner.invoke(cli.app, ["config"], input="4\n\n")
+        assert "AWS credentials" in result.output
+        assert "runs locally" not in result.output
+
+    def test_config_show_lists_the_region(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cli, "ConfigManager", lambda: _bedrock_manager(tmp_path))
+        assert "us-east-1" in runner.invoke(cli.app, ["config", "show"]).output
+
+
+class TestRegionSurfaces:
+    def test_setting_an_inert_region_warns_but_keeps_it(self, monkeypatch, tmp_path):
+        manager = ConfigManager(config_dir=tmp_path)
+        manager.save(NeroConfig())
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        result = runner.invoke(cli.app, ["config", "set", "llm.aws_region", "us-east-1"])
+        assert result.exit_code == 0
+        assert "bedrock" in result.output
+        assert manager.load().llm.aws_region == "us-east-1"
+
+    def test_no_warning_when_the_provider_is_bedrock(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cli, "ConfigManager", lambda: _bedrock_manager(tmp_path))
+        result = runner.invoke(cli.app, ["config", "set", "llm.aws_region", "eu-west-1"])
+        assert "will not be used" not in result.output
+
+
+class TestKeyedRowRepresentative:
+    def test_switching_to_perplexity_lands_the_key_in_its_own_entry(
+        self, monkeypatch, tmp_path, isolate_keyring
+    ):
+        manager = ConfigManager(config_dir=tmp_path)
+        manager.save(NeroConfig())
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        # Row 2 -> provider row 19 (perplexity) -> keep default model (blank)
+        # -> key -> finish.
+        result = runner.invoke(cli.app, ["config"], input="2\n19\n\npplx-test\n\n")
+        assert result.exit_code == 0
+        loaded = manager.load()
+        assert loaded.llm.provider == "perplexity"
+        assert loaded.llm.model == "sonar-pro"
+        assert isolate_keyring == {("nero", "perplexity_api_key"): "pplx-test"}
