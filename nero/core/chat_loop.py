@@ -84,6 +84,15 @@ class ChatLoop:
                 # answered, so "is Ollama running?" is the wrong question.
                 del self.messages[turn_start:]
                 self.console.print(f"\n[red]{escape(str(exc))}[/red]")
+            except litellm.exceptions.NotFoundError:
+                # The most likely custom-endpoint failure: a model id the server
+                # doesn't have, or a base URL missing the /v1 the API lives at.
+                del self.messages[turn_start:]
+                model = getattr(self.client, "model", None) or "that model"
+                self.console.print(
+                    f"\n[red]The provider has no model called [bold]{model}[/bold].[/red] "
+                    "Check the model name in [bold]nero config[/bold]."
+                )
             except (
                 litellm.exceptions.APIConnectionError,
                 litellm.exceptions.ServiceUnavailableError,
@@ -91,11 +100,14 @@ class ChatLoop:
                 httpx.HTTPError,  # direct-Ollama path talks httpx, not litellm
             ):
                 del self.messages[turn_start:]
-                hint = (
-                    " If you're using Ollama, make sure it's running ([bold]ollama serve[/bold])."
-                    if getattr(self.client, "provider", None) == "ollama"
-                    else " Check your connection and try again."
-                )
+                provider = getattr(self.client, "provider", None)
+                api_base = getattr(self.client, "api_base", None)
+                if provider == "ollama":
+                    hint = " If you're using Ollama, make sure it's running ([bold]ollama serve[/bold])."
+                elif api_base:
+                    hint = f" Check that a server is running at [bold]{api_base}[/bold]."
+                else:
+                    hint = " Check your connection and try again."
                 self.console.print(f"\n[red]Could not reach the model provider.[/red]{hint}")
             except Exception as exc:  # noqa: BLE001 — the REPL must never crash on a turn
                 del self.messages[turn_start:]

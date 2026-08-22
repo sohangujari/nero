@@ -951,3 +951,49 @@ class TestOllamaFullJsonReplyIsNoise:
             self._ollama_client(tools=[]), '{"city": "Tokyo", "pop": 37400068}'
         )
         assert shown == '{"city": "Tokyo", "pop": 37400068}'
+
+
+class TestCustomEndpointErrors:
+    def _run(self, error, provider, api_base):
+        import io
+
+        from rich.console import Console
+
+        buffer = io.StringIO()
+        console = Console(file=buffer, width=100, no_color=True)
+        client = FakeLLMClient(error=error)
+        client.provider = provider
+        client.api_base = api_base
+        client.model = "llama-3.1-8b"
+        queue = ["hello", "exit"]
+
+        def next_input(prompt):
+            if not queue:
+                raise EOFError
+            return queue.pop(0)
+
+        ChatLoop(client, console=console, assistant_name="Nero", input_fn=next_input).run()
+        return buffer.getvalue()
+
+    def test_a_connection_failure_names_the_endpoint(self):
+        """The hint is hardcoded to "make sure Ollama is running", which is the
+        wrong advice for someone whose LM Studio server is down."""
+        output = self._run(
+            httpx.ConnectError("refused"), "custom", "http://localhost:1234/v1"
+        )
+        assert "http://localhost:1234/v1" in output
+        assert "ollama serve" not in output
+
+    def test_a_missing_model_says_so(self):
+        """A 404 is the most likely custom failure — a wrong model id, or a
+        base URL missing its /v1 — and must not read as "something went wrong"."""
+        error = litellm.exceptions.NotFoundError(
+            message="model not found", llm_provider="openai", model="llama-3.1-8b"
+        )
+        output = self._run(error, "custom", "http://localhost:1234/v1")
+        assert "llama-3.1-8b" in output
+        assert "Something went wrong" not in output
+
+    def test_ollama_still_gets_its_own_hint(self):
+        output = self._run(httpx.ConnectError("refused"), "ollama", None)
+        assert "ollama serve" in output
