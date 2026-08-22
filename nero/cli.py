@@ -201,18 +201,7 @@ def talk(
         )
         raise typer.Exit()
 
-    provider = config.llm.provider
-    api_key = None
-    if not manager.provider_needs_key(provider):
-        _ollama_preflight(config.llm.model)
-    else:
-        api_key = manager.get_api_key(provider)
-        if not api_key:
-            console.print(
-                f"[red]No {provider} API key configured.[/red] "
-                "Run [bold]nero config[/bold] and choose the API Key option."
-            )
-            raise typer.Exit(1)
+    api_key = _provider_preflight(manager, config)
 
     client = LLMClient(
         config=config.llm,
@@ -349,19 +338,8 @@ def _run_chat() -> None:
     if not manager.exists():
         _first_time_setup(manager)
     config = _load_or_exit(manager)
-    provider = config.llm.provider
 
-    api_key = None
-    if not manager.provider_needs_key(provider):
-        _ollama_preflight(config.llm.model)
-    else:
-        api_key = manager.get_api_key(provider)
-        if not api_key:
-            console.print(
-                f"[red]No {provider} API key configured.[/red] "
-                "Run [bold]nero config[/bold] and choose the API Key option."
-            )
-            raise typer.Exit(1)
+    api_key = _provider_preflight(manager, config)
 
     client = LLMClient(
         config=config.llm,
@@ -373,6 +351,33 @@ def _run_chat() -> None:
         client, console=console, assistant_name=config.assistant.name,
         history=_build_history(config),
     ).run()
+
+
+def _provider_preflight(manager: ConfigManager, config: NeroConfig) -> str | None:
+    """Check the provider is usable and return its API key, or exit.
+
+    The ollama branch is keyed on the provider name, not on keylessness: a
+    custom endpoint may also be keyless, and would otherwise be sent through
+    the Ollama reachability check and told to run `ollama serve`.
+    """
+    provider = config.llm.provider
+    if provider == "ollama":
+        _ollama_preflight(config.llm.model)
+        return None
+    if provider == "custom" and not config.llm.base_url:
+        console.print(
+            "[red]No Endpoint URL configured.[/red] Run [bold]nero config[/bold] "
+            "and set the Endpoint URL."
+        )
+        raise typer.Exit(1)
+    api_key = manager.get_api_key(provider)
+    if not api_key and not providers.get(provider).key_optional:
+        console.print(
+            f"[red]No {provider} API key configured.[/red] "
+            "Run [bold]nero config[/bold] and choose the API Key option."
+        )
+        raise typer.Exit(1)
+    return api_key
 
 
 def _ollama_preflight(model: str) -> None:

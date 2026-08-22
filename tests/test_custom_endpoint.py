@@ -136,3 +136,52 @@ class TestApiBaseReachesLitellm:
     def test_a_named_provider_sends_no_api_base(self, monkeypatch):
         client = _client("claude", "claude-sonnet-5", "http://stale")
         assert "api_base" not in _completion_kwargs(monkeypatch, client)
+
+
+from typer.testing import CliRunner
+
+from nero import cli
+from nero.config.manager import ConfigManager
+from nero.config.schema import NeroConfig
+
+runner = CliRunner()
+
+
+def _custom_manager(tmp_path, base_url="http://localhost:1234/v1"):
+    manager = ConfigManager(config_dir=tmp_path)
+    manager.save(
+        NeroConfig.model_validate(
+            {"llm": {"provider": "custom", "model": "llama-3.1-8b", "base_url": base_url}}
+        )
+    )
+    return manager
+
+
+class TestStartupGate:
+    def test_a_keyless_custom_endpoint_starts(self, monkeypatch, tmp_path):
+        """LM Studio and llama.cpp need no key; a missing one must not be fatal.
+        EOF on stdin ends the chat loop immediately."""
+        monkeypatch.setattr(cli, "ConfigManager", lambda: _custom_manager(tmp_path))
+        result = runner.invoke(cli.app, [])
+        assert result.exit_code == 0
+        assert "API key" not in result.output
+
+    def test_a_custom_endpoint_without_a_url_exits_with_the_right_message(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(cli, "ConfigManager", lambda: _custom_manager(tmp_path, None))
+        result = runner.invoke(cli.app, [])
+        assert result.exit_code == 1
+        assert "Endpoint URL" in result.output
+        assert "API key" not in result.output  # the wrong diagnosis for this failure
+
+    def test_custom_never_reaches_the_ollama_preflight(self, monkeypatch, tmp_path):
+        """Before this task, "keyless" meant "is ollama", so a keyless custom
+        endpoint was told to run `ollama serve`."""
+        monkeypatch.setattr(cli, "ConfigManager", lambda: _custom_manager(tmp_path))
+
+        def fail(model):
+            raise AssertionError(f"_ollama_preflight called with {model!r}")
+
+        monkeypatch.setattr(cli, "_ollama_preflight", fail)
+        assert runner.invoke(cli.app, []).exit_code == 0
