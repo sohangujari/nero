@@ -41,6 +41,12 @@ class ProviderInfo:
 # tool-reliability claim — Nero has real reliability data for exactly one model
 # family (phi4-mini) and none for these. `nero history` is how any of them gets
 # settled; a bad pick gets demoted from the shortlist and nothing else breaks.
+
+# The provider rows whose endpoint lives in llm.base_url rather than in the
+# table. Everything that special-cases "a custom endpoint" keys on this set,
+# so adding a dialect is one row plus one entry here.
+CUSTOM_PROVIDERS: frozenset[str] = frozenset({"custom", "custom_anthropic"})
+
 PROVIDERS: tuple[ProviderInfo, ...] = (
     ProviderInfo(
         "claude", "Claude (Anthropic)", "", "anthropic", "anthropic_api_key",
@@ -106,6 +112,16 @@ PROVIDERS: tuple[ProviderInfo, ...] = (
     # it — a custom endpoint's models come from the endpoint, not from LiteLLM.
     ProviderInfo(
         "custom", "Custom (OpenAI-compatible)", "openai/", "", "custom_api_key", (),
+        key_optional=True,
+    ),
+    # An arbitrary Anthropic-compatible server: Moonshot/Kimi, DeepSeek's
+    # /anthropic surface, Z.AI, LiteLLM proxies. Shares llm.base_url with
+    # "custom" — exactly one custom endpoint at a time, whichever dialect.
+    # NOTE: the canonical base_url here has NO /v1 suffix (LiteLLM appends
+    # /v1/messages itself) — the inverse of the OpenAI-compatible row.
+    ProviderInfo(
+        "custom_anthropic", "Custom (Anthropic-compatible)", "anthropic/", "",
+        "custom_anthropic_api_key", (),
         key_optional=True,
     ),
 )

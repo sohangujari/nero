@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 Provider = Literal[
     "claude", "openai", "gemini", "ollama", "mistral", "deepseek", "minimax",
     "kimi", "qwen", "xai", "glm", "openrouter", "groq", "custom",
+    "custom_anthropic",
 ]
 Mode = Literal["online", "offline"]
 

@@ -43,14 +43,23 @@ class TestSchema:
         config = LLMConfig(provider="claude", model="claude-sonnet-5", base_url="http://stale")
         assert config.base_url == "http://stale"
 
+    def test_custom_anthropic_accepts_a_base_url(self):
+        config = LLMConfig(
+            provider="custom_anthropic", model="kimi-k2.5",
+            base_url="https://api.moonshot.ai/anthropic",
+        )
+        assert config.base_url == "https://api.moonshot.ai/anthropic"
+
 
 class TestTable:
     def test_custom_is_in_the_table_and_the_literal(self):
         assert "custom" in providers.names()
         assert get_args(Provider) == providers.names()
 
-    def test_custom_is_the_only_key_optional_provider(self):
-        assert [p.name for p in providers.PROVIDERS if p.key_optional] == ["custom"]
+    def test_the_custom_rows_are_the_only_key_optional_providers(self):
+        assert [p.name for p in providers.PROVIDERS if p.key_optional] == [
+            "custom", "custom_anthropic",
+        ]
 
     def test_custom_can_still_store_a_key(self):
         """key_optional asks whether a MISSING key is fatal, not whether one
@@ -63,6 +72,23 @@ class TestTable:
         assert info.default_model is None
         assert info.catalog_key == ""
         assert providers.catalog_models("custom") == []
+
+    def test_custom_anthropic_row_facts(self):
+        info = providers.get("custom_anthropic")
+        assert info.prefix == "anthropic/"
+        assert info.keyring_entry == "custom_anthropic_api_key"
+        assert info.key_optional
+        assert info.models == ()
+        assert info.catalog_key == ""
+
+    def test_custom_providers_set_matches_the_table(self):
+        assert providers.CUSTOM_PROVIDERS == {"custom", "custom_anthropic"}
+        for name in providers.CUSTOM_PROVIDERS:
+            assert name in providers.names()
+
+    def test_custom_anthropic_is_last(self):
+        """test_provider_menu.py picks providers by ordinal; new rows append last."""
+        assert providers.names()[-1] == "custom_anthropic"
 
 
 import asyncio
