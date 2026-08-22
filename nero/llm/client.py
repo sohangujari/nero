@@ -159,6 +159,17 @@ class LLMClient:
         return self.config.base_url
 
     @property
+    def aws_region(self) -> str | None:
+        """The Bedrock region, or None.
+
+        Guarded on the provider like api_base: an aws_region left in config
+        persists inertly and must never leak into another provider's call.
+        """
+        if self.config.provider != "bedrock":
+            return None
+        return self.config.aws_region
+
+    @property
     def model(self) -> str:
         return self.config.model
 
@@ -208,6 +219,8 @@ class LLMClient:
             kwargs["api_key"] = self.api_key
         if self.api_base:
             kwargs["api_base"] = self.api_base
+        if self.aws_region:
+            kwargs["aws_region_name"] = self.aws_region
         response = await litellm.acompletion(
             model=self.litellm_model,
             messages=[{"role": "system", "content": self.system_prompt}, *messages],
