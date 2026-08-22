@@ -289,7 +289,7 @@ class TestCLI:
 class TestKeyringAcrossProviders:
     def test_every_cloud_provider_needs_a_key(self, manager):
         for info in providers.PROVIDERS:
-            expected = info.name != "ollama"
+            expected = info.name not in {"ollama", "bedrock"}
             assert manager.provider_needs_key(info.name) is expected, info.name
 
     def test_keys_round_trip_per_provider(self, manager, monkeypatch):

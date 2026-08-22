@@ -86,9 +86,12 @@ class TestTable:
         for name in providers.CUSTOM_PROVIDERS:
             assert name in providers.names()
 
-    def test_custom_anthropic_is_last(self):
-        """test_provider_menu.py picks providers by ordinal; new rows append last."""
-        assert providers.names()[-1] == "custom_anthropic"
+    def test_custom_providers_come_before_expansion_rows(self):
+        """test_provider_menu.py picks providers by ordinal; custom rows are early, expansion rows append last."""
+        names = providers.names()
+        custom_idx = names.index("custom_anthropic")
+        expansion_start = names.index("bedrock")
+        assert custom_idx < expansion_start
 
 
 import asyncio
