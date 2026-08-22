@@ -185,3 +185,54 @@ class TestStartupGate:
 
         monkeypatch.setattr(cli, "_ollama_preflight", fail)
         assert runner.invoke(cli.app, []).exit_code == 0
+
+
+class TestCustomModelPicker:
+    def test_free_text_writes_the_model(self, monkeypatch, tmp_path):
+        manager = _custom_manager(tmp_path)
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        # Menu row 3 -> picker row 2 (type a name) -> the name -> finish.
+        runner.invoke(cli.app, ["config"], input="3\n2\nmixtral-8x7b\n\n")
+        assert manager.load().llm.model == "mixtral-8x7b"
+
+    def test_fetching_offers_the_endpoint_models(self, monkeypatch, tmp_path):
+        manager = _custom_manager(tmp_path)
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        monkeypatch.setattr(
+            cli.openai_compat, "fetch_models",
+            lambda url, key=None: (url, ["alpha", "beta"]),
+        )
+        # Menu row 3 -> picker row 1 (fetch) -> model row 2 -> finish.
+        runner.invoke(cli.app, ["config"], input="3\n1\n2\n\n")
+        assert manager.load().llm.model == "beta"
+
+    def test_a_corrected_url_is_offered_and_stored(self, monkeypatch, tmp_path):
+        """LM Studio's reported address lacks the /v1 the API lives at."""
+        manager = _custom_manager(tmp_path, "http://localhost:1234")
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        monkeypatch.setattr(
+            cli.openai_compat, "fetch_models",
+            lambda url, key=None: (f"{url}/v1", ["alpha"]),
+        )
+        # Fetch -> accept the correction (blank takes the yes default) -> model 1.
+        runner.invoke(cli.app, ["config"], input="3\n1\n\n1\n\n")
+        assert manager.load().llm.base_url == "http://localhost:1234/v1"
+        assert manager.load().llm.model == "alpha"
+
+    def test_a_failed_fetch_falls_back_to_free_text(self, monkeypatch, tmp_path):
+        manager = _custom_manager(tmp_path)
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        monkeypatch.setattr(
+            cli.openai_compat, "fetch_models", lambda url, key=None: (url, [])
+        )
+        result = runner.invoke(cli.app, ["config"], input="3\n1\ntyped-by-hand\n\n")
+        assert manager.load().llm.model == "typed-by-hand"
+        assert result.exit_code == 0
+
+    def test_the_litellm_catalog_is_not_offered(self, monkeypatch, tmp_path):
+        """A custom endpoint's models come from the endpoint. Offering OpenAI's
+        catalog for a vLLM box would be worse than offering nothing."""
+        manager = _custom_manager(tmp_path)
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        result = runner.invoke(cli.app, ["config"], input="3\n2\nx\n\n")
+        assert "LiteLLM" not in result.output

@@ -17,7 +17,7 @@ from rich.progress import (
     TextColumn,
     TransferSpeedColumn,
 )
-from rich.prompt import Prompt
+from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
 from nero import __version__, ui
@@ -32,7 +32,7 @@ from nero.hardware.detector import (
     recommend_model,
     recommend_voice,
 )
-from nero.llm import ollama, providers
+from nero.llm import ollama, openai_compat, providers
 from nero.llm.client import LLMClient
 from nero.memory.history_store import HistoryStore, default_history_path
 from nero.skills.registry import build_registry
@@ -743,10 +743,56 @@ def _pick_voice(manager: ConfigManager, current: str) -> None:
         manager.set_value("voice.tts.voice_id", picked)
 
 
+def _pick_custom_model(manager: ConfigManager, current: str) -> None:
+    """Free-text model entry, with an opt-in fetch from the endpoint itself.
+
+    The LiteLLM catalog row is deliberately absent: a custom endpoint's models
+    come from the endpoint, and offering OpenAI's catalog for a vLLM box would
+    be worse than offering nothing.
+    """
+    base_url = manager.load().llm.base_url
+    picked = ui.pick(
+        "LLM Model — custom endpoint",
+        [
+            (_FETCH_ROW, "Fetch models from this endpoint…"),
+            (_CUSTOM_ROW, "Type a model name…"),
+        ],
+        console=console,
+    )
+    if picked is None:
+        return
+    if picked == _FETCH_ROW:
+        picked = _CUSTOM_ROW  # the fallback if anything below fails
+        if not base_url:
+            console.print("[yellow]Set the Endpoint URL first.[/yellow]")
+        else:
+            answered, models = openai_compat.fetch_models(
+                base_url, manager.get_api_key("custom")
+            )
+            if answered != base_url:
+                console.print(
+                    f"That server answered at [bold]{answered}[/bold], not "
+                    f"[bold]{base_url}[/bold]."
+                )
+                if Confirm.ask("Store the corrected URL?", default=True, console=console):
+                    manager.set_value("llm.base_url", answered)
+            if models:
+                picked = ui.pick(
+                    "LLM Model", [(m, m) for m in models], default=current, console=console
+                )
+            else:
+                console.print("[yellow]Could not list models from that endpoint.[/yellow]")
+    if picked == _CUSTOM_ROW:
+        picked = Prompt.ask("Model name", default=current, console=console).strip()
+    if picked:
+        manager.set_value("llm.model", picked)
+
+
 # Sentinels for the model picker's non-model rows. "\0" can't collide with a
 # real model name, so the caller can tell a chosen model from a chosen action.
 _CATALOG_ROW = "\0catalog"
 _CUSTOM_ROW = "\0custom"
+_FETCH_ROW = "\0fetch"
 
 # What the row 7 picker shows. This is presentation text; the Literal on
 # TTSConfig is the source of truth, and a test asserts the two stay in step.
@@ -764,6 +810,9 @@ def _pick_model(manager: ConfigManager, provider: str, current: str) -> None:
     `nero.llm.providers` free of a litellm dependency at import time, which
     keeps it independently importable and testable.
     """
+    if provider == "custom":
+        _pick_custom_model(manager, current)
+        return
     info = providers.get(provider)
     if not info.models:
         # ollama: the model comes from hardware detection, not a cloud list.
