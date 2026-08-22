@@ -15,9 +15,9 @@ class TestTable:
         level. This test is the only thing stopping the two from drifting."""
         assert get_args(Provider) == providers.names()
 
-    def test_ollama_is_the_only_keyless_provider(self):
+    def test_keyless_providers_are_ollama_and_bedrock(self):
         keyless = [p.name for p in providers.PROVIDERS if p.keyring_entry is None]
-        assert keyless == ["ollama"]
+        assert keyless == ["ollama", "bedrock"]
 
     def test_every_cloud_provider_has_curated_models(self):
         # Two providers have no fixed catalog to curate: ollama's model comes
@@ -100,3 +100,37 @@ class TestCatalog:
 
         monkeypatch.setattr(builtins, "__import__", boom)
         assert providers.catalog_models("mistral") == []
+
+
+class TestExpansionTable:
+    def test_the_five_rows_are_appended_last_in_order(self):
+        assert providers.names()[-7:] == (
+            "custom", "custom_anthropic", "bedrock", "huggingface", "cohere",
+            "perplexity", "replicate",
+        )
+
+    def test_bedrock_is_keyless_with_a_region_flavored_shortlist(self):
+        info = providers.get("bedrock")
+        assert info.keyring_entry is None
+        assert info.key_optional is False
+        assert info.prefix == "bedrock/"
+        assert info.catalog_key == "bedrock"
+        assert info.default_model.startswith("us.anthropic.")
+
+    def test_cohere_catalog_key_is_cohere_chat(self):
+        """LiteLLM's model_cost files command models under "cohere_chat"."""
+        assert providers.get("cohere").catalog_key == "cohere_chat"
+
+    def test_cohere_catalog_is_reachable(self):
+        assert providers.catalog_models("cohere") != []
+
+    def test_the_keyed_rows_have_service_named_entries(self):
+        assert providers.get("huggingface").keyring_entry == "huggingface_api_key"
+        assert providers.get("cohere").keyring_entry == "cohere_api_key"
+        assert providers.get("perplexity").keyring_entry == "perplexity_api_key"
+        assert providers.get("replicate").keyring_entry == "replicate_api_key"
+
+    def test_replicate_curated_ids_are_nested_but_not_self_prefixed(self):
+        for model in providers.get("replicate").models:
+            assert "/" in model
+            assert not model.startswith("replicate/")

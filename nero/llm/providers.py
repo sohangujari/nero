@@ -124,6 +124,44 @@ PROVIDERS: tuple[ProviderInfo, ...] = (
         "custom_anthropic_api_key", (),
         key_optional=True,
     ),
+    # AWS Bedrock: auth comes from the ambient AWS credential chain (env vars,
+    # ~/.aws, SSO), never the keyring — keyring_entry None, like ollama, and
+    # startup routes through _bedrock_preflight instead of the key gate. The
+    # region lives in llm.aws_region. Newer Anthropic models on Bedrock are
+    # invoked via inference profiles, hence the "us." prefix on the curated ids.
+    ProviderInfo(
+        "bedrock", "AWS Bedrock", "bedrock/", "bedrock", None,
+        ("us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+         "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+         "amazon.nova-pro-v1:0"),
+    ),
+    # The HF Inference Providers router. Its models aren't in LiteLLM's cost
+    # catalog at all, so the catalog row degrades to free text by design;
+    # the curated ids are router names (org/model), editorial like every list.
+    ProviderInfo(
+        "huggingface", "Hugging Face", "huggingface/", "huggingface",
+        "huggingface_api_key",
+        ("moonshotai/Kimi-K2-Instruct", "meta-llama/Llama-3.3-70B-Instruct",
+         "Qwen/Qwen2.5-72B-Instruct"),
+    ),
+    # catalog_key is "cohere_chat", not "cohere": that is what LiteLLM's
+    # model_cost uses for command models (verified against 1.83.0).
+    ProviderInfo(
+        "cohere", "Cohere", "cohere/", "cohere_chat", "cohere_api_key",
+        ("command-a-03-2025", "command-r-plus", "command-r7b-12-2024"),
+    ),
+    # No function calling on this API — Nero's skills won't fire here. The
+    # catalog entries LiteLLM has are pre-sonar and stale; the curated ids are
+    # the live ones.
+    ProviderInfo(
+        "perplexity", "Perplexity", "perplexity/", "perplexity",
+        "perplexity_api_key",
+        ("sonar-pro", "sonar", "sonar-reasoning-pro"),
+    ),
+    ProviderInfo(
+        "replicate", "Replicate", "replicate/", "replicate", "replicate_api_key",
+        ("anthropic/claude-4.5-haiku", "openai/gpt-5", "openai/gpt-oss-20b"),
+    ),
 )
 
 _BY_NAME = {info.name: info for info in PROVIDERS}

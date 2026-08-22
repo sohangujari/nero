@@ -9,7 +9,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 Provider = Literal[
     "claude", "openai", "gemini", "ollama", "mistral", "deepseek", "minimax",
     "kimi", "qwen", "xai", "glm", "openrouter", "groq", "custom",
-    "custom_anthropic",
+    "custom_anthropic", "bedrock", "huggingface", "cohere", "perplexity",
+    "replicate",
 ]
 Mode = Literal["online", "offline"]
 
@@ -26,6 +27,9 @@ class LLMConfig(BaseModel):
     provider: Provider = "claude"
     model: str = "claude-sonnet-5"
     base_url: str | None = None
+    # Only meaningful under provider "bedrock"; persists inertly otherwise,
+    # exactly like base_url — the guard is LLMClient.aws_region.
+    aws_region: str | None = None
 
     @model_validator(mode="after")
     def _normalize_base_url(self):
