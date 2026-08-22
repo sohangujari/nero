@@ -356,9 +356,11 @@ def _run_chat() -> None:
 def _provider_preflight(manager: ConfigManager, config: NeroConfig) -> str | None:
     """Check the provider is usable and return its API key, or exit.
 
-    The ollama branch is keyed on the provider name, not on keylessness: a
-    custom endpoint may also be keyless, and would otherwise be sent through
-    the Ollama reachability check and told to run `ollama serve`.
+    The ollama branch is keyed on the provider name, not on keylessness: which
+    providers happen to have a keyring entry is an accident of the provider
+    table, not a routing decision. The pre-fix bug here was that a keyless
+    `custom` endpoint's missing key was treated as fatal, ignoring that
+    `custom` is `key_optional`.
     """
     provider = config.llm.provider
     if provider == "ollama":
