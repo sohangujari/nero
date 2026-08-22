@@ -78,6 +78,17 @@ class TestFetchModels:
         routes["http://x/v1/models"] = FakeResponse({"data": [{"name": "no-id-key"}]})
         assert openai_compat.fetch_models("http://x") == ("http://x", [])
 
+    def test_a_non_object_json_body_degrades_to_empty(self, fake_http):
+        """A bare array or null is valid JSON but has no .get — must not raise."""
+        routes, _ = fake_http
+        routes["http://x/v1/models"] = FakeResponse(["not", "an", "object"])
+        assert openai_compat.fetch_models("http://x") == ("http://x", [])
+
+    def test_a_null_json_body_degrades_to_empty(self, fake_http):
+        routes, _ = fake_http
+        routes["http://x/v1/models"] = FakeResponse(None)
+        assert openai_compat.fetch_models("http://x") == ("http://x", [])
+
     def test_the_key_is_sent_only_when_given(self, fake_http):
         routes, calls = fake_http
         routes["http://x/v1/models"] = _models("m")

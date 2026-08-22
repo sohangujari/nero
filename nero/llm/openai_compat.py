@@ -28,7 +28,7 @@ def fetch_models(
             response = httpx.get(f"{candidate}/models", headers=headers, timeout=timeout)
             response.raise_for_status()
             models = sorted(str(entry["id"]) for entry in response.json().get("data", []))
-        except (httpx.HTTPError, ValueError, KeyError, TypeError):
+        except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
             continue
         if models:
             return candidate, models
