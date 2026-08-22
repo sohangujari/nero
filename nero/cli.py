@@ -1,6 +1,7 @@
 import contextlib
 import json
 import logging
+import os
 import signal
 import sys
 import uuid
@@ -366,6 +367,9 @@ def _provider_preflight(manager: ConfigManager, config: NeroConfig) -> str | Non
     if provider == "ollama":
         _ollama_preflight(config.llm.model)
         return None
+    if provider == "bedrock":
+        _bedrock_preflight(config)
+        return None
     if provider in providers.CUSTOM_PROVIDERS and not config.llm.base_url:
         console.print(
             "[red]No Endpoint URL configured.[/red] Run [bold]nero config[/bold] "
@@ -380,6 +384,48 @@ def _provider_preflight(manager: ConfigManager, config: NeroConfig) -> str | Non
         )
         raise typer.Exit(1)
     return api_key
+
+
+def _bedrock_credentials_present() -> bool:
+    """True if boto3's default chain resolves any credentials.
+
+    Separate function so tests can stub the answer without importing boto3.
+    The import is lazy — boto3 is only needed on the bedrock path.
+    """
+    try:
+        import boto3
+
+        return boto3.Session().get_credentials() is not None
+    except Exception:  # noqa: BLE001 — any resolution failure means "not present"
+        return False
+
+
+def _bedrock_preflight(config: NeroConfig) -> None:
+    """Fail fast with actionable messages before entering the chat loop.
+
+    Region first: LiteLLM accepts it from config (aws_region_name) or the
+    environment. Credentials second, via the ambient chain — Nero never
+    stores AWS credentials itself.
+    """
+    region = (
+        config.llm.aws_region
+        or os.environ.get("AWS_REGION_NAME")
+        or os.environ.get("AWS_REGION")
+        or os.environ.get("AWS_DEFAULT_REGION")
+    )
+    if not region:
+        console.print(
+            "[red]No AWS region configured.[/red] Set it with "
+            "[bold]nero config set llm.aws_region us-east-1[/bold] "
+            "(or export AWS_REGION)."
+        )
+        raise typer.Exit(1)
+    if not _bedrock_credentials_present():
+        console.print(
+            "[red]No AWS credentials found.[/red] Run [bold]aws configure[/bold], "
+            "or export AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY."
+        )
+        raise typer.Exit(1)
 
 
 def _ollama_preflight(model: str) -> None:

@@ -87,3 +87,77 @@ class TestModelString:
         config = LLMConfig(provider="replicate", model="openai/gpt-5")
         client = LLMClient(config=config, assistant_name="Nero", registry=SkillRegistry([]))
         assert client.litellm_model == "replicate/openai/gpt-5"
+
+
+from typer.testing import CliRunner
+
+from nero import cli
+from nero.config.manager import ConfigManager
+from nero.config.schema import NeroConfig
+
+runner = CliRunner()
+
+_AWS_ENV = ("AWS_REGION_NAME", "AWS_REGION", "AWS_DEFAULT_REGION")
+
+
+def _bedrock_manager(tmp_path, aws_region="us-east-1"):
+    manager = ConfigManager(config_dir=tmp_path)
+    manager.save(
+        NeroConfig.model_validate(
+            {"llm": {"provider": "bedrock",
+                     "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+                     "aws_region": aws_region}}
+        )
+    )
+    return manager
+
+
+def _clear_aws_env(monkeypatch):
+    for name in _AWS_ENV:
+        monkeypatch.delenv(name, raising=False)
+
+
+class TestBedrockStartupGate:
+    def test_bedrock_with_region_and_credentials_starts(self, monkeypatch, tmp_path):
+        """No API key exists or is needed; EOF ends the chat loop cleanly."""
+        monkeypatch.setattr(cli, "ConfigManager", lambda: _bedrock_manager(tmp_path))
+        monkeypatch.setattr(cli, "_bedrock_credentials_present", lambda: True)
+        result = runner.invoke(cli.app, [])
+        assert result.exit_code == 0
+        assert "API key" not in result.output
+
+    def test_bedrock_without_a_region_exits_naming_the_region(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cli, "ConfigManager", lambda: _bedrock_manager(tmp_path, None))
+        monkeypatch.setattr(cli, "_bedrock_credentials_present", lambda: True)
+        _clear_aws_env(monkeypatch)
+        result = runner.invoke(cli.app, [])
+        assert result.exit_code == 1
+        assert "region" in result.output.lower()
+        assert "API key" not in result.output
+
+    def test_an_env_region_satisfies_the_gate(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cli, "ConfigManager", lambda: _bedrock_manager(tmp_path, None))
+        monkeypatch.setattr(cli, "_bedrock_credentials_present", lambda: True)
+        _clear_aws_env(monkeypatch)
+        monkeypatch.setenv("AWS_REGION", "eu-central-1")
+        assert runner.invoke(cli.app, []).exit_code == 0
+
+    def test_bedrock_without_credentials_exits_pointing_at_aws_configure(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(cli, "ConfigManager", lambda: _bedrock_manager(tmp_path))
+        monkeypatch.setattr(cli, "_bedrock_credentials_present", lambda: False)
+        result = runner.invoke(cli.app, [])
+        assert result.exit_code == 1
+        assert "aws configure" in result.output
+        assert "API key" not in result.output
+
+    def test_bedrock_never_reaches_the_ollama_preflight(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cli, "ConfigManager", lambda: _bedrock_manager(tmp_path))
+        monkeypatch.setattr(cli, "_bedrock_credentials_present", lambda: True)
+
+        def fail(model):
+            raise AssertionError(f"_ollama_preflight called with {model!r}")
+
+        monkeypatch.setattr(cli, "_ollama_preflight", fail)
+        assert runner.invoke(cli.app, []).exit_code == 0
