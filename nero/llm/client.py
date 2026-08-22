@@ -154,7 +154,7 @@ class LLMClient:
         (nothing clears it on a provider switch), and must never leak into
         another provider's call.
         """
-        if self.config.provider != "custom":
+        if self.config.provider not in providers.CUSTOM_PROVIDERS:
             return None
         return self.config.base_url
 
@@ -171,14 +171,15 @@ class LLMClient:
         "dashscope/qwen3-max" — from getting it applied twice, and leaves
         nested names like "anthropic/claude-sonnet-4.6" under openrouter/ intact.
         """
-        if self.config.provider == "custom":
+        if self.config.provider in providers.CUSTOM_PROVIDERS:
             # Unconditional, unlike the startswith guard below: Together really
             # serves a model called "openai/gpt-oss-120b" (the groq shortlist
             # carries that exact id), and the guard would see the prefix already
             # present and pass it through — LiteLLM would then strip it and send
             # the bare "gpt-oss-120b" to the endpoint, which 404s. LiteLLM strips
-            # exactly one prefix, so "openai/openai/gpt-oss-120b" is correct.
-            return "openai/" + self.config.model
+            # exactly one prefix, so a doubled prefix is correct — for both
+            # custom dialects; the prefix itself comes from the table.
+            return providers.get(self.config.provider).prefix + self.config.model
         prefix = providers.get(self.config.provider).prefix
         model = self.config.model
         if prefix and not model.startswith(prefix):

@@ -139,6 +139,38 @@ class TestCustomModelString:
         assert client.litellm_model == "openai/openai/gpt-oss-120b"
 
 
+class TestAnthropicGuardAndModel:
+    def test_custom_anthropic_exposes_its_endpoint(self):
+        client = _client(
+            "custom_anthropic", "kimi-k2.5", "https://api.moonshot.ai/anthropic"
+        )
+        assert client.api_base == "https://api.moonshot.ai/anthropic"
+
+    def test_a_stale_url_still_never_leaks_into_a_named_provider(self):
+        """The frozenset widens which providers USE the URL; named providers
+        must stay exactly as guarded as before."""
+        assert _client("claude", "claude-sonnet-5", "http://stale").api_base is None
+
+    def test_a_bare_model_gets_the_anthropic_prefix(self):
+        """NOTE: passes even before this task via the generic table-prefix path
+        (custom_anthropic doesn't hit the old == "custom" branch). Kept as a
+        regression guard; the discriminating test is the double-prefix one."""
+        assert _client("custom_anthropic", "kimi-k2.5").litellm_model == "anthropic/kimi-k2.5"
+
+    def test_an_anthropic_named_model_is_still_prefixed(self):
+        """Same one-strip logic as the Together case: LiteLLM strips exactly
+        one prefix, so a model genuinely named anthropic/… must be doubled."""
+        client = _client("custom_anthropic", "anthropic/claude-sonnet-5")
+        assert client.litellm_model == "anthropic/anthropic/claude-sonnet-5"
+
+    def test_custom_anthropic_sends_api_base(self, monkeypatch):
+        client = _client(
+            "custom_anthropic", "kimi-k2.5", "https://api.moonshot.ai/anthropic"
+        )
+        kwargs = _completion_kwargs(monkeypatch, client)
+        assert kwargs["api_base"] == "https://api.moonshot.ai/anthropic"
+
+
 class _EmptyStream:
     def __aiter__(self):
         return self
