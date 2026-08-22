@@ -20,8 +20,11 @@ class TestTable:
         assert keyless == ["ollama"]
 
     def test_every_cloud_provider_has_curated_models(self):
+        # Two providers have no fixed catalog to curate: ollama's model comes
+        # from hardware detection, and a custom endpoint's from the endpoint.
+        no_catalog = {"ollama", "custom"}
         for info in providers.PROVIDERS:
-            if info.name == "ollama":
+            if info.name in no_catalog:
                 assert info.models == ()
                 assert info.default_model is None
             else:

@@ -28,6 +28,7 @@ class ProviderInfo:
     catalog_key: str  # matches litellm_provider in litellm.model_cost
     keyring_entry: str | None  # None means keyless (ollama)
     models: tuple[str, ...] = ()  # curated shortlist; models[0] is the default
+    key_optional: bool = False  # a key may be stored, but its absence is not fatal
 
     @property
     def default_model(self) -> str | None:
@@ -97,6 +98,15 @@ PROVIDERS: tuple[ProviderInfo, ...] = (
         "groq", "Groq", "groq/", "groq", "groq_api_key",
         ("llama-3.3-70b-versatile", "openai/gpt-oss-120b",
          "moonshotai/kimi-k2-instruct-0905"),
+    ),
+    # An arbitrary OpenAI-compatible server: LM Studio, vLLM, SGLang, llama.cpp
+    # server mode, Together, Fireworks, Cerebras, NIM. The endpoint lives in
+    # llm.base_url, not here, because it is per-user rather than a provider fact.
+    # catalog_key is "" so catalog_models() finds nothing even if something calls
+    # it — a custom endpoint's models come from the endpoint, not from LiteLLM.
+    ProviderInfo(
+        "custom", "Custom (OpenAI-compatible)", "openai/", "", "custom_api_key", (),
+        key_optional=True,
     ),
 )
 

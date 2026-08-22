@@ -1,13 +1,13 @@
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # Kept hand-written because pydantic needs the Literal at the type level; it
 # cannot be generated from nero.llm.providers.PROVIDERS without losing static
 # typing. tests/test_providers.py asserts the two stay identical.
 Provider = Literal[
     "claude", "openai", "gemini", "ollama", "mistral", "deepseek", "minimax",
-    "kimi", "qwen", "xai", "glm", "openrouter", "groq",
+    "kimi", "qwen", "xai", "glm", "openrouter", "groq", "custom",
 ]
 Mode = Literal["online", "offline"]
 
@@ -23,6 +23,26 @@ class LLMConfig(BaseModel):
 
     provider: Provider = "claude"
     model: str = "claude-sonnet-5"
+    base_url: str | None = None
+
+    @model_validator(mode="after")
+    def _normalize_base_url(self):
+        """Shape only — deliberately not coupled to `provider`.
+
+        A base_url left over from a previous custom endpoint stays in the file
+        inertly when the user switches to a named provider, and comes back if
+        they switch to custom again. Rejecting it here would turn every provider
+        switch into a two-step chore; auto-clearing it would mutate one field as
+        a side effect of setting another, which `_warn_if_model_mismatched`
+        already establishes this codebase does not do. The guard that matters is
+        `LLMClient.api_base`.
+        """
+        if self.base_url is None:
+            return self
+        if not self.base_url.startswith(("http://", "https://")):
+            raise ValueError("llm.base_url must start with http:// or https://")
+        self.base_url = self.base_url.rstrip("/")
+        return self
 
 
 class HardwareConfig(BaseModel):
