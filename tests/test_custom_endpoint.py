@@ -52,3 +52,87 @@ class TestTable:
         assert info.default_model is None
         assert info.catalog_key == ""
         assert providers.catalog_models("custom") == []
+
+
+import asyncio
+
+from nero.llm.client import LLMClient
+from nero.skills.registry import SkillRegistry
+
+
+def _client(provider, model, base_url=None):
+    return LLMClient(
+        config=LLMConfig(provider=provider, model=model, base_url=base_url),
+        assistant_name="Nero",
+        registry=SkillRegistry([]),
+    )
+
+
+class TestApiBaseGuard:
+    def test_custom_exposes_its_endpoint(self):
+        client = _client("custom", "llama-3.1-8b", "http://localhost:1234/v1")
+        assert client.api_base == "http://localhost:1234/v1"
+
+    def test_a_stale_url_never_leaks_into_another_provider(self):
+        """Nothing clears base_url on a provider switch, so a real config
+        reaches this state. The guard is on the provider, not on the field
+        merely being set."""
+        assert _client("claude", "claude-sonnet-5", "http://stale").api_base is None
+
+    def test_custom_without_a_url_is_none(self):
+        assert _client("custom", "llama-3.1-8b").api_base is None
+
+    def test_the_model_is_exposed_like_the_provider_is(self):
+        """Task 7's error messages read this off the client by name, the same
+        way the chat loop already reads `provider`."""
+        assert _client("custom", "llama-3.1-8b").model == "llama-3.1-8b"
+
+
+class TestCustomModelString:
+    def test_a_bare_model_gets_the_openai_prefix(self):
+        assert _client("custom", "llama-3.1-8b").litellm_model == "openai/llama-3.1-8b"
+
+    def test_a_model_named_after_a_provider_is_still_prefixed(self):
+        """Together really serves "openai/gpt-oss-120b" — the groq shortlist
+        carries that exact id. The startswith guard used elsewhere would see
+        the prefix already present and pass it through, LiteLLM would strip it,
+        and the endpoint would receive the bare name and 404. LiteLLM strips
+        exactly one prefix, so doubling it is correct."""
+        client = _client("custom", "openai/gpt-oss-120b")
+        assert client.litellm_model == "openai/openai/gpt-oss-120b"
+
+
+class _EmptyStream:
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        raise StopAsyncIteration
+
+
+def _completion_kwargs(monkeypatch, client):
+    """Run one litellm round against a stubbed transport and return the kwargs."""
+    captured = {}
+
+    async def fake_acompletion(**kwargs):
+        captured.update(kwargs)
+        return _EmptyStream()
+
+    monkeypatch.setattr("litellm.acompletion", fake_acompletion)
+    monkeypatch.setattr("litellm.stream_chunk_builder", lambda chunks, messages=None: None)
+
+    async def drain():
+        return [text async for text in client._litellm_chat([], [])]
+
+    asyncio.run(drain())
+    return captured
+
+
+class TestApiBaseReachesLitellm:
+    def test_custom_sends_api_base(self, monkeypatch):
+        client = _client("custom", "llama-3.1-8b", "http://localhost:1234/v1")
+        assert _completion_kwargs(monkeypatch, client)["api_base"] == "http://localhost:1234/v1"
+
+    def test_a_named_provider_sends_no_api_base(self, monkeypatch):
+        client = _client("claude", "claude-sonnet-5", "http://stale")
+        assert "api_base" not in _completion_kwargs(monkeypatch, client)

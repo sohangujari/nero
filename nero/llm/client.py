@@ -146,6 +146,23 @@ class LLMClient:
         return self.config.provider
 
     @property
+    def api_base(self) -> str | None:
+        """The custom endpoint, or None.
+
+        Guarded on the provider, not merely on the field being set: a base_url
+        left over from an earlier custom endpoint persists inertly in config
+        (nothing clears it on a provider switch), and must never leak into
+        another provider's call.
+        """
+        if self.config.provider != "custom":
+            return None
+        return self.config.base_url
+
+    @property
+    def model(self) -> str:
+        return self.config.model
+
+    @property
     def litellm_model(self) -> str:
         """The config's provider+model as a LiteLLM model string.
 
@@ -154,6 +171,14 @@ class LLMClient:
         "dashscope/qwen3-max" — from getting it applied twice, and leaves
         nested names like "anthropic/claude-sonnet-4.6" under openrouter/ intact.
         """
+        if self.config.provider == "custom":
+            # Unconditional, unlike the startswith guard below: Together really
+            # serves a model called "openai/gpt-oss-120b" (the groq shortlist
+            # carries that exact id), and the guard would see the prefix already
+            # present and pass it through — LiteLLM would then strip it and send
+            # the bare "gpt-oss-120b" to the endpoint, which 404s. LiteLLM strips
+            # exactly one prefix, so "openai/openai/gpt-oss-120b" is correct.
+            return "openai/" + self.config.model
         prefix = providers.get(self.config.provider).prefix
         model = self.config.model
         if prefix and not model.startswith(prefix):
@@ -180,6 +205,8 @@ class LLMClient:
         kwargs = {}
         if self.api_key:
             kwargs["api_key"] = self.api_key
+        if self.api_base:
+            kwargs["api_base"] = self.api_base
         response = await litellm.acompletion(
             model=self.litellm_model,
             messages=[{"role": "system", "content": self.system_prompt}, *messages],
