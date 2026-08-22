@@ -1,3 +1,4 @@
+import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -39,9 +40,9 @@ class LLMConfig(BaseModel):
         """
         if self.base_url is None:
             return self
-        if not self.base_url.startswith(("http://", "https://")):
-            raise ValueError("llm.base_url must start with http:// or https://")
         self.base_url = self.base_url.rstrip("/")
+        if not re.match(r"^https?://.+", self.base_url):
+            raise ValueError("llm.base_url must start with http:// or https://")
         return self
 
 

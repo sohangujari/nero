@@ -27,6 +27,16 @@ class TestSchema:
         config = LLMConfig(provider="custom", model="x", base_url="http://localhost:1234/v1/")
         assert config.base_url == "http://localhost:1234/v1"
 
+    def test_a_bare_scheme_is_rejected(self):
+        """startswith("http://") passes for "http://" itself, and rstrip("/")
+        then reduces it to the unusable "http:" — reject before that happens."""
+        with pytest.raises(ValidationError):
+            LLMConfig(provider="custom", model="x", base_url="http://")
+
+    def test_a_bare_https_scheme_is_rejected(self):
+        with pytest.raises(ValidationError):
+            LLMConfig(provider="custom", model="x", base_url="https://")
+
     def test_a_stale_url_on_another_provider_is_representable(self):
         """The guard lives in LLMClient.api_base, not here. This state must be
         constructible or the leak test in Task 3 cannot be written at all."""
