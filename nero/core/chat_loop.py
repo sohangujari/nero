@@ -86,7 +86,8 @@ class ChatLoop:
                 self.console.print(f"\n[red]{escape(str(exc))}[/red]")
             except litellm.exceptions.NotFoundError:
                 # The most likely custom-endpoint failure: a model id the server
-                # doesn't have, or a base URL missing the /v1 the API lives at.
+                # doesn't have, or a base URL with the wrong /v1 shape for its
+                # dialect.
                 del self.messages[turn_start:]
                 model = getattr(self.client, "model", None) or "that model"
                 self.console.print(
