@@ -140,6 +140,12 @@ class LLMClient:
             "write tool-call JSON as text. Keep replies concise."
         )
         self._last_round: RoundResult | None = None
+        # Accumulated USD cost of the turn currently in progress (reset at the
+        # top of _run_turn). Local/ollama rounds never touch this — no cost.
+        # Never raises: an unpriced/custom model or a streaming response
+        # litellm can't cost just leaves this at 0.0, so the ceiling simply
+        # never trips rather than crashing the turn.
+        self.last_turn_cost: float = 0.0
 
     @property
     def provider(self) -> str:
@@ -241,6 +247,10 @@ class LLMClient:
             content=getattr(message, "content", None),
             tool_calls=self._pending_from_message(message),
         )
+        try:
+            self.last_turn_cost += litellm.completion_cost(completion_response=full) or 0.0
+        except Exception:  # noqa: BLE001 — cost is a nice-to-have, never a turn-breaker
+            pass
 
     @staticmethod
     def _pending_from_message(message) -> list[PendingToolCall]:
@@ -317,6 +327,7 @@ class LLMClient:
         asyncio.run(self._run_turn(messages, on_text))
 
     async def _run_turn(self, messages: list[dict], on_text: Callable[[str], None]) -> None:
+        self.last_turn_cost = 0.0
         tool_definitions = self._tool_definitions()
         # Ollama rounds are fully buffered: local models mix filler text with
         # tool calls, and accompanying content must not print as an answer.

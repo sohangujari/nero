@@ -37,6 +37,7 @@ from nero.hardware.detector import (
 from nero.llm import ollama, openai_compat, providers
 from nero.llm.client import LLMClient
 from nero.memory.history_store import HistoryStore, default_history_path
+from nero.security import denylisted
 from nero.skills.registry import build_registry
 from nero.voice import audio_io
 from nero.voice.audio_io import Player, record_until_enter, record_until_silence
@@ -342,11 +343,58 @@ def _build_registry(manager: ConfigManager, config: NeroConfig):
         with contextlib.suppress(ConfigError, OSError):
             manager.set_value("skills.weather.default_location", location)
 
-    return build_registry(
+    # The confirm callback's signature is fixed at (name, tier, arguments) —
+    # it can't also take the registry it gates. Bind it via a one-element box
+    # instead: `confirm` is only ever called during later dispatch, by which
+    # point `registry_box` has been filled in below.
+    registry_box: list = []
+
+    def confirm(name: str, tier: str, arguments: dict) -> bool:
+        return _confirm_skill(name, tier, arguments, config.security, registry_box[0].tainted)
+
+    registry = build_registry(
         config,
         audit=AuditLog(default_audit_path()),
         on_location_resolved=remember_location,
+        confirm=confirm,
     )
+    registry_box.append(registry)
+    return registry
+
+
+def _confirm_skill(name: str, tier: str, arguments: dict, security, tainted: bool) -> bool:
+    """Console confirmation prompt for a destructive skill call.
+
+    Fails closed: no terminal (CliRunner, a pipe, a background job) means no
+    prompt can be answered, so this returns False rather than hanging or
+    auto-approving. A command argument matching `security.command_denylist`
+    escalates to typing "yes" in full instead of a plain y/N.
+    """
+    if not console.is_terminal:
+        return False
+    console.print(
+        f"[yellow]About to run[/yellow] [bold]{name}[/bold] "
+        f"([bold]{tier}[/bold]) with:"
+    )
+    console.print(json.dumps(arguments, indent=2, ensure_ascii=False, default=str))
+    if tainted:
+        console.print(
+            "[red]This turn ingested external content (web/file) — an injected "
+            "instruction could be behind this call.[/red]"
+        )
+    matched = None
+    for value in arguments.values():
+        if isinstance(value, str):
+            matched = denylisted(value, security.command_denylist)
+            if matched:
+                break
+    if matched:
+        console.print(
+            f"[red]Matches denylist pattern {matched!r}.[/red] Type [bold]yes[/bold] "
+            "in full to proceed."
+        )
+        return Prompt.ask("Proceed?", default="", console=console).strip().lower() == "yes"
+    return Confirm.ask("Proceed?", default=False, console=console)
 
 
 def _run_chat() -> None:
@@ -369,6 +417,7 @@ def _run_chat() -> None:
     ChatLoop(
         client, console=console, assistant_name=config.assistant.name,
         history=_build_history(config), fallback_clients=fallback_clients,
+        registry=registry, security=config.security,
     ).run()
 
 
@@ -861,7 +910,21 @@ def _config_table(manager: ConfigManager, config: NeroConfig) -> Table:
     table.add_row("Memory", "yes" if memory.enabled else "no")
     if memory.enabled:
         table.add_row("History Turns", str(memory.max_history_turns))
+    table.add_row("Security", _security_summary(config.security))
     return table
+
+
+def _security_summary(security) -> str:
+    limits = []
+    if security.max_turns_per_session:
+        limits.append(f"{security.max_turns_per_session} turns")
+    if security.max_cost_usd_per_session:
+        limits.append(f"${security.max_cost_usd_per_session:g}")
+    limits_text = ", ".join(limits) if limits else "unlimited"
+    return (
+        f"{len(security.command_denylist)} denylist / "
+        f"{len(security.command_allowlist)} allowlist / {limits_text}"
+    )
 
 
 def _interactive_menu() -> None:

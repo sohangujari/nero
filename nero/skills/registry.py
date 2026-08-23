@@ -24,11 +24,34 @@ class SkillRegistry:
         enabled: dict[str, bool] | None = None,
         mode: str = "online",
         audit=None,
+        confirm=None,
     ):
         self._skills = {skill.meta.name: skill for skill in skills}
         self._enabled = enabled or {}
         self._mode = mode
         self._audit = audit
+        # confirm: Callable[[str, str, dict], bool] | None, receiving
+        # (skill_name, tier, arguments). None => fail closed: a destructive
+        # skill is refused, never auto-approved (voice loop, tests, headless
+        # routine runs all pass no confirm today).
+        self._confirm = confirm
+        # Per-turn taint: set once a completed skill result came from a skill
+        # with ingests_external_content=True. ChatLoop clears it every turn
+        # via reset_turn(). Exposed read-only via `tainted` so a confirm
+        # callback built before the registry exists can still consult it.
+        self._tainted = False
+
+    @property
+    def tainted(self) -> bool:
+        return self._tainted
+
+    def mark_tainted(self) -> None:
+        self._tainted = True
+
+    def reset_turn(self) -> None:
+        """Clear per-turn taint. Called by ChatLoop at the start of each
+        user turn."""
+        self._tainted = False
 
     def known_names(self) -> set[str]:
         return set(self._skills)
@@ -88,10 +111,18 @@ class SkillRegistry:
             )
         if arguments is None:
             return "Error: tool arguments were not valid JSON."
+        if skill.meta.permission_tier == "destructive":
+            # Fail closed: no confirm callback (tests, voice loop, headless
+            # routine runs) means the call is refused, never auto-approved.
+            if self._confirm is None or not self._confirm(name, skill.meta.permission_tier, arguments):
+                return f"The user declined the {name} call."
         try:
-            return await skill.execute(**arguments)
+            result = await skill.execute(**arguments)
         except Exception as exc:  # noqa: BLE001 — must reach the model as a skill result
             return f"Error: {exc}"
+        if skill.meta.ingests_external_content:
+            self.mark_tainted()
+        return result
 
     def _record(self, name: str, arguments: dict | None, result: str, provider: str) -> None:
         """Audit every call, including all three refusal cases. Never raises:
@@ -116,11 +147,12 @@ class SkillRegistry:
             logger.warning("Could not record audit entry for %r: %s", name, exc)
 
 
-def build_registry(config, audit=None, on_location_resolved=None) -> SkillRegistry:
+def build_registry(config, audit=None, on_location_resolved=None, confirm=None) -> SkillRegistry:
     """Construct the registry from a NeroConfig.
 
     `on_location_resolved` lets the weather skill persist a newly learned
     default location without importing ConfigManager (added in Task 8).
+    `confirm` gates destructive skills — see SkillRegistry.__init__.
     """
     from nero.skills.open_app.server import OpenAppSkill
     from nero.skills.open_website.server import OpenWebsiteSkill
@@ -141,4 +173,5 @@ def build_registry(config, audit=None, on_location_resolved=None) -> SkillRegist
         enabled=config.skills.enabled.model_dump(),
         mode=config.mode,
         audit=audit,
+        confirm=confirm,
     )

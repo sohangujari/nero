@@ -180,6 +180,25 @@ class SkillsConfig(BaseModel):
     weather: WeatherSkillConfig = WeatherSkillConfig()
 
 
+class SecurityConfig(BaseModel):
+    """Command allow/denylist and session limits. Consumed by the confirm
+    gate (nero/security.py) and, in the next build, the shell/git skills.
+    All defaults are inert: an empty allowlist permits everything, and 0
+    limits mean unlimited — installing this feature changes nothing until a
+    user opts in."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    command_denylist: list[str] = [
+        "rm -rf", "sudo", "shutdown", "mkfs", "dd if=", "curl | sh", "curl|sh",
+        "wget | sh", "git push --force", "git reset --hard", ":(){", "chmod 777",
+    ]
+    # Non-empty => a command must match one of these, else refused outright.
+    command_allowlist: list[str] = []
+    max_turns_per_session: int = Field(default=0, ge=0)  # 0 = unlimited
+    max_cost_usd_per_session: float = Field(default=0.0, ge=0.0)  # 0 = unlimited
+
+
 class NeroConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -193,3 +212,4 @@ class NeroConfig(BaseModel):
     voice: VoiceConfig = VoiceConfig()
     skills: SkillsConfig = SkillsConfig()
     memory: MemoryConfig = MemoryConfig()
+    security: SecurityConfig = SecurityConfig()

@@ -79,6 +79,8 @@ class ChatLoop:
         input_fn: Callable[[str], str] | None = None,
         history=None,
         fallback_clients: list | None = None,
+        registry=None,
+        security=None,
     ):
         self.client = client
         self.console = console
@@ -86,6 +88,13 @@ class ChatLoop:
         self.input_fn = input_fn or console.input
         self.history = history
         self.fallback_clients = fallback_clients or []
+        # Optional: absent (voice loop, most tests) means no per-turn taint
+        # reset and no session limits — behavior is unchanged from before
+        # this feature existed.
+        self.registry = registry
+        self.security = security
+        self.turns_used = 0
+        self.cost_usd = 0.0
         # Seed from persisted history when memory is on; else a blank session.
         self.messages: list[dict] = history.recent() if history else []
 
@@ -108,6 +117,14 @@ class ChatLoop:
                 self._goodbye()
                 return
 
+            if self.registry is not None:
+                self.registry.reset_turn()
+
+            limit_message = self._limit_message()
+            if limit_message is not None:
+                self.console.print(f"[red]{limit_message}[/red]")
+                continue
+
             if text.startswith("/image "):
                 image_turn = self._image_turn(text)
                 if image_turn is None:
@@ -118,6 +135,8 @@ class ChatLoop:
                 history_text = text
 
             turn_start = len(self.messages)
+            self.turns_used += 1
+            used_client = self.client
             self.messages.append(user_message)
             self.console.print(f"[bold magenta]{self.assistant_name}>[/bold magenta] ", end="")
             try:
@@ -143,12 +162,14 @@ class ChatLoop:
                         )
                         try:
                             fallback_client.send(self.messages, on_text=self._print_chunk)
+                            used_client = fallback_client
                             break
                         except TRANSIENT_ERRORS:
                             # Exceptions from the last attempt propagate to the
                             # existing outer handlers unchanged.
                             if i == len(self.fallback_clients) - 1:
                                 raise
+                self.cost_usd += getattr(used_client, "last_turn_cost", 0.0) or 0.0
                 self.console.print()
                 if self.history is not None and self.messages[-1].get("role") == "assistant":
                     # Persist only on success — past every rollback branch below.
@@ -210,6 +231,24 @@ class ChatLoop:
                     f"\n[red]Something went wrong with that turn:[/red] {exc}\n"
                     "You can retry, or type exit to quit."
                 )
+
+    def _limit_message(self) -> str | None:
+        """None if the turn may proceed, else the message to show instead.
+
+        Refuses the turn (the user can still type `exit`) rather than ending
+        the session — a hard exit would be a surprising way to hit a budget
+        cap. 0 means unlimited on both axes, so a user who never touched
+        `security.*` sees no change at all.
+        """
+        if self.security is None:
+            return None
+        max_turns = self.security.max_turns_per_session
+        if max_turns and self.turns_used >= max_turns:
+            return f"Turn limit reached ({max_turns} per session). Type exit to leave."
+        max_cost = self.security.max_cost_usd_per_session
+        if max_cost and self.cost_usd >= max_cost:
+            return f"Cost limit reached (${max_cost:g} per session). Type exit to leave."
+        return None
 
     def _image_turn(self, text: str) -> tuple[dict, str] | None:
         """Parse, validate, and gate an `/image <path> [question]` command.

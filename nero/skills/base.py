@@ -67,6 +67,10 @@ class SkillMeta(BaseModel):
     # Shown verbatim when the skill is blocked by offline mode. Optional so
     # non-network skills don't carry a message they can never emit.
     offline_message: str | None = None
+    # True for skills that return externally-sourced bytes (web fetch, file
+    # read) — their result may contain injected instructions. The registry
+    # taints the turn after such a skill runs; see nero/security.py.
+    ingests_external_content: bool = False
 
 
 class Skill(ABC):
