@@ -19,7 +19,7 @@ def check_python_version(current: tuple[int, ...] = sys.version_info[:3]) -> str
         return None
     running = ".".join(str(part) for part in current[:3])
     return (
-        f"Nero is tested and pinned to Python {REQUIRED[0]}.{REQUIRED[1]}; "
+        f"Nero Agent is tested and pinned to Python {REQUIRED[0]}.{REQUIRED[1]}; "
         f"you're running {running}. Some dependencies (voice/ML) may fail to "
         f"install or import. Prefer the standalone binary, or use a Python "
         f"{REQUIRED[0]}.{REQUIRED[1]} environment (e.g. `uv sync`)."

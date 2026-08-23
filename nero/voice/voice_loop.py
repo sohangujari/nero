@@ -108,7 +108,7 @@ class VoiceLoop:
             except MicPermissionError as exc:
                 self.console.print(
                     f"\n[red]Microphone access was denied by the OS.[/red] {exc}\n"
-                    "Grant Nero microphone permission in your system settings, then retry."
+                    "Grant Nero Agent microphone permission in your system settings, then retry."
                 )
                 return
             except MicUnavailableError as exc:

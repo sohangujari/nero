@@ -47,7 +47,7 @@ from nero.voice.vad import VoiceActivityDetector
 from nero.voice.voice_loop import VoiceLoop
 
 app = typer.Typer(add_completion=False, invoke_without_command=True)
-config_app = typer.Typer(invoke_without_command=True, help="View and edit Nero's configuration.")
+config_app = typer.Typer(invoke_without_command=True, help="View and edit Nero Agent's configuration.")
 app.add_typer(config_app, name="config")
 console = Console()
 logger = logging.getLogger("nero.cli")
@@ -80,7 +80,7 @@ def main(
         help="Verbose logging to stderr (tool-call plumbing, per-turn history).",
     ),
 ) -> None:
-    """Nero — your personal AI assistant in the terminal. Run with no arguments to chat."""
+    """Nero Agent — your personal AI assistant in the terminal. Run with no arguments to chat."""
     if debug:
         _enable_debug_logging()
     warning = check_python_version()
@@ -143,7 +143,7 @@ def detect() -> None:
 def history(
     limit: int = typer.Option(20, "--limit", "-n", help="How many entries to show."),
 ) -> None:
-    """Show what Nero has actually done — a log of recent skill invocations."""
+    """Show what Nero Agent has actually done — a log of recent skill invocations."""
     entries = AuditLog(default_audit_path()).recent(limit)
     if not entries:
         console.print("[dim]No skill invocations recorded yet.[/dim]")
@@ -168,7 +168,7 @@ def history(
 
 @app.command()
 def forget() -> None:
-    """Clear Nero's remembered conversation history (not the audit log)."""
+    """Clear Nero Agent's remembered conversation history (not the audit log)."""
     store = HistoryStore(default_history_path(), session_id="-")
     if not store.recent(limit=1):
         console.print("[dim]Conversation history is already empty.[/dim]")
@@ -187,7 +187,7 @@ def talk(
         False, "--debug", help="Verbose per-stage voice pipeline logging (same as `nero --debug`)."
     ),
 ) -> None:
-    """Talk to Nero: recording stops on its own; talk over it to interrupt its reply."""
+    """Talk to Nero Agent: recording stops on its own; talk over it to interrupt its reply."""
     if debug:  # DEBUG(hang): accept --debug after the subcommand too, not just before it.
         _enable_debug_logging()
     manager = ConfigManager()
@@ -257,7 +257,7 @@ def talk(
     ):
         barge_in = False
         console.print(
-            "[dim]Barge-in is off: on built-in speakers Nero would hear (and "
+            "[dim]Barge-in is off: on built-in speakers Nero Agent would hear (and "
             "interrupt) itself. Headphones re-enable it, or force it with "
             "nero config set voice.force_barge_in true.[/dim]"
         )
@@ -453,7 +453,7 @@ def _ollama_preflight(model: str) -> None:
 def _first_time_setup(manager: ConfigManager) -> None:
     console.print(
         Panel(
-            "Welcome! Let's set Nero up. This takes under a minute.",
+            "Welcome! Let's set Nero Agent up. This takes under a minute.",
             title="nero — first-time setup",
             border_style="cyan",
         )
@@ -487,7 +487,7 @@ def _first_time_setup(manager: ConfigManager) -> None:
         _pick_model(manager, provider, config.llm.model)
         api_key = typer.prompt(f"{provider} API key", hide_input=True).strip()
         manager.set_api_key(provider, api_key)
-    console.print("[bold green]Nero is ready.[/bold green]\n")
+    console.print("[bold green]Nero Agent is ready.[/bold green]\n")
 
 
 @config_app.callback()
@@ -1016,7 +1016,7 @@ def _setup_bedrock(manager: ConfigManager, current_region: str | None) -> None:
     _pick_model(manager, "bedrock", default_model)
     console.print(
         "Bedrock uses your AWS credentials (aws configure / env vars) — "
-        "no key is stored by Nero."
+        "no key is stored by Nero Agent."
     )
 
 

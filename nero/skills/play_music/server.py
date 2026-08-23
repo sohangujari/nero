@@ -103,7 +103,7 @@ class WindowsController(MusicController):
         except ImportError:
             return (
                 "Media control needs the pynput package, which isn't installed. "
-                "Reinstalling Nero should provide it."
+                "Reinstalling Nero Agent should provide it."
             )
         keyboard = Controller()
         key = getattr(Key, self.KEYS[action])

@@ -235,7 +235,7 @@ class TestCLI:
         # the default model in the model picker, then the API key.
         # After setup the chat loop starts; EOF on stdin ends it cleanly.
         result = runner.invoke(cli.app, [], input="\n\nsk-ant-first-run-key\n")
-        assert "Nero is ready" in result.output
+        assert "Nero Agent is ready" in result.output
         assert store[("nero", "anthropic_api_key")] == "sk-ant-first-run-key"
         loaded = ConfigManager(config_dir=tmp_path).load()
         assert loaded.hardware.detected_ram_gb == 16.0

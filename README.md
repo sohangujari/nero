@@ -1,14 +1,14 @@
-# Nero
+# Nero Agent
 
 A cross-platform CLI personal AI assistant: a streaming text conversation with
 an LLM in your terminal, where the model can call one real tool — opening an
 application on your machine.
 
-**Phase 2** adds multi-provider support: Nero talks to Claude, GPT, Gemini, or
+**Phase 2** adds multi-provider support: Nero Agent talks to Claude, GPT, Gemini, or
 a local Ollama model, switchable via config with zero code changes. On first
 run it detects your hardware and recommends a local model tier.
 
-**Phase 3** adds voice: `nero talk` lets you speak to Nero and hear it speak
+**Phase 3** adds voice: `nero talk` lets you speak to Nero Agent and hear it speak
 back, using the same LLM providers and tools as text mode. More tools and
 persistent memory are later phases.
 
@@ -23,12 +23,12 @@ persistent memory are later phases.
 
 Switch with `nero config` (interactive) or `nero config set llm.provider
 ollama`. Choosing ollama auto-fills the model from the hardware recommendation
-and never asks for a key. For ollama, Nero checks that the server is running
+and never asks for a key. For ollama, Nero Agent checks that the server is running
 (`ollama serve`) and offers to `ollama pull` the model if it isn't downloaded.
 
 ## Install
 
-Nero ships two ways. Most people want the binary.
+Nero Agent ships two ways. Most people want the binary.
 
 ### End users — standalone binary (no Python needed)
 
@@ -59,14 +59,14 @@ The binaries are **unsigned**, so the OS may warn on first launch:
   `xattr -d com.apple.quarantine nero-macos-v0.1.1`.
 - **Windows** — SmartScreen may prompt; choose *More info* → *Run anyway*.
 
-The first launch runs a short setup: Nero detects your hardware, recommends a local
+The first launch runs a short setup: Nero Agent detects your hardware, recommends a local
 model, and asks for your provider and (for cloud providers) an API key. Voice model
 weights (whisper, kokoro-onnx) download once into a per-user cache the first time you
 run `nero talk`. Nothing else needs installing — no Python, no `pip`.
 
 ### Developers / contributors — uv
 
-Nero is pinned to **Python 3.12** and uses [uv](https://docs.astral.sh/uv/),
+Nero Agent is pinned to **Python 3.12** and uses [uv](https://docs.astral.sh/uv/),
 which manages its own isolated 3.12 — independent of whatever Python is on your
 `PATH`. This is what makes installs reproducible: `uv.lock` pins every dependency
 (including transitive ones) to the exact tested version.
@@ -81,22 +81,22 @@ uv run pytest -q                    # tests
 `uv sync` resolves against the committed `uv.lock`, so you get the identical
 versions CI tested — the Python-3.13 install failure that motivated this setup
 cannot recur. If you install via bare `pip`/`pipx` against a non-3.12
-interpreter instead, Nero prints a one-line warning pointing you here.
+interpreter instead, Nero Agent prints a one-line warning pointing you here.
 
 ## Voice (Phase 3)
 
 ```sh
-nero talk          # speak; Nero transcribes, answers, and speaks back
+nero talk          # speak; Nero Agent transcribes, answers, and speaks back
 nero talk --once   # a single exchange, then exit
 ```
 
-Press Enter to start speaking — Nero stops recording on its own when you stop
-talking. Talk over Nero while it's replying to interrupt it; it stops, and what
+Press Enter to start speaking — Nero Agent stops recording on its own when you stop
+talking. Talk over Nero Agent while it's replying to interrupt it; it stops, and what
 it managed to say is kept in the conversation so your follow-up still makes
 sense.
 
-Barge-in needs headphones in practice: on built-in speakers, Nero hears its
-own reply through the mic and interrupts itself almost every time, so Nero
+Barge-in needs headphones in practice: on built-in speakers, Nero Agent hears its
+own reply through the mic and interrupts itself almost every time, so Nero Agent
 auto-disables barge-in when the default output device looks like built-in
 speakers and prints one line explaining why. Headphones re-enable it
 automatically (no acoustic path from speaker to mic). If your speakers sit
@@ -109,14 +109,14 @@ Tuning (all optional):
 | Setting | Default | What it does |
 | --- | --- | --- |
 | `voice.vad.enabled` | `true` | Master switch. `false` restores press-Enter-to-stop. |
-| `voice.barge_in` | `true` | Interrupt Nero by talking. Inert when `vad.enabled` is false. |
+| `voice.barge_in` | `true` | Interrupt Nero Agent by talking. Inert when `vad.enabled` is false. |
 | `voice.force_barge_in` | `false` | Bypass the built-in-speaker auto-suppression above. |
 | `voice.vad.silence_ms` | `800` | Silence that ends your turn. Raise it if you're cut off mid-thought. |
 | `voice.vad.threshold` | `0.5` | Speech sensitivity. Raise it in a noisy room. |
 | `voice.vad.max_utterance_seconds` | `180` | Hard cap on one recording. |
-| `voice.vad.wait_for_speech_seconds` | `30` | How long Nero waits for you to start. |
+| `voice.vad.wait_for_speech_seconds` | `30` | How long Nero Agent waits for you to start. |
 
-What Nero heard is printed before it replies. Say "stop" (or "exit") to leave,
+What Nero Agent heard is printed before it replies. Say "stop" (or "exit") to leave,
 or press Ctrl+C.
 
 The default voice is `af_bella` (female); the male equivalent is `am_michael`.
@@ -131,7 +131,7 @@ model and TTS engine are auto-selected from your detected hardware tier.
 nero
 ```
 
-On the very first run, Nero walks you through setup: it asks for your Anthropic
+On the very first run, Nero Agent walks you through setup: it asks for your Anthropic
 API key (input is masked), stores it in your OS keychain — never in a file —
 and writes a default config. Then you're chatting:
 
