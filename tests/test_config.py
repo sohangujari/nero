@@ -87,6 +87,24 @@ class TestConfigManager:
         assert loaded.hardware.detected_ram_gb == 16.2
         assert loaded.hardware.detected_cpu_cores == 8
 
+    def test_set_value_list_field_parses_comma_separated(self, manager):
+        """v1.5.8: llm.fallback_chain, model_blacklist, model_whitelist are
+        list-typed; `config set` parses a comma-separated string into a list
+        without touching how scalar keys are handled."""
+        manager.set_value("llm.fallback_chain", "openai/gpt-5,gemini/gemini-3-pro")
+        assert manager.load().llm.fallback_chain == ["openai/gpt-5", "gemini/gemini-3-pro"]
+        manager.set_value("llm.model_blacklist", "gpt-5, claude-haiku-4-5")
+        assert manager.load().llm.model_blacklist == ["gpt-5", "claude-haiku-4-5"]
+
+    def test_set_value_empty_string_clears_a_list(self, manager):
+        manager.set_value("llm.model_blacklist", "gpt-5")
+        manager.set_value("llm.model_blacklist", "")
+        assert manager.load().llm.model_blacklist == []
+
+    def test_set_value_scalar_keys_unaffected_by_list_parsing(self, manager):
+        manager.set_value("llm.model", "gpt-5,not-a-list")
+        assert manager.load().llm.model == "gpt-5,not-a-list"
+
     def test_set_value_unknown_key_raises(self, manager):
         with pytest.raises(ConfigError):
             manager.set_value("assistant.bogus", "x")
