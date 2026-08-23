@@ -154,10 +154,18 @@ def build_registry(config, audit=None, on_location_resolved=None, confirm=None) 
     default location without importing ConfigManager (added in Task 8).
     `confirm` gates destructive skills — see SkillRegistry.__init__.
     """
+    from nero.skills.files.server import (
+        DeletePathSkill,
+        EditFileSkill,
+        MovePathSkill,
+        ReadFileSkill,
+        WriteFileSkill,
+    )
     from nero.skills.open_app.server import OpenAppSkill
     from nero.skills.open_website.server import OpenWebsiteSkill
     from nero.skills.play_music.server import PlayMusicSkill
     from nero.skills.weather.server import WeatherSkill
+    from nero.skills.web.server import FetchWebPageSkill
 
     skills: list[Skill] = [
         OpenAppSkill(),
@@ -167,6 +175,12 @@ def build_registry(config, audit=None, on_location_resolved=None, confirm=None) 
             on_location_resolved=on_location_resolved,
         ),
         PlayMusicSkill(),
+        ReadFileSkill(),
+        WriteFileSkill(),
+        EditFileSkill(),
+        DeletePathSkill(),
+        MovePathSkill(),
+        FetchWebPageSkill(),
     ]
     return SkillRegistry(
         skills=skills,

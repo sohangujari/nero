@@ -23,12 +23,13 @@ class TestOfflineAndDisabledGating:
         config = make_config(mode="offline", open_app=False)
         registry = build_registry(config)
         names = {d["function"]["name"] for d in registry.tool_definitions()}
-        # open_website and get_weather require the network -> hidden offline.
-        # open_app is explicitly disabled -> hidden regardless of mode.
-        # play_music is local and enabled -> the only one left standing.
-        assert names == {"play_music"}
+        # open_website, get_weather, and fetch_web_page require the network ->
+        # hidden offline. open_app is explicitly disabled -> hidden regardless
+        # of mode. write_file/edit_file/delete_path/move_path default disabled.
+        # play_music and read_file are local and enabled -> what's left standing.
+        assert names == {"play_music", "read_file"}
 
-    def test_known_names_still_lists_all_four_skills(self):
+    def test_known_names_lists_every_registered_skill(self):
         from nero.skills.registry import build_registry
 
         config = make_config(mode="offline", open_app=False)
@@ -38,6 +39,12 @@ class TestOfflineAndDisabledGating:
             "open_website",
             "get_weather",
             "play_music",
+            "read_file",
+            "write_file",
+            "edit_file",
+            "delete_path",
+            "move_path",
+            "fetch_web_page",
         }
 
 
@@ -62,6 +69,46 @@ class TestAuditWiring:
         entries = audit.recent()
         assert len(entries) == 1
         assert entries[0].skill_name == "play_music"
+
+
+class TestFilesAndWebWiring:
+    def test_all_six_new_skills_register(self):
+        from nero.skills.registry import build_registry
+
+        registry = build_registry(make_config())
+        for name in (
+            "read_file", "write_file", "edit_file", "delete_path", "move_path",
+            "fetch_web_page",
+        ):
+            assert registry.get(name) is not None
+
+    def test_destructive_ones_default_disabled(self):
+        from nero.skills.registry import build_registry
+
+        registry = build_registry(make_config())
+        for name in ("write_file", "edit_file", "delete_path", "move_path"):
+            assert registry.is_enabled(name) is False
+
+    def test_read_only_ones_default_enabled(self):
+        from nero.skills.registry import build_registry
+
+        registry = build_registry(make_config())
+        for name in ("read_file", "fetch_web_page"):
+            assert registry.is_enabled(name) is True
+
+    def test_destructive_file_skill_refused_with_no_confirm_callback(self, tmp_path):
+        import asyncio
+
+        from nero.skills.registry import build_registry
+
+        config = make_config(write_file=True)  # enabled, but no confirm wired
+        registry = build_registry(config)
+        target = tmp_path / "f.txt"
+        result = asyncio.run(
+            registry.execute("write_file", {"path": str(target), "content": "x"})
+        )
+        assert "declined" in result
+        assert not target.exists()
 
 
 class TestWeatherWiring:

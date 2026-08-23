@@ -165,6 +165,12 @@ class SkillToggles(BaseModel):
     open_website: bool = True
     get_weather: bool = True
     play_music: bool = True
+    read_file: bool = True
+    write_file: bool = False
+    edit_file: bool = False
+    delete_path: bool = False
+    move_path: bool = False
+    fetch_web_page: bool = True
 
 
 class WeatherSkillConfig(BaseModel):

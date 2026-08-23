@@ -15,6 +15,18 @@ class TestDefaults:
         assert toggles.get_weather is True
         assert toggles.play_music is True
 
+    def test_read_only_new_skills_default_enabled(self):
+        toggles = NeroConfig().skills.enabled
+        assert toggles.read_file is True
+        assert toggles.fetch_web_page is True
+
+    def test_destructive_new_skills_default_disabled(self):
+        toggles = NeroConfig().skills.enabled
+        assert toggles.write_file is False
+        assert toggles.edit_file is False
+        assert toggles.delete_path is False
+        assert toggles.move_path is False
+
     def test_weather_location_defaults_to_none(self):
         assert NeroConfig().skills.weather.default_location is None
 
