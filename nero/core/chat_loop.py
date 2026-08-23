@@ -36,14 +36,14 @@ class ChatLoop:
         assistant_name: str,
         input_fn: Callable[[str], str] | None = None,
         history=None,
-        fallback_client=None,
+        fallback_clients: list | None = None,
     ):
         self.client = client
         self.console = console
         self.assistant_name = assistant_name
         self.input_fn = input_fn or console.input
         self.history = history
-        self.fallback_client = fallback_client
+        self.fallback_clients = fallback_clients or []
         # Seed from persisted history when memory is on; else a blank session.
         self.messages: list[dict] = history.recent() if history else []
 
@@ -73,21 +73,31 @@ class ChatLoop:
                 try:
                     self.client.send(self.messages, on_text=self._print_chunk)
                 except TRANSIENT_ERRORS:
-                    if self.fallback_client is None:
+                    if not self.fallback_clients:
                         raise
-                    # Partial tool/assistant turns from the failed stream must
-                    # not leak into the retry — start the turn clean.
-                    del self.messages[turn_start:]
-                    self.messages.append({"role": "user", "content": text})
-                    self.console.print(
-                        "\n[yellow]Primary model unreachable — retrying with "
-                        f"{self.fallback_client.model} via "
-                        f"{self.fallback_client.provider}.[/yellow]"
-                    )
-                    self.console.print(
-                        f"[bold magenta]{self.assistant_name}>[/bold magenta] ", end=""
-                    )
-                    self.fallback_client.send(self.messages, on_text=self._print_chunk)
+                    # Walk the chain in priority order; first success wins. Each
+                    # attempt rolls back first — partial tool/assistant turns
+                    # from the failed stream must not leak into the retry, and a
+                    # failed fallback attempt can leave its own partial state.
+                    for i, fallback_client in enumerate(self.fallback_clients):
+                        del self.messages[turn_start:]
+                        self.messages.append({"role": "user", "content": text})
+                        self.console.print(
+                            "\n[yellow]Primary model unreachable — retrying with "
+                            f"{fallback_client.model} via "
+                            f"{fallback_client.provider}.[/yellow]"
+                        )
+                        self.console.print(
+                            f"[bold magenta]{self.assistant_name}>[/bold magenta] ", end=""
+                        )
+                        try:
+                            fallback_client.send(self.messages, on_text=self._print_chunk)
+                            break
+                        except TRANSIENT_ERRORS:
+                            # Exceptions from the last attempt propagate to the
+                            # existing outer handlers unchanged.
+                            if i == len(self.fallback_clients) - 1:
+                                raise
                 self.console.print()
                 if self.history is not None and self.messages[-1].get("role") == "assistant":
                     # Persist only on success — past every rollback branch below.

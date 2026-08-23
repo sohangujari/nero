@@ -37,6 +37,30 @@ class LLMConfig(BaseModel):
     # warn-only rule aws_region and base_url follow.
     fallback_provider: Provider | None = None
     fallback_model: str | None = None
+    # Priority-ordered fallback chain: "provider/model" entries, tried in order
+    # on a transient primary failure. Non-empty wins over the scalar pair above
+    # (no migration — the pair is never rewritten into this list). Constrains
+    # AUTOMATIC selection only; explicit config set always wins.
+    fallback_chain: list[str] = []
+    # Exact model ids (no globs). blacklist: never auto-selected. whitelist: if
+    # non-empty, automatic selection uses ONLY these. Both are warn-only against
+    # explicit choices (llm.model, the fallback pair/chain) — never enforced.
+    model_blacklist: list[str] = []
+    model_whitelist: list[str] = []
+
+    @model_validator(mode="after")
+    def _validate_fallback_chain(self):
+        for entry in self.fallback_chain:
+            provider, sep, _model = entry.partition("/")
+            if not sep:
+                raise ValueError(
+                    f'llm.fallback_chain entry {entry!r} must be "provider/model"'
+                )
+            if provider not in Provider.__args__:
+                raise ValueError(
+                    f"llm.fallback_chain entry {entry!r} has unknown provider {provider!r}"
+                )
+        return self
 
     @model_validator(mode="after")
     def _normalize_base_url(self):

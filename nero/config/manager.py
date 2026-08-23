@@ -53,7 +53,12 @@ class ConfigManager:
             node = node[part]
         if not isinstance(node, dict) or parts[-1] not in node:
             raise ConfigError(f"Unknown config key: {key_path!r}")
-        node[parts[-1]] = value
+        if isinstance(node[parts[-1]], list):
+            # List-typed fields (llm.fallback_chain, model_blacklist/whitelist):
+            # comma-separated -> list. Scalar keys are untouched by this branch.
+            node[parts[-1]] = [item.strip() for item in value.split(",") if item.strip()]
+        else:
+            node[parts[-1]] = value
         try:
             config = NeroConfig.model_validate(data)
         except ValidationError as exc:

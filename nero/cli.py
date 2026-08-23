@@ -343,16 +343,7 @@ def _run_chat() -> None:
     api_key = _provider_preflight(manager, config)
     registry = _build_registry(manager, config)
 
-    fallback_client = None
-    if config.llm.fallback_provider and config.llm.fallback_model:
-        fallback_client, warning = _resolve_fallback_client(
-            manager, config, registry, config.llm.fallback_provider, config.llm.fallback_model
-        )
-        if warning:
-            console.print(
-                f"[yellow]Fallback configured but {warning} — "
-                "fallback disabled this session.[/yellow]"
-            )
+    fallback_clients = _build_fallback_clients(manager, config, registry)
 
     client = LLMClient(
         config=config.llm,
@@ -362,8 +353,61 @@ def _run_chat() -> None:
     )
     ChatLoop(
         client, console=console, assistant_name=config.assistant.name,
-        history=_build_history(config), fallback_client=fallback_client,
+        history=_build_history(config), fallback_clients=fallback_clients,
     ).run()
+
+
+def _fallback_chain_entries(config: NeroConfig) -> tuple[list[tuple[str, str]], bool]:
+    """The effective fallback chain: `llm.fallback_chain` wins if non-empty,
+    else the scalar pair if both are set, else empty. The scalar pair is never
+    rewritten into the chain (no migration) — this is a read-only resolution.
+
+    Returns (entries, both_set) so the caller can print a warn-only note when
+    both the chain and the scalar pair are configured.
+    """
+    chain = config.llm.fallback_chain
+    scalar_set = bool(config.llm.fallback_provider and config.llm.fallback_model)
+    if chain:
+        return [tuple(entry.split("/", 1)) for entry in chain], scalar_set
+    if scalar_set:
+        return [(config.llm.fallback_provider, config.llm.fallback_model)], False
+    return [], False
+
+
+def _build_fallback_clients(
+    manager: ConfigManager, config: NeroConfig, registry
+) -> list[LLMClient]:
+    """Resolve the effective fallback chain into live clients, in priority order.
+
+    Filtering (blacklist/whitelist) and key/region resolution both happen once
+    here at startup, not mid-turn — the design doc frames the dropped-entry
+    note as firing "when the chain fires" (i.e. on a transient failure); doing
+    it at startup instead is simpler and testable, and never blocks: a filtered
+    or unresolvable entry is just dropped, chat still starts.
+    """
+    entries, both_set = _fallback_chain_entries(config)
+    if both_set:
+        console.print(
+            "[yellow]Both llm.fallback_chain and llm.fallback_provider/"
+            "llm.fallback_model are set — the chain wins.[/yellow]"
+        )
+    clients = []
+    for provider, model in entries:
+        if model in config.llm.model_blacklist:
+            console.print(f"[dim]Skipping {provider}/{model}: blacklisted.[/dim]")
+            continue
+        if config.llm.model_whitelist and model not in config.llm.model_whitelist:
+            console.print(f"[dim]Skipping {provider}/{model}: not on the whitelist.[/dim]")
+            continue
+        client, warning = _resolve_fallback_client(manager, config, registry, provider, model)
+        if warning:
+            console.print(
+                f"[yellow]Fallback configured but {warning} — "
+                f"{provider}/{model} disabled this session.[/yellow]"
+            )
+            continue
+        clients.append(client)
+    return clients
 
 
 def _resolve_fallback_client(
@@ -574,6 +618,8 @@ def config_set(key: str, value: str) -> None:
         _warn_if_aws_region_inert(manager)
     if key in ("llm.fallback_provider", "llm.fallback_model"):
         _warn_if_fallback_issue(manager)
+    if key in ("llm.model", "llm.fallback_chain", "llm.model_blacklist", "llm.model_whitelist"):
+        _warn_if_model_listed(manager)
 
 
 def _warn_if_no_tool_support(manager: ConfigManager) -> None:
@@ -672,6 +718,26 @@ def _warn_if_fallback_issue(manager: ConfigManager) -> None:
         )
     elif provider is not None and (provider, model) == (config.llm.provider, config.llm.model):
         console.print("[yellow]fallback is the same as the primary model[/yellow]")
+
+
+def _warn_if_model_listed(manager: ConfigManager) -> None:
+    """Say when the current llm.model is blacklisted, or excluded by a
+    non-empty whitelist. Warn-only, per the hard invariant that priority/lists
+    constrain AUTOMATIC selection only — an explicit `config set llm.model`
+    always wins and is set regardless.
+    """
+    config = manager.load()
+    model = config.llm.model
+    if model in config.llm.model_blacklist:
+        console.print(
+            f"[yellow]{model} is on llm.model_blacklist — automatic selection "
+            "will avoid it, your explicit choice stands.[/yellow]"
+        )
+    elif config.llm.model_whitelist and model not in config.llm.model_whitelist:
+        console.print(
+            f"[yellow]{model} is not on llm.model_whitelist — automatic "
+            "selection would skip it, your explicit choice stands.[/yellow]"
+        )
 
 
 @config_app.command("show")
