@@ -27,6 +27,7 @@ from nero.config.manager import ConfigError, ConfigManager
 from nero.config.schema import NeroConfig, STTConfig, TTSConfig
 from nero.core.audit_log import AuditLog, default_audit_path
 from nero.core.chat_loop import ChatLoop
+from nero.dashboard import run_dashboard
 from nero.hardware.detector import (
     HardwareSpecs,
     detect_hardware,
@@ -178,6 +179,20 @@ def forget() -> None:
         return
     removed = store.clear()
     console.print(f"[green]Cleared[/green] {removed} stored messages.")
+
+
+@app.command()
+def dashboard(
+    port: int = typer.Option(8642, "--port", help="Port to serve the local dashboard on."),
+) -> None:
+    """Serve a local read-only dashboard: history, skill audit, and config."""
+    try:
+        run_dashboard(port)
+    except OSError as exc:
+        console.print(f"[red]Could not start dashboard: {exc}[/red]")
+        raise typer.Exit(1) from exc
+    except KeyboardInterrupt:
+        console.print("[dim]Dashboard stopped.[/dim]")
 
 
 @app.command()
