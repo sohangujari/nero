@@ -383,7 +383,18 @@ def _confirm_skill(name: str, tier: str, arguments: dict, security, tainted: boo
             "instruction could be behind this call.[/red]"
         )
     matched = None
-    for value in arguments.values():
+    for key, value in arguments.items():
+        # git_command's "args" is a list of strings (e.g. ["reset", "--hard"])
+        # rather than a single command string, and doesn't include the "git"
+        # program name itself — reconstruct the same command string the skill
+        # actually runs so it matches denylist entries like "git reset --hard".
+        if (
+            name == "git_command"
+            and key == "args"
+            and isinstance(value, list)
+            and all(isinstance(item, str) for item in value)
+        ):
+            value = "git " + " ".join(value)
         if isinstance(value, str):
             matched = denylisted(value, security.command_denylist)
             if matched:

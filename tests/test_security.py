@@ -318,3 +318,41 @@ class TestConfirmSkillCLI:
         finally:
             cli.console = original_console
         assert result is False
+
+    def test_list_valued_argument_matching_denylist_escalates_to_typed_yes(self, monkeypatch):
+        # git_command's "args" is a list of strings (["reset", "--hard"]), not
+        # a single command string — the denylist scan must join it before
+        # matching, or a denylisted git call would only ever get a plain y/N.
+        original_console = cli.console
+        cli.console = Console(file=io.StringIO(), force_terminal=True)
+        try:
+            monkeypatch.setattr(cli.Prompt, "ask", lambda *a, **k: "yes")
+            result = cli._confirm_skill(
+                "git_command",
+                "destructive",
+                {"args": ["reset", "--hard"]},
+                SecurityConfig(),
+                tainted=False,
+            )
+        finally:
+            cli.console = original_console
+        assert result is True
+
+    def test_list_valued_argument_not_matching_denylist_uses_plain_confirm(self, monkeypatch):
+        original_console = cli.console
+        cli.console = Console(file=io.StringIO(), force_terminal=True)
+        try:
+            monkeypatch.setattr(cli.Prompt, "ask", lambda *a, **k: (_ for _ in ()).throw(
+                AssertionError("plain confirm must not escalate to typed yes")
+            ))
+            monkeypatch.setattr(cli.Confirm, "ask", lambda *a, **k: True)
+            result = cli._confirm_skill(
+                "git_command",
+                "destructive",
+                {"args": ["status"]},
+                SecurityConfig(),
+                tainted=False,
+            )
+        finally:
+            cli.console = original_console
+        assert result is True

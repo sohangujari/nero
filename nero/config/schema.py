@@ -171,6 +171,10 @@ class SkillToggles(BaseModel):
     delete_path: bool = False
     move_path: bool = False
     fetch_web_page: bool = True
+    run_shell: bool = False
+    git_command: bool = False
+    run_python: bool = False
+    run_javascript: bool = False
 
 
 class WeatherSkillConfig(BaseModel):

@@ -45,6 +45,10 @@ class TestOfflineAndDisabledGating:
             "delete_path",
             "move_path",
             "fetch_web_page",
+            "run_shell",
+            "git_command",
+            "run_python",
+            "run_javascript",
         }
 
 
@@ -109,6 +113,41 @@ class TestFilesAndWebWiring:
         )
         assert "declined" in result
         assert not target.exists()
+
+
+class TestExecutionWiring:
+    def test_all_four_execution_skills_register(self):
+        from nero.skills.registry import build_registry
+
+        registry = build_registry(make_config())
+        for name in ("run_shell", "git_command", "run_python", "run_javascript"):
+            assert registry.get(name) is not None
+
+    def test_all_four_default_disabled(self):
+        from nero.skills.registry import build_registry
+
+        registry = build_registry(make_config())
+        for name in ("run_shell", "git_command", "run_python", "run_javascript"):
+            assert registry.is_enabled(name) is False
+
+    def test_run_shell_and_git_command_receive_the_security_config(self):
+        from nero.skills.registry import build_registry
+
+        config = make_config()
+        config.security.command_allowlist = ["echo hi"]
+        registry = build_registry(config)
+        assert registry.get("run_shell")._security is config.security
+        assert registry.get("git_command")._security is config.security
+
+    def test_destructive_execution_skill_refused_with_no_confirm_callback(self):
+        import asyncio
+
+        from nero.skills.registry import build_registry
+
+        config = make_config(run_shell=True)  # enabled, but no confirm wired
+        registry = build_registry(config)
+        result = asyncio.run(registry.execute("run_shell", {"command": "echo hi"}))
+        assert "declined" in result
 
 
 class TestWeatherWiring:

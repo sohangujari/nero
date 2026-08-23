@@ -27,6 +27,13 @@ class TestDefaults:
         assert toggles.delete_path is False
         assert toggles.move_path is False
 
+    def test_execution_skills_default_disabled(self):
+        toggles = NeroConfig().skills.enabled
+        assert toggles.run_shell is False
+        assert toggles.git_command is False
+        assert toggles.run_python is False
+        assert toggles.run_javascript is False
+
     def test_weather_location_defaults_to_none(self):
         assert NeroConfig().skills.weather.default_location is None
 

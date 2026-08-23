@@ -154,6 +154,12 @@ def build_registry(config, audit=None, on_location_resolved=None, confirm=None) 
     default location without importing ConfigManager (added in Task 8).
     `confirm` gates destructive skills — see SkillRegistry.__init__.
     """
+    from nero.skills.execution.server import (
+        GitCommandSkill,
+        RunJavascriptSkill,
+        RunPythonSkill,
+        RunShellSkill,
+    )
     from nero.skills.files.server import (
         DeletePathSkill,
         EditFileSkill,
@@ -181,6 +187,10 @@ def build_registry(config, audit=None, on_location_resolved=None, confirm=None) 
         DeletePathSkill(),
         MovePathSkill(),
         FetchWebPageSkill(),
+        RunShellSkill(security=config.security),
+        GitCommandSkill(security=config.security),
+        RunPythonSkill(),
+        RunJavascriptSkill(),
     ]
     return SkillRegistry(
         skills=skills,
