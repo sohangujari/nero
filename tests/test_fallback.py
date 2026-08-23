@@ -487,6 +487,33 @@ class TestConfigSurfaces:
         result = runner.invoke(cli.app, ["config", "show"])
         assert "openai/gpt-5" in result.output
 
+    def test_config_table_shows_chain_and_lists_when_set(self, monkeypatch, tmp_path):
+        manager = _manager_with_llm(
+            tmp_path,
+            fallback_chain=["openai/gpt-5", "gemini/gemini-3-pro"],
+            model_blacklist=["gpt-5"],
+            model_whitelist=["claude-sonnet-5"],
+        )
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        result = runner.invoke(cli.app, ["config", "show"])
+        out = flat(result.output)
+        assert "openai/gpt-5, gemini/gemini-3-pro" in out
+        assert "gpt-5" in out
+        assert "claude-sonnet-5" in out
+
+    def test_config_table_shows_placeholder_when_chain_and_lists_empty(
+        self, monkeypatch, tmp_path
+    ):
+        manager = ConfigManager(config_dir=tmp_path)
+        manager.save(NeroConfig())
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        result = runner.invoke(cli.app, ["config", "show"])
+        out = flat(result.output)
+        assert "Fallback Chain" in out
+        assert "Model Blacklist" in out
+        assert "Model Whitelist" in out
+        assert out.count("—") == 3
+
     def test_setting_one_half_warns_and_does_not_mutate_the_other(self, monkeypatch, tmp_path):
         manager = ConfigManager(config_dir=tmp_path)
         manager.save(NeroConfig())

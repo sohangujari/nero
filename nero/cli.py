@@ -823,6 +823,9 @@ def _config_table(manager: ConfigManager, config: NeroConfig) -> Table:
         table.add_row("Fallback", f"{config.llm.fallback_provider}/{config.llm.fallback_model}")
     else:
         table.add_row("Fallback", "off")
+    table.add_row("Fallback Chain", ", ".join(config.llm.fallback_chain) or "—")
+    table.add_row("Model Blacklist", ", ".join(config.llm.model_blacklist) or "—")
+    table.add_row("Model Whitelist", ", ".join(config.llm.model_whitelist) or "—")
     hardware = config.hardware
     if hardware.detected_ram_gb is not None:
         table.add_row("Detected Hardware", f"{hardware.detected_ram_gb:g} GB RAM, {hardware.detected_cpu_cores} cores")
