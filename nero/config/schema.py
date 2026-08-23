@@ -30,6 +30,13 @@ class LLMConfig(BaseModel):
     # Only meaningful under provider "bedrock"; persists inertly otherwise,
     # exactly like base_url — the guard is LLMClient.aws_region.
     aws_region: str | None = None
+    # ONE fallback pair, used mid-turn when the primary model fails with a
+    # transient error. Both None means the feature is off; a half-set pair is
+    # legal and inert (no cross-field validator) — `config set` nudges toward
+    # completing or clearing it, but never mutates the other field, the same
+    # warn-only rule aws_region and base_url follow.
+    fallback_provider: Provider | None = None
+    fallback_model: str | None = None
 
     @model_validator(mode="after")
     def _normalize_base_url(self):

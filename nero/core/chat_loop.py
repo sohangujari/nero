@@ -12,6 +12,19 @@ logger = logging.getLogger("nero.chat")
 
 EXIT_COMMANDS = {"exit", "quit"}
 
+# Errors worth one retry on a fallback model: the provider is unreachable or
+# overloaded, not wrong about anything. Auth errors, 404/NotFound, and
+# OllamaModelError are deliberately excluded — the server answered, so
+# retrying elsewhere would hide a config bug rather than route around a blip.
+TRANSIENT_ERRORS = (
+    litellm.exceptions.APIConnectionError,
+    litellm.exceptions.ServiceUnavailableError,
+    litellm.exceptions.Timeout,
+    litellm.exceptions.RateLimitError,
+    litellm.exceptions.InternalServerError,
+    httpx.HTTPError,
+)
+
 
 class ChatLoop:
     """The interactive REPL: reads input, streams Claude's replies, keeps history."""
@@ -23,12 +36,14 @@ class ChatLoop:
         assistant_name: str,
         input_fn: Callable[[str], str] | None = None,
         history=None,
+        fallback_client=None,
     ):
         self.client = client
         self.console = console
         self.assistant_name = assistant_name
         self.input_fn = input_fn or console.input
         self.history = history
+        self.fallback_client = fallback_client
         # Seed from persisted history when memory is on; else a blank session.
         self.messages: list[dict] = history.recent() if history else []
 
@@ -55,7 +70,24 @@ class ChatLoop:
             self.messages.append({"role": "user", "content": text})
             self.console.print(f"[bold magenta]{self.assistant_name}>[/bold magenta] ", end="")
             try:
-                self.client.send(self.messages, on_text=self._print_chunk)
+                try:
+                    self.client.send(self.messages, on_text=self._print_chunk)
+                except TRANSIENT_ERRORS:
+                    if self.fallback_client is None:
+                        raise
+                    # Partial tool/assistant turns from the failed stream must
+                    # not leak into the retry — start the turn clean.
+                    del self.messages[turn_start:]
+                    self.messages.append({"role": "user", "content": text})
+                    self.console.print(
+                        "\n[yellow]Primary model unreachable — retrying with "
+                        f"{self.fallback_client.model} via "
+                        f"{self.fallback_client.provider}.[/yellow]"
+                    )
+                    self.console.print(
+                        f"[bold magenta]{self.assistant_name}>[/bold magenta] ", end=""
+                    )
+                    self.fallback_client.send(self.messages, on_text=self._print_chunk)
                 self.console.print()
                 if self.history is not None and self.messages[-1].get("role") == "assistant":
                     # Persist only on success — past every rollback branch below.

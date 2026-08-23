@@ -341,17 +341,70 @@ def _run_chat() -> None:
     config = _load_or_exit(manager)
 
     api_key = _provider_preflight(manager, config)
+    registry = _build_registry(manager, config)
+
+    fallback_client = None
+    if config.llm.fallback_provider and config.llm.fallback_model:
+        fallback_client, warning = _resolve_fallback_client(
+            manager, config, registry, config.llm.fallback_provider, config.llm.fallback_model
+        )
+        if warning:
+            console.print(
+                f"[yellow]Fallback configured but {warning} — "
+                "fallback disabled this session.[/yellow]"
+            )
 
     client = LLMClient(
         config=config.llm,
         assistant_name=config.assistant.name,
-        registry=_build_registry(manager, config),
+        registry=registry,
         api_key=api_key,
     )
     ChatLoop(
         client, console=console, assistant_name=config.assistant.name,
-        history=_build_history(config),
+        history=_build_history(config), fallback_client=fallback_client,
     ).run()
+
+
+def _resolve_fallback_client(
+    manager: ConfigManager, config: NeroConfig, registry, provider: str, model: str
+) -> tuple[LLMClient | None, str | None]:
+    """Build an LLMClient for the fallback provider+model, or explain why not.
+
+    Non-exiting sibling of `_provider_preflight`: a missing fallback key or
+    region must never block startup, only disable the fallback for this
+    session. Resolves its own key from the fallback provider's keyring
+    entry — never assumes "the" key means the primary provider's key.
+    """
+    if provider == "ollama":
+        api_key = None
+    elif provider == "bedrock":
+        region = (
+            config.llm.aws_region
+            or os.environ.get("AWS_REGION_NAME")
+            or os.environ.get("AWS_REGION")
+            or os.environ.get("AWS_DEFAULT_REGION")
+        )
+        if not region:
+            return None, "no AWS region configured"
+        if not _bedrock_credentials_present():
+            return None, "no AWS credentials found"
+        api_key = None
+    else:
+        if provider in providers.CUSTOM_PROVIDERS and not config.llm.base_url:
+            return None, "no endpoint URL configured"
+        api_key = manager.get_api_key(provider)
+        if not api_key and not providers.get(provider).key_optional:
+            return None, f"no {provider} API key configured"
+
+    fallback_config = config.llm.model_copy(update={"provider": provider, "model": model})
+    client = LLMClient(
+        config=fallback_config,
+        assistant_name=config.assistant.name,
+        registry=registry,
+        api_key=api_key,
+    )
+    return client, None
 
 
 def _provider_preflight(manager: ConfigManager, config: NeroConfig) -> str | None:
@@ -519,6 +572,8 @@ def config_set(key: str, value: str) -> None:
         _warn_if_base_url_inert(manager)
     if key in ("llm.aws_region", "llm.provider"):
         _warn_if_aws_region_inert(manager)
+    if key in ("llm.fallback_provider", "llm.fallback_model"):
+        _warn_if_fallback_issue(manager)
 
 
 def _warn_if_no_tool_support(manager: ConfigManager) -> None:
@@ -602,6 +657,23 @@ def _warn_if_aws_region_inert(manager: ConfigManager) -> None:
     )
 
 
+def _warn_if_fallback_issue(manager: ConfigManager) -> None:
+    """Say so when the fallback pair is half-set or identical to the primary.
+
+    Warns only; never mutates either field — the same rule llm.base_url and
+    llm.aws_region follow.
+    """
+    config = manager.load()
+    provider, model = config.llm.fallback_provider, config.llm.fallback_model
+    if (provider is None) != (model is None):
+        console.print(
+            "[yellow]fallback needs both llm.fallback_provider and "
+            "llm.fallback_model; currently inert[/yellow]"
+        )
+    elif provider is not None and (provider, model) == (config.llm.provider, config.llm.model):
+        console.print("[yellow]fallback is the same as the primary model[/yellow]")
+
+
 @config_app.command("show")
 def config_show() -> None:
     """Print the current configuration (API key masked)."""
@@ -681,6 +753,10 @@ def _config_table(manager: ConfigManager, config: NeroConfig) -> Table:
         table.add_row("AWS Region", config.llm.aws_region or "not set")
     table.add_row("Mode", config.mode)
     table.add_row(f"API Key ({config.llm.provider})", _key_display(manager, config.llm.provider))
+    if config.llm.fallback_provider and config.llm.fallback_model:
+        table.add_row("Fallback", f"{config.llm.fallback_provider}/{config.llm.fallback_model}")
+    else:
+        table.add_row("Fallback", "off")
     hardware = config.hardware
     if hardware.detected_ram_gb is not None:
         table.add_row("Detected Hardware", f"{hardware.detected_ram_gb:g} GB RAM, {hardware.detected_cpu_cores} cores")
