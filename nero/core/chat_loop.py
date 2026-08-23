@@ -1,5 +1,8 @@
+import base64
 import logging
+import shlex
 from collections.abc import Callable
+from pathlib import Path
 
 import httpx
 import litellm
@@ -11,6 +14,10 @@ from nero.llm.ollama_adapter import OllamaModelError
 logger = logging.getLogger("nero.chat")
 
 EXIT_COMMANDS = {"exit", "quit"}
+
+DEFAULT_IMAGE_QUESTION = "What's in this image?"
+IMAGE_EXTENSIONS = {".png": "png", ".jpg": "jpeg", ".jpeg": "jpeg", ".gif": "gif", ".webp": "webp"}
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
 # Errors worth one retry on a fallback model: the provider is unreachable or
 # overloaded, not wrong about anything. Auth errors, 404/NotFound, and
@@ -24,6 +31,41 @@ TRANSIENT_ERRORS = (
     litellm.exceptions.InternalServerError,
     httpx.HTTPError,
 )
+
+
+def _validate_image(path_str: str) -> str | None:
+    """Returns an error message if `path_str` isn't a sendable image, else None."""
+    path = Path(path_str)
+    if not path.is_file():
+        return f"No such file: {path_str}"
+    if path.suffix.lower() not in IMAGE_EXTENSIONS:
+        return f"Unsupported image type: {path.suffix or path_str}"
+    if path.stat().st_size > MAX_IMAGE_BYTES:
+        return f"Image too large (max {MAX_IMAGE_BYTES // (1024 * 1024)} MB): {path_str}"
+    return None
+
+
+def _build_image_message(path_str: str, question: str) -> dict:
+    path = Path(path_str)
+    fmt = IMAGE_EXTENSIONS[path.suffix.lower()]
+    data = base64.b64encode(path.read_bytes()).decode()
+    return {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": question},
+            {"type": "image_url", "image_url": {"url": f"data:image/{fmt};base64,{data}"}},
+        ],
+    }
+
+
+def _supports_vision(model: str) -> bool:
+    """Never-raise: unknown/custom models assume capable, since custom rows
+    have no catalog truth — let the provider error surface through the
+    existing handlers instead."""
+    try:
+        return litellm.supports_vision(model=model)
+    except Exception:  # noqa: BLE001
+        return True
 
 
 class ChatLoop:
@@ -66,8 +108,17 @@ class ChatLoop:
                 self._goodbye()
                 return
 
+            if text.startswith("/image "):
+                image_turn = self._image_turn(text)
+                if image_turn is None:
+                    continue
+                user_message, history_text = image_turn
+            else:
+                user_message = {"role": "user", "content": text}
+                history_text = text
+
             turn_start = len(self.messages)
-            self.messages.append({"role": "user", "content": text})
+            self.messages.append(user_message)
             self.console.print(f"[bold magenta]{self.assistant_name}>[/bold magenta] ", end="")
             try:
                 try:
@@ -81,7 +132,7 @@ class ChatLoop:
                     # failed fallback attempt can leave its own partial state.
                     for i, fallback_client in enumerate(self.fallback_clients):
                         del self.messages[turn_start:]
-                        self.messages.append({"role": "user", "content": text})
+                        self.messages.append(user_message)
                         self.console.print(
                             "\n[yellow]Primary model unreachable — retrying with "
                             f"{fallback_client.model} via "
@@ -101,12 +152,13 @@ class ChatLoop:
                 self.console.print()
                 if self.history is not None and self.messages[-1].get("role") == "assistant":
                     # Persist only on success — past every rollback branch below.
-                    # messages[turn_start] is the user text; messages[-1] is the
-                    # final assistant text turn — except when MAX_TOOL_ROUNDS is
-                    # exhausted, which leaves a tool message last; the role check
-                    # excludes that case.
+                    # history_text is the user text (plain, or "[image: ...] "
+                    # for an image turn — history is text-only); messages[-1] is
+                    # the final assistant text turn — except when MAX_TOOL_ROUNDS
+                    # is exhausted, which leaves a tool message last; the role
+                    # check excludes that case.
                     self.history.append_turn(
-                        self.messages[turn_start]["content"],
+                        history_text,
                         self.messages[-1]["content"],
                     )
                 # Inspection hook (visible under `nero --debug`): history must
@@ -158,6 +210,42 @@ class ChatLoop:
                     f"\n[red]Something went wrong with that turn:[/red] {exc}\n"
                     "You can retry, or type exit to quit."
                 )
+
+    def _image_turn(self, text: str) -> tuple[dict, str] | None:
+        """Parse, validate, and gate an `/image <path> [question]` command.
+
+        Returns (user_message, history_text) ready to send, or None after
+        printing an explanatory message — in which case no turn is consumed.
+        """
+        try:
+            parts = shlex.split(text)
+        except ValueError as exc:
+            self.console.print(f"[red]Could not parse that command: {escape(str(exc))}[/red]")
+            return None
+        if len(parts) < 2:
+            self.console.print(escape("Usage: /image <path> [question]"), style="red")
+            return None
+        path_str = parts[1]
+        question = " ".join(parts[2:]) or DEFAULT_IMAGE_QUESTION
+
+        error = _validate_image(path_str)
+        if error:
+            self.console.print(f"[red]{escape(error)}[/red]")
+            return None
+
+        if self.client.provider == "ollama":
+            self.console.print(
+                "[red]Image input isn't supported on the local Ollama path yet.[/red]"
+            )
+            return None
+        if not _supports_vision(self.client.litellm_model):
+            self.console.print(
+                "[yellow]This model may not support images — sending anyway.[/yellow]"
+            )
+
+        user_message = _build_image_message(path_str, question)
+        history_text = f"[image: {Path(path_str).name}] {question}"
+        return user_message, history_text
 
     def _print_chunk(self, text: str) -> None:
         # Raw print, not console.print: streamed chunks must not be markup-parsed
