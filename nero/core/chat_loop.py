@@ -59,19 +59,24 @@ def _build_image_message(path_str: str, question: str) -> dict:
     }
 
 
-def find_compaction_cut(messages: list[dict]) -> int | None:
-    """The largest `cut` such that dropping messages[:cut] leaves a clean
-    boundary: messages[cut] is a user message and messages[cut - 1] is an
-    assistant message carrying no tool_calls.
+def find_compaction_cut(messages: list[dict], keep_recent: int) -> int | None:
+    """The largest `cut` that both leaves a clean boundary and keeps at least
+    `keep_recent` messages: messages[cut] is a user message and
+    messages[cut - 1] is an assistant message carrying no tool_calls.
+
+    `keep_recent` is what stops compaction from eating the whole conversation.
+    Without it the largest valid cut is almost always "everything but the last
+    message", so the model would lose the live thread it is mid-way through
+    and see only a summary — technically correct, conversationally useless.
 
     Scanning from the end means a cut point that would split a tool-call
     sequence is skipped automatically: right after an assistant message with
     tool_calls comes a `tool` role message, never `user`, so that candidate
     fails and the search keeps walking left until it clears the whole
     tool_calls/tool group. Returns None if no valid boundary exists at all —
-    per spec, compaction must be skipped rather than guess.
+    compaction must be skipped rather than guess.
     """
-    for cut in range(len(messages) - 1, 0, -1):
+    for cut in range(len(messages) - keep_recent, 0, -1):
         before, after = messages[cut - 1], messages[cut]
         if after.get("role") == "user" and before.get("role") == "assistant" and not before.get("tool_calls"):
             return cut
@@ -128,7 +133,9 @@ def compact_messages(messages: list[dict], client, threshold: int) -> tuple[list
     """
     if not threshold or len(messages) <= threshold:
         return None
-    cut = find_compaction_cut(messages)
+    # Keep a recent window so compaction trims history without erasing the
+    # conversation the user is actually having.
+    cut = find_compaction_cut(messages, keep_recent=max(10, threshold // 2))
     if cut is None:
         return None
     summary = summarize_messages(client, messages[:cut])

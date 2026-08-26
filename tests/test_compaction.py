@@ -45,13 +45,13 @@ class TestFindCompactionCut:
         messages = [user("hi"), assistant("hello"), user("how are you"), assistant("fine"), user("bye")]
         # Largest valid cut: message after is 'user', message before is a
         # plain assistant message with no tool_calls.
-        assert find_compaction_cut(messages) == 4
+        assert find_compaction_cut(messages, keep_recent=1) == 4
 
     def test_no_boundary_returns_none(self):
         # Every message is 'assistant' or 'tool' — no 'user' message to land
         # after any cut, so compaction must be skipped rather than guess.
         messages = [assistant_tool_call(), tool_result()]
-        assert find_compaction_cut(messages) is None
+        assert find_compaction_cut(messages, keep_recent=1) is None
 
     def test_does_not_split_a_straddling_tool_call_sequence(self):
         # The naive "cut at the very last user message" boundary would land
@@ -66,7 +66,7 @@ class TestFindCompactionCut:
             assistant_tool_call(),
             tool_result(),
         ]
-        cut = find_compaction_cut(messages)
+        cut = find_compaction_cut(messages, keep_recent=1)
         assert cut is not None
         # Whichever side of the cut the pair lands on, it must land together.
         dropped, kept = messages[:cut], messages[cut:]
@@ -92,11 +92,29 @@ class TestFindCompactionCut:
         # message before is either 'user' or an assistant with tool_calls),
         # so the search backs off to before the whole cluster — both rounds
         # land intact in the kept tail.
-        cut = find_compaction_cut(messages)
+        cut = find_compaction_cut(messages, keep_recent=1)
         assert cut == 2
         kept = messages[cut:]
         assert kept == messages[2:]  # both tool_calls/tool pairs intact together
 
+
+    def test_keep_recent_protects_the_live_thread(self):
+        """Without a recent window the largest valid cut is 'everything but the
+        last message' — the model would lose the conversation it is mid-way
+        through and see only a summary."""
+        messages = []
+        for i in range(10):
+            messages.extend([user(f"q{i}"), assistant(f"a{i}")])
+        messages.append(user("latest"))
+
+        assert find_compaction_cut(messages, keep_recent=1) == 20
+        cut = find_compaction_cut(messages, keep_recent=10)
+        assert cut is not None and cut <= len(messages) - 10
+        assert len(messages) - cut >= 10
+
+    def test_keep_recent_larger_than_history_finds_no_cut(self):
+        messages = [user("hi"), assistant("hello"), user("bye")]
+        assert find_compaction_cut(messages, keep_recent=10) is None
 
 class TestSummarizeMessages:
     class FakeClient:
