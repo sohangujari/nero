@@ -152,13 +152,97 @@ in memory for the current session.
 | `nero config set <key> <value>` | Scriptable edit, e.g. `nero config set llm.provider ollama` |
 | `nero config show` | Print current config (API key masked) |
 | `nero detect` | Re-run hardware detection, refresh the local-model recommendation |
+| `nero history` | Log of recent skill invocations (the audit trail) |
+| `nero mcp` | List configured MCP servers and the tools they expose |
+| `nero facts` | Show / forget the structured facts remembered about you |
+| `nero notes index` \| `nero notes search <q>` | Build and query the local FTS5 index over your notes |
+| `nero routine list` \| `run` \| `install` \| `uninstall` | Manage scheduled routines (launchd) |
+| `nero approvals` | Review destructive actions a routine queued for you |
+| `nero dashboard` | Read-only localhost viewer: history, skill audit, config |
+| `nero config set-key <provider> --slot N` | Store an extra API key for rotation |
 | `nero --debug` | Chat with verbose stderr logging (tool-call plumbing, per-turn history) |
 | `nero --version` | Print the installed version |
 
-Valid config keys: `assistant.name`, `llm.provider`
-(claude|openai|gemini|ollama), `llm.model`. The `hardware.*` block is
+In chat, `/image <path> [question]` sends a photo or screenshot to a
+vision-capable model, and `/code <request>` routes one turn to
+`llm.coding_model`.
+
+Valid config keys include `assistant.name`, `llm.provider`, `llm.model`,
+`llm.fallback_chain`, `llm.route_by`, `llm.coding_model`,
+`skills.enabled.*`, `security.command_denylist`, `memory.notes_dir`, and the
+`mcp.servers` / `routines.routines` blocks above. `nero config show` prints
+the current values. The `hardware.*` block is
 auto-populated by detection. The RAM → local-model table lives in
 `nero/hardware/tiers.py` — edit it as models improve.
+
+## Skills, and what asks permission
+
+Skills reach the model through one registry, so every call is audited and
+individually switchable. They sit in three tiers:
+
+- **read-only** (`get_weather`, `read_file`, `fetch_web_page`, `search_notes`,
+  `recall_facts`) — run silently.
+- **state-changing** (`open_app`, `open_website`, `play_music`,
+  `remember_fact`) — run silently.
+- **destructive** (`write_file`, `edit_file`, `delete_path`, `move_path`,
+  `run_shell`, `git_command`, `run_python`, `run_javascript`, `forget_fact`)
+  — **ship disabled**, and once enabled each call shows you the exact
+  arguments and waits for a yes. A command matching `security.command_denylist`
+  makes you type `yes` in full. With no way to ask (a pipe, a scheduled
+  routine) a destructive call is refused, never assumed.
+
+Anything fetched from the web or read off disk comes back wrapped as
+untrusted data, and marks the turn — the confirmation prompt then says so,
+because an injected instruction could be behind the call that follows.
+
+Enable one with `nero config set skills.enabled.run_shell true`.
+
+## MCP servers
+
+Nero Agent is an MCP client: point it at third-party servers over stdio and
+their tools join the same registry, with the same audit trail and gates.
+
+```yaml
+mcp:
+  servers:
+    github:
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-github"]
+      env:
+        GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_TOKEN}"   # read from your shell, never stored here
+      trusted: false        # every call asks first
+    notes:
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "/Users/you/notes"]
+      trusted: true         # local and trusted: no per-call prompt
+      requires_network: false
+```
+
+`nero mcp` verifies a server starts and lists its tools. A server that fails
+to start warns and is skipped — it never blocks the assistant.
+
+## Fallbacks and routing
+
+`llm.fallback_chain` (`["openai/gpt-5", "ollama/llama3.2"]`) is tried in
+order when the primary model fails with a connection, timeout, rate-limit, or
+5xx error — never on an auth error or an unknown model, where retrying
+elsewhere would just hide the real problem. Set `llm.route_by` to `cost`,
+`latency`, or `quality` to order that chain; `off` (the default) keeps your
+configured order. Entries that fail twice in a session are skipped, unless
+one is all that's left.
+
+## Scheduled routines
+
+```bash
+nero config set routines.routines.morning.schedule "30 8 * * *"
+nero config set routines.routines.morning.prompt "Summarise today's weather"
+nero routine install morning
+```
+
+This writes a launchd agent that runs `nero routine run morning`. Routines
+run unattended, so a destructive skill call from one is never executed on the
+spot — it lands in a queue, and your next interactive session tells you it's
+waiting for `nero approvals`.
 
 ## Config file location
 
