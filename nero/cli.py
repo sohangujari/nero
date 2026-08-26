@@ -722,6 +722,7 @@ def _run_chat() -> None:
     registry = _build_registry(manager, config, extra_skills=mcp_skills)
 
     fallback_clients = _build_fallback_clients(manager, config, registry)
+    coding_client = _resolve_coding_client(manager, config, registry)
     facts = [(fact.key, fact.value) for fact in FactStore(default_facts_path()).all()]
 
     client = LLMClient(
@@ -737,6 +738,10 @@ def _run_chat() -> None:
             history=_build_history(config), fallback_clients=fallback_clients,
             registry=registry, security=config.security,
             compact_after_messages=config.memory.compact_after_messages,
+            route_by=config.llm.route_by, quality_rank=config.llm.quality_rank,
+            health_check=config.llm.health_check,
+            primary_api_keys=manager.get_api_keys(config.llm.provider),
+            coding_client=coding_client,
         ).run()
     finally:
         # A session must never leave orphaned server processes behind.
@@ -851,6 +856,36 @@ def _resolve_fallback_client(
         api_key=api_key,
     )
     return client, None
+
+
+def _resolve_coding_client(
+    manager: ConfigManager, config: NeroConfig, registry
+) -> LLMClient | None:
+    """Resolve llm.coding_model ("provider/model") for the /code command, or
+    None if unset or unresolvable.
+
+    Non-exiting, like _resolve_fallback_client: a bad or missing coding_model
+    must never block startup or error mid-conversation — /code just falls
+    back to the primary model, with a dim notice printed at that point.
+    """
+    coding_model = config.llm.coding_model
+    if not coding_model:
+        return None
+    provider, sep, model = coding_model.partition("/")
+    if not sep:
+        console.print(
+            f'[yellow]llm.coding_model {coding_model!r} must be "provider/model" — '
+            "/code will use the primary model.[/yellow]"
+        )
+        return None
+    client, warning = _resolve_fallback_client(manager, config, registry, provider, model)
+    if warning:
+        console.print(
+            f"[yellow]Coding model configured but {warning} — "
+            "/code will use the primary model.[/yellow]"
+        )
+        return None
+    return client
 
 
 def _provider_preflight(manager: ConfigManager, config: NeroConfig) -> str | None:
@@ -1022,6 +1057,27 @@ def config_set(key: str, value: str) -> None:
         _warn_if_fallback_issue(manager)
     if key in ("llm.model", "llm.fallback_chain", "llm.model_blacklist", "llm.model_whitelist"):
         _warn_if_model_listed(manager)
+
+
+@config_app.command("set-key")
+def config_set_key(
+    provider: str,
+    slot: int = typer.Option(1, "--slot", min=1, help="Key slot to write (1 = base)."),
+) -> None:
+    """Store an API key for `provider`, optionally in rotation slot N (> 1)."""
+    if provider not in providers.names():
+        console.print(f"[red]Unknown provider: {provider}[/red]")
+        raise typer.Exit(1)
+    manager = ConfigManager()
+    if not manager.provider_needs_key(provider):
+        console.print(f"[red]{provider} does not use an API key.[/red]")
+        raise typer.Exit(1)
+    key = typer.prompt(f"{provider} API key (slot {slot})", hide_input=True).strip()
+    if not key:
+        console.print("[red]No key entered.[/red]")
+        raise typer.Exit(1)
+    manager.set_api_key(provider, key, slot=slot)
+    console.print(f"[green]Saved key for {provider} (slot {slot}).[/green]")
 
 
 def _warn_if_no_tool_support(manager: ConfigManager) -> None:
@@ -1207,10 +1263,16 @@ def _key_display(manager: ConfigManager, provider: str, masked: bool = True) -> 
     api_key = manager.get_api_key(provider)
     if not api_key:
         return "not set"
-    return manager.mask_api_key(api_key) if masked else "configured"
+    label = manager.mask_api_key(api_key) if masked else "configured"
+    extra_slots = len(manager.get_api_keys(provider)) - 1
+    if extra_slots > 0:
+        label += f" (+{extra_slots} more slot{'s' if extra_slots != 1 else ''})"
+    return label
 
 
-def _config_table(manager: ConfigManager, config: NeroConfig) -> Table:
+def _config_table(
+    manager: ConfigManager, config: NeroConfig, session_cost: float = 0.0
+) -> Table:
     table = Table(title="nero config", show_header=False, min_width=45)
     table.add_row("Assistant Name", config.assistant.name)
     table.add_row("LLM Provider", config.llm.provider)
@@ -1228,6 +1290,11 @@ def _config_table(manager: ConfigManager, config: NeroConfig) -> Table:
     table.add_row("Fallback Chain", ", ".join(config.llm.fallback_chain) or "—")
     table.add_row("Model Blacklist", ", ".join(config.llm.model_blacklist) or "—")
     table.add_row("Model Whitelist", ", ".join(config.llm.model_whitelist) or "—")
+    table.add_row("Route By", config.llm.route_by)
+    table.add_row("Health Check", "yes" if config.llm.health_check else "no")
+    table.add_row("Coding Model", config.llm.coding_model or "not set")
+    if session_cost:
+        table.add_row("Session Cost", f"${session_cost:.4f}")
     hardware = config.hardware
     if hardware.detected_ram_gb is not None:
         table.add_row("Detected Hardware", f"{hardware.detected_ram_gb:g} GB RAM, {hardware.detected_cpu_cores} cores")
