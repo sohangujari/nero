@@ -152,6 +152,14 @@ class MemoryConfig(BaseModel):
 
     enabled: bool = True
     max_history_turns: int = Field(default=20, ge=0)  # counts exchanges (user+assistant pairs)
+    # A directory of the user's own .md/.txt/.markdown files, indexed for
+    # search_notes. None means notes search is unconfigured (actionable
+    # message, not an error).
+    notes_dir: str | None = None
+    notes_max_bytes: int = Field(default=2_000_000, gt=0)  # per-file guard
+    # Messages beyond this trigger session compaction (see chat_loop.py). 0
+    # disables compaction entirely.
+    compact_after_messages: int = Field(default=40, ge=0)
 
 
 class SkillToggles(BaseModel):
@@ -175,6 +183,10 @@ class SkillToggles(BaseModel):
     git_command: bool = False
     run_python: bool = False
     run_javascript: bool = False
+    remember_fact: bool = True
+    recall_facts: bool = True
+    forget_fact: bool = False
+    search_notes: bool = True
 
 
 class WeatherSkillConfig(BaseModel):

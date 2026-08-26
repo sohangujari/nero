@@ -50,13 +50,17 @@ class StubTool(Skill):
         return self._result
 
 
-def make_client(provider="claude", model="claude-sonnet-5", tools=None, api_key="sk-test", registry=None):
+def make_client(
+    provider="claude", model="claude-sonnet-5", tools=None, api_key="sk-test", registry=None,
+    facts=None,
+):
     skills = tools if tools is not None else [StubTool(result="Opened Safari.")]
     return LLMClient(
         config=LLMConfig(provider=provider, model=model),
         assistant_name="Nero",
         registry=registry if registry is not None else SkillRegistry(skills),
         api_key=api_key,
+        facts=facts,
     )
 
 
@@ -794,6 +798,20 @@ class TestSystemPromptFraming:
         # The previous regression came from an over-long, over-specific prompt.
         # Small local models follow terse instructions far better.
         assert len(make_client().system_prompt) < 900
+
+
+class TestFactsInPrompt:
+    def test_no_facts_prompt_is_byte_identical_to_baseline(self):
+        # Regression lock (spec §1): empty/None facts must never change the
+        # prompt a single byte, whether by omission or by explicit empty list.
+        assert make_client(facts=None).system_prompt == make_client().system_prompt
+        assert make_client(facts=[]).system_prompt == make_client().system_prompt
+
+    def test_facts_are_appended_to_the_prompt(self):
+        prompt = make_client(facts=[("favorite_editor", "vim")]).system_prompt
+        assert prompt.startswith(make_client().system_prompt)
+        assert "favorite_editor: vim" in prompt
+        assert "What you know about this user" in prompt
 
 
 from nero.llm.ollama_adapter import OllamaModelError

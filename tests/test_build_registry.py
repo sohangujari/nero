@@ -26,8 +26,10 @@ class TestOfflineAndDisabledGating:
         # open_website, get_weather, and fetch_web_page require the network ->
         # hidden offline. open_app is explicitly disabled -> hidden regardless
         # of mode. write_file/edit_file/delete_path/move_path default disabled.
-        # play_music and read_file are local and enabled -> what's left standing.
-        assert names == {"play_music", "read_file"}
+        # play_music, read_file, and the local memory skills
+        # (remember_fact/recall_facts/search_notes enabled by default,
+        # forget_fact disabled by default) are local -> what's left standing.
+        assert names == {"play_music", "read_file", "remember_fact", "recall_facts", "search_notes"}
 
     def test_known_names_lists_every_registered_skill(self):
         from nero.skills.registry import build_registry
@@ -49,6 +51,10 @@ class TestOfflineAndDisabledGating:
             "git_command",
             "run_python",
             "run_javascript",
+            "remember_fact",
+            "recall_facts",
+            "forget_fact",
+            "search_notes",
         }
 
 

@@ -37,7 +37,9 @@ from nero.hardware.detector import (
 )
 from nero.llm import ollama, openai_compat, providers
 from nero.llm.client import LLMClient
+from nero.memory.facts import FactStore, default_facts_path
 from nero.memory.history_store import HistoryStore, default_history_path
+from nero.memory.notes import NoteIndex, default_notes_index_path
 from nero.security import denylisted
 from nero.skills.registry import build_registry
 from nero.voice import audio_io
@@ -52,6 +54,10 @@ from nero.voice.voice_loop import VoiceLoop
 app = typer.Typer(add_completion=False, invoke_without_command=True)
 config_app = typer.Typer(invoke_without_command=True, help="View and edit Nero Agent's configuration.")
 app.add_typer(config_app, name="config")
+facts_app = typer.Typer(invoke_without_command=True, help="View and manage facts Nero Agent remembers about you.")
+app.add_typer(facts_app, name="facts")
+notes_app = typer.Typer(help="Search and (re)index your notes directory.")
+app.add_typer(notes_app, name="notes")
 console = Console()
 logger = logging.getLogger("nero.cli")
 
@@ -221,6 +227,75 @@ def forget() -> None:
         return
     removed = store.clear()
     console.print(f"[green]Cleared[/green] {removed} stored messages.")
+
+
+@facts_app.callback()
+def facts_main(ctx: typer.Context) -> None:
+    """Without a subcommand, lists everything Nero Agent remembers about you."""
+    if ctx.invoked_subcommand is None:
+        facts = FactStore(default_facts_path()).all()
+        if not facts:
+            console.print("[dim]No facts remembered yet.[/dim]")
+            return
+        table = Table(title="nero facts", show_header=True)
+        table.add_column("key")
+        table.add_column("value")
+        table.add_column("source", style="dim")
+        table.add_column("updated", style="dim")
+        for fact in facts:
+            table.add_row(fact.key, escape(fact.value), fact.source or "-", fact.updated_at)
+        console.print(table)
+
+
+@facts_app.command("forget")
+def facts_forget(key: str) -> None:
+    """Forget one remembered fact by key."""
+    if FactStore(default_facts_path()).forget(key):
+        console.print(f"[green]Forgot[/green] {key}.")
+    else:
+        console.print(f"[dim]No fact stored under {key!r}.[/dim]")
+
+
+def _notes_index(config: NeroConfig) -> NoteIndex | None:
+    if not config.memory.notes_dir:
+        console.print(
+            "[yellow]No notes directory configured.[/yellow] Set one with "
+            "[bold]nero config set memory.notes_dir <path>[/bold]."
+        )
+        return None
+    return NoteIndex(default_notes_index_path(), config.memory.notes_dir, config.memory.notes_max_bytes)
+
+
+@notes_app.command("index")
+def notes_index_cmd() -> None:
+    """Reindex the notes directory and report what changed."""
+    index = _notes_index(_load_or_exit(ConfigManager()))
+    if index is None:
+        raise typer.Exit(1)
+    added, updated, removed = index.reindex()
+    console.print(f"[green]Indexed.[/green] added={added} updated={updated} removed={removed}")
+
+
+@notes_app.command("search")
+def notes_search_cmd(
+    query: str, limit: int = typer.Option(5, "--limit", "-n", help="Max results.")
+) -> None:
+    """Search the indexed notes."""
+    index = _notes_index(_load_or_exit(ConfigManager()))
+    if index is None:
+        raise typer.Exit(1)
+    if index.is_empty():
+        index.reindex()
+    results = index.search(query, limit=limit)
+    if not results:
+        console.print(f"[dim]No notes match {query!r}.[/dim]")
+        return
+    table = Table(title=f"nero notes search — {query!r}", show_header=True)
+    table.add_column("path")
+    table.add_column("snippet")
+    for path, snippet in results:
+        table.add_row(escape(path), escape(snippet))
+    console.print(table)
 
 
 @app.command()
@@ -461,12 +536,14 @@ def _run_chat() -> None:
     registry = _build_registry(manager, config, extra_skills=mcp_skills)
 
     fallback_clients = _build_fallback_clients(manager, config, registry)
+    facts = [(fact.key, fact.value) for fact in FactStore(default_facts_path()).all()]
 
     client = LLMClient(
         config=config.llm,
         assistant_name=config.assistant.name,
         registry=registry,
         api_key=api_key,
+        facts=facts,
     )
     try:
         ChatLoop(

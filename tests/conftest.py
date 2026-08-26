@@ -13,6 +13,18 @@ def isolate_audit_log(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "nero.cli.default_history_path", lambda: tmp_path / "history.db", raising=False
     )
+    monkeypatch.setattr(
+        "nero.memory.facts.default_facts_path", lambda: tmp_path / "facts.db"
+    )
+    monkeypatch.setattr(
+        "nero.cli.default_facts_path", lambda: tmp_path / "facts.db", raising=False
+    )
+    monkeypatch.setattr(
+        "nero.memory.notes.default_notes_index_path", lambda: tmp_path / "notes_index.db"
+    )
+    monkeypatch.setattr(
+        "nero.cli.default_notes_index_path", lambda: tmp_path / "notes_index.db", raising=False
+    )
     return fake
 
 

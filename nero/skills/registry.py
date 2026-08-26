@@ -164,6 +164,8 @@ def build_registry(
         RunPythonSkill,
         RunShellSkill,
     )
+    from nero.memory.facts import FactStore, default_facts_path
+    from nero.memory.notes import NoteIndex, default_notes_index_path
     from nero.skills.files.server import (
         DeletePathSkill,
         EditFileSkill,
@@ -171,11 +173,20 @@ def build_registry(
         ReadFileSkill,
         WriteFileSkill,
     )
+    from nero.skills.memory.server import ForgetFactSkill, RecallFactsSkill, RememberFactSkill
+    from nero.skills.notes.server import SearchNotesSkill
     from nero.skills.open_app.server import OpenAppSkill
     from nero.skills.open_website.server import OpenWebsiteSkill
     from nero.skills.play_music.server import PlayMusicSkill
     from nero.skills.weather.server import WeatherSkill
     from nero.skills.web.server import FetchWebPageSkill
+
+    fact_store = FactStore(default_facts_path())
+    notes_index = (
+        NoteIndex(default_notes_index_path(), config.memory.notes_dir, config.memory.notes_max_bytes)
+        if config.memory.notes_dir
+        else None
+    )
 
     skills: list[Skill] = [
         OpenAppSkill(),
@@ -195,6 +206,10 @@ def build_registry(
         GitCommandSkill(security=config.security),
         RunPythonSkill(),
         RunJavascriptSkill(),
+        RememberFactSkill(fact_store),
+        RecallFactsSkill(fact_store),
+        ForgetFactSkill(fact_store),
+        SearchNotesSkill(notes_index),
     ]
     skills.extend(extra_skills or [])
     return SkillRegistry(

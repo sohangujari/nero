@@ -9,6 +9,9 @@ class TestDefaults:
         cfg = NeroConfig()
         assert cfg.memory.enabled is True
         assert cfg.memory.max_history_turns == 20
+        assert cfg.memory.notes_dir is None
+        assert cfg.memory.notes_max_bytes == 2_000_000
+        assert cfg.memory.compact_after_messages == 40
 
     def test_roundtrips_through_full_config(self):
         data = NeroConfig().model_dump()
@@ -36,6 +39,17 @@ class TestValidation:
     def test_accepts_zero_and_default_max_history_turns(self):
         assert MemoryConfig.model_validate({"max_history_turns": 0}).max_history_turns == 0
         assert MemoryConfig.model_validate({"max_history_turns": 20}).max_history_turns == 20
+
+    def test_accepts_zero_compact_after_messages(self):
+        assert MemoryConfig.model_validate({"compact_after_messages": 0}).compact_after_messages == 0
+
+    def test_rejects_negative_compact_after_messages(self):
+        with pytest.raises(ValidationError):
+            MemoryConfig.model_validate({"compact_after_messages": -1})
+
+    def test_rejects_non_positive_notes_max_bytes(self):
+        with pytest.raises(ValidationError):
+            MemoryConfig.model_validate({"notes_max_bytes": 0})
 
 
 class TestSetValue:

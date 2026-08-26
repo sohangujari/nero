@@ -8,6 +8,7 @@ import litellm
 
 from nero.config.schema import LLMConfig
 from nero.llm import ollama, providers
+from nero.memory.facts import facts_prompt_block
 from nero.llm.ollama_adapter import (
     ToolCallOutcome,
     ToolCallRequest,
@@ -108,6 +109,7 @@ class LLMClient:
         registry: SkillRegistry,
         api_key: str | None = None,
         ollama_base_url: str = ollama.BASE_URL,
+        facts: list[tuple[str, str]] | None = None,
     ):
         self.config = config
         self.api_key = api_key
@@ -139,6 +141,10 @@ class LLMClient:
             "When you are not calling a tool, reply with plain text only — never "
             "write tool-call JSON as text. Keep replies concise."
         )
+        # Empty/None facts leaves the prompt byte-identical to before this
+        # feature existed — a regression lock (see TestSystemPromptFraming).
+        if facts:
+            self.system_prompt += facts_prompt_block(facts)
         self._last_round: RoundResult | None = None
         # Accumulated USD cost of the turn currently in progress (reset at the
         # top of _run_turn). Local/ollama rounds never touch this — no cost.
