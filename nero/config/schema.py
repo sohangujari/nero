@@ -47,6 +47,13 @@ class LLMConfig(BaseModel):
     # explicit choices (llm.model, the fallback pair/chain) — never enforced.
     model_blacklist: list[str] = []
     model_whitelist: list[str] = []
+    # v1.6.0 routing: exactly one dimension orders the fallback chain (never
+    # the primary). "off" is byte-identical to today's chain order. See
+    # nero/llm/routing.py for what each dimension actually measures.
+    route_by: Literal["off", "cost", "latency", "quality"] = "off"
+    quality_rank: list[str] = []  # model ids, best first; unranked sorts last
+    health_check: bool = True  # skip a chain entry after 2 consecutive failures this session
+    coding_model: str | None = None  # "provider/model" resolved for /code
 
     @model_validator(mode="after")
     def _validate_fallback_chain(self):
