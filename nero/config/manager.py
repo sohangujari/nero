@@ -83,10 +83,13 @@ class ConfigManager:
     def provider_needs_key(provider: str) -> bool:
         return ConfigManager._entry(provider) is not None
 
-    def get_api_key(self, provider: str = "claude") -> str | None:
-        entry = self._entry(provider)
-        if entry is None:
-            return None
+    # v1.6.0 key rotation: keyring entries gain an optional numeric suffix
+    # (openai_api_key, openai_api_key_2, ...). This bounds how many slots
+    # get_api_keys scans — a fixed, documented ceiling rather than an
+    # unbounded keyring walk.
+    MAX_KEY_SLOTS = 10
+
+    def _read_key(self, entry: str) -> str | None:
         try:
             return keyring.get_password(KEYRING_SERVICE, entry)
         except keyring.errors.KeyringError:
@@ -97,11 +100,37 @@ class ConfigManager:
             # write would look like success and lose the key.
             return None
 
-    def set_api_key(self, provider: str, value: str) -> None:
+    def get_api_key(self, provider: str = "claude") -> str | None:
+        entry = self._entry(provider)
+        if entry is None:
+            return None
+        return self._read_key(entry)
+
+    def get_api_keys(self, provider: str = "claude") -> list[str]:
+        """Every key stored for `provider`, base slot first, gaps ignored.
+
+        `get_api_key` keeps returning the first of these — every existing
+        caller is unaffected by rotation slots existing.
+        """
+        entry = self._entry(provider)
+        if entry is None:
+            return []
+        keys = []
+        base = self._read_key(entry)
+        if base:
+            keys.append(base)
+        for slot in range(2, self.MAX_KEY_SLOTS + 1):
+            value = self._read_key(f"{entry}_{slot}")
+            if value:
+                keys.append(value)
+        return keys
+
+    def set_api_key(self, provider: str, value: str, slot: int = 1) -> None:
         entry = self._entry(provider)
         if entry is None:
             raise ConfigError(f"Provider {provider!r} does not use an API key.")
-        keyring.set_password(KEYRING_SERVICE, entry, value)
+        keyring_entry = entry if slot == 1 else f"{entry}_{slot}"
+        keyring.set_password(KEYRING_SERVICE, keyring_entry, value)
 
     @staticmethod
     def mask_api_key(key: str) -> str:
