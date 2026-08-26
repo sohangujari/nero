@@ -2,6 +2,7 @@ import asyncio
 import base64
 import logging
 import shlex
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from rich.console import Console
 from rich.markup import escape
 
 from nero.llm.ollama_adapter import OllamaModelError
+from nero.llm.routing import SessionStats, order_chain
 
 logger = logging.getLogger("nero.chat")
 
@@ -57,6 +59,19 @@ def _build_image_message(path_str: str, question: str) -> dict:
             {"type": "image_url", "image_url": {"url": f"data:image/{fmt};base64,{data}"}},
         ],
     }
+
+
+def _client_key(client) -> tuple[str, str]:
+    """(provider, model) for stats, tolerating clients that expose neither.
+
+    Every other client access in this file is a getattr with a default —
+    a fake or adapter without these attributes must not turn a working turn
+    into an exception the catch-all then rolls back.
+    """
+    return (
+        getattr(client, "provider", None) or "unknown",
+        getattr(client, "model", None) or "unknown",
+    )
 
 
 def find_compaction_cut(messages: list[dict], keep_recent: int) -> int | None:
@@ -172,6 +187,11 @@ class ChatLoop:
         registry=None,
         security=None,
         compact_after_messages: int = 0,
+        route_by: str = "off",
+        quality_rank: list[str] | None = None,
+        health_check: bool = True,
+        primary_api_keys: list[str] | None = None,
+        coding_client=None,
     ):
         self.client = client
         self.console = console
@@ -187,6 +207,21 @@ class ChatLoop:
         # 0 (the default) disables compaction entirely — unchanged behavior
         # for every caller that doesn't pass this.
         self.compact_after_messages = compact_after_messages
+        # v1.6.0 routing/health/key-rotation — all default to today's
+        # behavior (off / all keys healthy / no rotation) for every caller
+        # that doesn't pass these.
+        self.route_by = route_by
+        self.quality_rank = quality_rank or []
+        self.health_check = health_check
+        self.stats = SessionStats()
+        # Keys available for the PRIMARY provider only; rotation never
+        # touches a /code-routed client. Slot 0 is whatever `client` already
+        # holds, so rotation always advances from there.
+        self.primary_api_keys = primary_api_keys or []
+        self._key_slot = 0
+        # Resolved once at startup (see cli._resolve_coding_client); None
+        # means /code falls back to the primary rather than erroring.
+        self.coding_client = coding_client
         self.turns_used = 0
         self.cost_usd = 0.0
         # Seed from persisted history when memory is on; else a blank session.
@@ -219,17 +254,41 @@ class ChatLoop:
                 self.console.print(f"[red]{limit_message}[/red]")
                 continue
 
-            if text.startswith("/image "):
+            is_code_turn = False
+            if text == "/image" or text.startswith("/image "):
                 image_turn = self._image_turn(text)
                 if image_turn is None:
                     continue
                 user_message, history_text = image_turn
+            elif text == "/code" or text.startswith("/code "):
+                code_turn = self._code_turn(text)
+                if code_turn is None:
+                    continue
+                user_message, history_text = code_turn
+                is_code_turn = True
             else:
                 user_message = {"role": "user", "content": text}
                 history_text = text
 
             self.turns_used += 1
-            used_client = self.client
+            # /code routes this one turn to llm.coding_model; every other
+            # turn (and /code with nothing resolved) uses the primary. Key
+            # rotation is scoped to the real primary only — a one-off routed
+            # client never rotates.
+            primary_client = self.coding_client if (is_code_turn and self.coding_client) else self.client
+            allow_rotation = primary_client is self.client
+            if is_code_turn:
+                if self.coding_client:
+                    self.console.print(
+                        f"[dim]Routing to {primary_client.model} via "
+                        f"{primary_client.provider} for this turn.[/dim]"
+                    )
+                else:
+                    self.console.print(
+                        "[dim]No coding model configured — using the primary "
+                        "model for this turn.[/dim]"
+                    )
+            used_client = primary_client
             self.messages.append(user_message)
             self._maybe_compact()
             # Recomputed after compaction rather than captured before the
@@ -240,15 +299,44 @@ class ChatLoop:
             self.console.print(f"[bold magenta]{self.assistant_name}>[/bold magenta] ", end="")
             try:
                 try:
-                    self.client.send(self.messages, on_text=self._print_chunk)
+                    started = time.monotonic()
+                    try:
+                        primary_client.send(self.messages, on_text=self._print_chunk)
+                    except litellm.exceptions.RateLimitError:
+                        # One rotation per turn, primary only, before the
+                        # fallback chain is even considered — see v1.6.0 spec.
+                        rotated_key = self._next_key_for_rotation() if allow_rotation else None
+                        if rotated_key is None:
+                            raise
+                        primary_client.api_key = rotated_key
+                        del self.messages[turn_start:]
+                        self.messages.append(user_message)
+                        self.console.print(
+                            "\n[yellow]Rate limited — retrying "
+                            f"{primary_client.model} via {primary_client.provider} "
+                            "with another key.[/yellow]"
+                        )
+                        self.console.print(
+                            f"[bold magenta]{self.assistant_name}>[/bold magenta] ", end=""
+                        )
+                        started = time.monotonic()
+                        primary_client.send(self.messages, on_text=self._print_chunk)
+                    provider_key, model_key = _client_key(primary_client)
+                    self.stats.record_success(provider_key, model_key)
+                    self.stats.record_latency(
+                        provider_key, model_key, time.monotonic() - started
+                    )
                 except TRANSIENT_ERRORS:
+                    self.stats.record_failure(*_client_key(primary_client))
                     if not self.fallback_clients:
                         raise
-                    # Walk the chain in priority order; first success wins. Each
-                    # attempt rolls back first — partial tool/assistant turns
-                    # from the failed stream must not leak into the retry, and a
-                    # failed fallback attempt can leave its own partial state.
-                    for i, fallback_client in enumerate(self.fallback_clients):
+                    # Walk the chain in routed/health-filtered order; first
+                    # success wins. Each attempt rolls back first — partial
+                    # tool/assistant turns from the failed stream must not leak
+                    # into the retry, and a failed fallback attempt can leave
+                    # its own partial state.
+                    candidates = self._ordered_fallback_candidates()
+                    for i, fallback_client in enumerate(candidates):
                         del self.messages[turn_start:]
                         self.messages.append(user_message)
                         self.console.print(
@@ -260,13 +348,19 @@ class ChatLoop:
                             f"[bold magenta]{self.assistant_name}>[/bold magenta] ", end=""
                         )
                         try:
+                            started = time.monotonic()
                             fallback_client.send(self.messages, on_text=self._print_chunk)
                             used_client = fallback_client
+                            self.stats.record_success(*_client_key(fallback_client))
+                            self.stats.record_latency(
+                                *_client_key(fallback_client), time.monotonic() - started
+                            )
                             break
                         except TRANSIENT_ERRORS:
+                            self.stats.record_failure(*_client_key(fallback_client))
                             # Exceptions from the last attempt propagate to the
                             # existing outer handlers unchanged.
-                            if i == len(self.fallback_clients) - 1:
+                            if i == len(candidates) - 1:
                                 raise
                 self.cost_usd += getattr(used_client, "last_turn_cost", 0.0) or 0.0
                 self.console.print()
@@ -303,7 +397,7 @@ class ChatLoop:
                 # doesn't have, or a base URL with the wrong /v1 shape for its
                 # dialect.
                 del self.messages[turn_start:]
-                model = getattr(self.client, "model", None) or "that model"
+                model = getattr(primary_client, "model", None) or "that model"
                 self.console.print(
                     f"\n[red]The provider has no model called [bold]{model}[/bold].[/red] "
                     "Check the model name in [bold]nero config[/bold]."
@@ -315,8 +409,8 @@ class ChatLoop:
                 httpx.HTTPError,  # direct-Ollama path talks httpx, not litellm
             ):
                 del self.messages[turn_start:]
-                provider = getattr(self.client, "provider", None)
-                api_base = getattr(self.client, "api_base", None)
+                provider = getattr(primary_client, "provider", None)
+                api_base = getattr(primary_client, "api_base", None)
                 if provider == "ollama":
                     hint = " If you're using Ollama, make sure it's running ([bold]ollama serve[/bold])."
                 elif api_base:
@@ -393,6 +487,52 @@ class ChatLoop:
         user_message = _build_image_message(path_str, question)
         history_text = f"[image: {Path(path_str).name}] {question}"
         return user_message, history_text
+
+    def _code_turn(self, text: str) -> tuple[dict, str] | None:
+        """Parse `/code <request>` — routes this one turn to llm.coding_model.
+
+        Returns (user_message, history_text) ready to send, or None after
+        printing a usage message — in which case no turn is consumed.
+        """
+        request = text.removeprefix("/code").strip()
+        if not request:
+            self.console.print(escape("Usage: /code <request>"), style="red")
+            return None
+        return {"role": "user", "content": request}, request
+
+    def _next_key_for_rotation(self) -> str | None:
+        """The next untried key for the primary provider, or None if there
+        isn't one. Advances an internal slot pointer so a key already known
+        to be rate-limited isn't retried on a later turn."""
+        if self._key_slot + 1 >= len(self.primary_api_keys):
+            return None
+        self._key_slot += 1
+        return self.primary_api_keys[self._key_slot]
+
+    def _ordered_fallback_candidates(self) -> list:
+        """The fallback chain, ordered by `route_by` and filtered by health —
+        except an unhealthy entry is never dropped when it's the only
+        candidate left (an unhealthy option beats no option)."""
+        keyed = [(_client_key(client), client) for client in self.fallback_clients]
+        order = order_chain([key for key, _ in keyed], self.route_by, self.stats,
+                            self.quality_rank)
+        # Index by position, not by key: two chain entries may share a
+        # (provider, model) pair, and a dict would silently drop one.
+        remaining = list(keyed)
+        ordered_clients = []
+        for key in order:
+            for i, (candidate_key, client) in enumerate(remaining):
+                if candidate_key == key:
+                    ordered_clients.append(client)
+                    del remaining[i]
+                    break
+        if not self.health_check:
+            return ordered_clients
+        healthy = [
+            client for client in ordered_clients
+            if not self.stats.is_unhealthy(*_client_key(client))
+        ]
+        return healthy or ordered_clients
 
     def _print_chunk(self, text: str) -> None:
         # Raw print, not console.print: streamed chunks must not be markup-parsed

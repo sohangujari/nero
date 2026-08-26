@@ -49,6 +49,10 @@ def _fake_manager(tmp_path, config: NeroConfig):
         def get_api_key(self, provider="claude"):
             return "sk-ant-test"
 
+        def get_api_keys(self, provider="claude"):
+            # One key, no rotation slots — the base-slot case.
+            return ["sk-ant-test"]
+
         def mask_api_key(self, key):
             return "sk-ant-...test"
 
