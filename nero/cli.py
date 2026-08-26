@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import json
 import logging
@@ -21,10 +22,11 @@ from rich.progress import (
 from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
-from nero import __version__, ui
+from nero import __version__, routines, ui
 from nero._runtime import check_python_version
 from nero.config.manager import ConfigError, ConfigManager
 from nero.config.schema import NeroConfig, STTConfig, TTSConfig
+from nero.core.approvals import ApprovalQueue, default_approvals_path, queue_confirm
 from nero.core.audit_log import AuditLog, default_audit_path
 from nero.core.chat_loop import ChatLoop
 from nero.mcp import MCPConnection, MCPError, load_servers
@@ -58,6 +60,12 @@ facts_app = typer.Typer(invoke_without_command=True, help="View and manage facts
 app.add_typer(facts_app, name="facts")
 notes_app = typer.Typer(help="Search and (re)index your notes directory.")
 app.add_typer(notes_app, name="notes")
+routine_app = typer.Typer(invoke_without_command=True, help="Manage scheduled routines (launchd).")
+app.add_typer(routine_app, name="routine")
+approvals_app = typer.Typer(
+    invoke_without_command=True, help="Review actions routines queued for approval."
+)
+app.add_typer(approvals_app, name="approvals")
 console = Console()
 logger = logging.getLogger("nero.cli")
 
@@ -227,6 +235,183 @@ def forget() -> None:
         return
     removed = store.clear()
     console.print(f"[green]Cleared[/green] {removed} stored messages.")
+
+
+def _print_pending_approvals_notice() -> None:
+    """One yellow line at chat startup when routines have queued destructive
+    calls for review. Never blocks: a corrupt/unreadable approvals db just
+    means no notice, not a startup failure."""
+    try:
+        pending = ApprovalQueue(default_approvals_path()).pending()
+    except Exception:  # noqa: BLE001 — a notice must never block chat startup
+        return
+    if pending:
+        console.print(
+            f"[yellow]{len(pending)} action(s) from routines are waiting for your "
+            "approval — review with nero approvals[/yellow]"
+        )
+
+
+@routine_app.callback()
+def routine_main(ctx: typer.Context) -> None:
+    """Without a subcommand, lists configured routines."""
+    if ctx.invoked_subcommand is None:
+        routine_list()
+
+
+@routine_app.command("list")
+def routine_list() -> None:
+    """List configured routines: schedule, enabled, and whether installed."""
+    config = _load_or_exit(ConfigManager())
+    if not config.routines.routines:
+        console.print(
+            "[dim]No routines configured.[/dim] Add one under "
+            "[bold]routines.routines[/bold] in your config file."
+        )
+        return
+    agents_dir = routines.default_agents_dir()
+    table = Table(title="nero routines", show_header=True)
+    table.add_column("name")
+    table.add_column("schedule")
+    table.add_column("enabled")
+    table.add_column("installed")
+    for name, routine in config.routines.routines.items():
+        table.add_row(
+            name,
+            routine.schedule,
+            "yes" if routine.enabled else "no",
+            "yes" if routines.is_installed(name, agents_dir) else "no",
+        )
+    console.print(table)
+
+
+@routine_app.command("run")
+def routine_run(name: str) -> None:
+    """Headless single turn: send the routine's prompt, print the reply.
+
+    No history persistence (a routine is not a conversation), no MCP servers.
+    Any destructive skill call is refused and queued for approval — see
+    nero.core.approvals.queue_confirm.
+    """
+    manager = ConfigManager()
+    config = _load_or_exit(manager)
+    routine = config.routines.routines.get(name)
+    if routine is None:
+        console.print(f"[red]No routine named {name!r}.[/red]")
+        raise typer.Exit(1)
+    if not routine.enabled:
+        console.print(f"[red]Routine {name!r} is disabled.[/red]")
+        raise typer.Exit(1)
+
+    api_key = _provider_preflight(manager, config)
+    queue = ApprovalQueue(default_approvals_path())
+    registry = build_registry(
+        config,
+        audit=AuditLog(default_audit_path()),
+        confirm=queue_confirm(queue, name),
+    )
+    client = LLMClient(
+        config=config.llm,
+        assistant_name=config.assistant.name,
+        registry=registry,
+        api_key=api_key,
+    )
+    messages = [{"role": "user", "content": routine.prompt}]
+    client.send(messages, on_text=lambda text: console.print(text, end=""))
+    console.print()
+
+
+@routine_app.command("install")
+def routine_install(name: str) -> None:
+    """Write and load the launchd agent for a configured routine."""
+    config = _load_or_exit(ConfigManager())
+    routine = config.routines.routines.get(name)
+    if routine is None:
+        console.print(f"[red]No routine named {name!r}.[/red]")
+        raise typer.Exit(1)
+    try:
+        executable = routines.resolve_executable()
+        message = routines.install_routine(
+            name, routine, executable, routines.default_agents_dir()
+        )
+    except routines.RoutineError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(message)
+
+
+@routine_app.command("uninstall")
+def routine_uninstall(name: str) -> None:
+    """Unload and remove the launchd agent for a routine."""
+    console.print(routines.uninstall_routine(name, routines.default_agents_dir()))
+
+
+@approvals_app.callback()
+def approvals_main(ctx: typer.Context) -> None:
+    """Without a subcommand, lists actions routines queued for approval."""
+    if ctx.invoked_subcommand is None:
+        pending = ApprovalQueue(default_approvals_path()).pending()
+        if not pending:
+            console.print("[dim]No actions waiting for approval.[/dim]")
+            return
+        table = Table(title="nero approvals", show_header=True)
+        table.add_column("id")
+        table.add_column("routine")
+        table.add_column("skill")
+        table.add_column("arguments")
+        table.add_column("when", style="dim")
+        for item in pending:
+            table.add_row(
+                str(item.id),
+                item.routine,
+                item.skill,
+                escape(json.dumps(item.arguments, ensure_ascii=False)),
+                item.requested_at.strftime("%Y-%m-%d %H:%M"),
+            )
+        console.print(table)
+
+
+@approvals_app.command("run")
+def approvals_run(entry_id: int) -> None:
+    """Show a pending request, ask for interactive confirmation, and — only if
+    approved — execute the skill through a normal registry (so it is audited)
+    and discard the entry. Non-TTY refuses and leaves the row pending: this
+    must never auto-approve."""
+    queue = ApprovalQueue(default_approvals_path())
+    item = queue.get(entry_id)
+    if item is None:
+        console.print(f"[red]No pending approval with id {entry_id}.[/red]")
+        raise typer.Exit(1)
+    console.print(
+        f"[yellow]Routine[/yellow] [bold]{item.routine}[/bold] wants to run "
+        f"[bold]{item.skill}[/bold] with:"
+    )
+    console.print(json.dumps(item.arguments, indent=2, ensure_ascii=False, default=str))
+
+    manager = ConfigManager()
+    config = _load_or_exit(manager)
+    approved = {"value": False}
+
+    def confirm(skill_name: str, tier: str, arguments: dict) -> bool:
+        approved["value"] = _confirm_skill(skill_name, tier, arguments, config.security, False)
+        return approved["value"]
+
+    registry = build_registry(config, audit=AuditLog(default_audit_path()), confirm=confirm)
+    result = asyncio.run(registry.execute(item.skill, item.arguments, provider="approvals"))
+    console.print(result)
+    if approved["value"]:
+        queue.discard(entry_id)
+    else:
+        console.print("[dim]Not approved. Left pending.[/dim]")
+
+
+@approvals_app.command("discard")
+def approvals_discard(entry_id: int) -> None:
+    """Discard a pending approval without running it."""
+    if ApprovalQueue(default_approvals_path()).discard(entry_id):
+        console.print(f"[green]Discarded[/green] approval {entry_id}.")
+    else:
+        console.print(f"[dim]No pending approval with id {entry_id}.[/dim]")
 
 
 @facts_app.callback()
@@ -530,6 +715,7 @@ def _run_chat() -> None:
     if not manager.exists():
         _first_time_setup(manager)
     config = _load_or_exit(manager)
+    _print_pending_approvals_notice()
 
     api_key = _provider_preflight(manager, config)
     mcp_skills, mcp_connections = _load_mcp(config)

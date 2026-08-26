@@ -25,6 +25,12 @@ def isolate_audit_log(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "nero.cli.default_notes_index_path", lambda: tmp_path / "notes_index.db", raising=False
     )
+    monkeypatch.setattr(
+        "nero.core.approvals.default_approvals_path", lambda: tmp_path / "approvals.db"
+    )
+    monkeypatch.setattr(
+        "nero.cli.default_approvals_path", lambda: tmp_path / "approvals.db", raising=False
+    )
     return fake
 
 
