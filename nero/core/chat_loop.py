@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import logging
 import shlex
@@ -58,6 +59,88 @@ def _build_image_message(path_str: str, question: str) -> dict:
     }
 
 
+def find_compaction_cut(messages: list[dict]) -> int | None:
+    """The largest `cut` such that dropping messages[:cut] leaves a clean
+    boundary: messages[cut] is a user message and messages[cut - 1] is an
+    assistant message carrying no tool_calls.
+
+    Scanning from the end means a cut point that would split a tool-call
+    sequence is skipped automatically: right after an assistant message with
+    tool_calls comes a `tool` role message, never `user`, so that candidate
+    fails and the search keeps walking left until it clears the whole
+    tool_calls/tool group. Returns None if no valid boundary exists at all —
+    per spec, compaction must be skipped rather than guess.
+    """
+    for cut in range(len(messages) - 1, 0, -1):
+        before, after = messages[cut - 1], messages[cut]
+        if after.get("role") == "user" and before.get("role") == "assistant" and not before.get("tool_calls"):
+            return cut
+    return None
+
+
+def _transcript_text(messages: list[dict]) -> str:
+    """Flatten messages to plain "role: content" lines for summarization.
+    Only string content is included — tool-call payloads (content is always
+    "" for those, by convention) carry nothing worth summarizing."""
+    lines = []
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, str) and content:
+            lines.append(f"{message.get('role')}: {content}")
+    return "\n".join(lines)
+
+
+def summarize_messages(client, messages: list[dict]) -> str | None:
+    """One plain, tool-free LLM call on `client` to summarize `messages`.
+
+    Never raises: compaction is a nice-to-have, and losing the turn over a
+    failed summary call would be far worse than just skipping compaction.
+    Returns None on any failure.
+    """
+    try:
+        prompt = (
+            "Summarize the following conversation concisely, preserving "
+            "important facts, decisions, and context that will be needed "
+            "later:\n\n" + _transcript_text(messages)
+        )
+
+        chunks: list[str] = []
+
+        async def _run() -> None:
+            async for text in client.stream_chat([{"role": "user", "content": prompt}], []):
+                chunks.append(text)
+
+        asyncio.run(_run())
+        summary = "".join(chunks).strip()
+        return summary or None
+    except Exception as exc:  # noqa: BLE001 — never raise; see docstring
+        logger.warning("Session compaction summary failed: %s", exc)
+        return None
+
+
+def compact_messages(messages: list[dict], client, threshold: int) -> tuple[list[dict], int] | None:
+    """Replace the oldest span of `messages` with one summary message, if
+    `messages` is over `threshold` and a clean cut boundary exists.
+
+    Returns (new_messages, dropped_count), or None if compaction did not fire
+    (disabled, under threshold, no valid boundary, or the summary call
+    failed) — in every None case the caller must leave `messages` untouched.
+    """
+    if not threshold or len(messages) <= threshold:
+        return None
+    cut = find_compaction_cut(messages)
+    if cut is None:
+        return None
+    summary = summarize_messages(client, messages[:cut])
+    if summary is None:
+        return None
+    new_messages = [
+        {"role": "user", "content": f"[Earlier conversation summary]\n{summary}"},
+        *messages[cut:],
+    ]
+    return new_messages, cut
+
+
 def _supports_vision(model: str) -> bool:
     """Never-raise: unknown/custom models assume capable, since custom rows
     have no catalog truth — let the provider error surface through the
@@ -81,6 +164,7 @@ class ChatLoop:
         fallback_clients: list | None = None,
         registry=None,
         security=None,
+        compact_after_messages: int = 0,
     ):
         self.client = client
         self.console = console
@@ -93,6 +177,9 @@ class ChatLoop:
         # this feature existed.
         self.registry = registry
         self.security = security
+        # 0 (the default) disables compaction entirely — unchanged behavior
+        # for every caller that doesn't pass this.
+        self.compact_after_messages = compact_after_messages
         self.turns_used = 0
         self.cost_usd = 0.0
         # Seed from persisted history when memory is on; else a blank session.
@@ -134,10 +221,15 @@ class ChatLoop:
                 user_message = {"role": "user", "content": text}
                 history_text = text
 
-            turn_start = len(self.messages)
             self.turns_used += 1
             used_client = self.client
             self.messages.append(user_message)
+            self._maybe_compact()
+            # Recomputed after compaction rather than captured before the
+            # append: user_message is always the last element (compaction
+            # only ever touches a prefix of self.messages), so this is valid
+            # whether or not compaction actually fired this turn.
+            turn_start = len(self.messages) - 1
             self.console.print(f"[bold magenta]{self.assistant_name}>[/bold magenta] ", end="")
             try:
                 try:
@@ -231,6 +323,15 @@ class ChatLoop:
                     f"\n[red]Something went wrong with that turn:[/red] {exc}\n"
                     "You can retry, or type exit to quit."
                 )
+
+    def _maybe_compact(self) -> None:
+        result = compact_messages(self.messages, self.client, self.compact_after_messages)
+        if result is None:
+            return
+        self.messages, dropped = result
+        # escape(): the literal "[compacted ...]" text must not be parsed as
+        # rich markup itself (only the surrounding [dim]...[/dim] tags should be).
+        self.console.print(f"[dim]{escape(f'[compacted {dropped} earlier messages]')}[/dim]")
 
     def _limit_message(self) -> str | None:
         """None if the turn may proceed, else the message to show instead.

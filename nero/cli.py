@@ -550,6 +550,7 @@ def _run_chat() -> None:
             client, console=console, assistant_name=config.assistant.name,
             history=_build_history(config), fallback_clients=fallback_clients,
             registry=registry, security=config.security,
+            compact_after_messages=config.memory.compact_after_messages,
         ).run()
     finally:
         # A session must never leave orphaned server processes behind.
