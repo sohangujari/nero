@@ -249,6 +249,24 @@ class MCPConfig(BaseModel):
     servers: dict[str, MCPServerConfig] = {}
 
 
+class RoutineConfig(BaseModel):
+    """One scheduled routine: a prompt run headlessly on a cron schedule via
+    launchd. Destructive skills it triggers never run unattended — they queue
+    for approval instead (nero/core/approvals.py)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schedule: str  # 5-field cron: "minute hour day month weekday"
+    prompt: str
+    enabled: bool = True
+
+
+class RoutinesConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    routines: dict[str, RoutineConfig] = {}
+
+
 class NeroConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -264,3 +282,4 @@ class NeroConfig(BaseModel):
     memory: MemoryConfig = MemoryConfig()
     security: SecurityConfig = SecurityConfig()
     mcp: MCPConfig = MCPConfig()
+    routines: RoutinesConfig = RoutinesConfig()
