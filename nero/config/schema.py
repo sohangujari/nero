@@ -209,6 +209,34 @@ class SecurityConfig(BaseModel):
     max_cost_usd_per_session: float = Field(default=0.0, ge=0.0)  # 0 = unlimited
 
 
+class MCPServerConfig(BaseModel):
+    """One stdio MCP server.
+
+    `env` values expand ${VAR} from the shell environment so credentials stay
+    out of this file. `trusted` relaxes the per-call confirmation to the same
+    tier the built-in skills use; leaving it False means every call from that
+    server is confirmed, because it runs third-party code.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    command: str
+    args: list[str] = []
+    env: dict[str, str] = {}
+    enabled: bool = True
+    trusted: bool = False
+    # Conservative: offline mode hides the server's tools. Flip it for servers
+    # that are purely local (filesystem, sqlite).
+    requires_network: bool = True
+    timeout_seconds: int = 60
+
+
+class MCPConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    servers: dict[str, MCPServerConfig] = {}
+
+
 class NeroConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -223,3 +251,4 @@ class NeroConfig(BaseModel):
     skills: SkillsConfig = SkillsConfig()
     memory: MemoryConfig = MemoryConfig()
     security: SecurityConfig = SecurityConfig()
+    mcp: MCPConfig = MCPConfig()

@@ -147,12 +147,16 @@ class SkillRegistry:
             logger.warning("Could not record audit entry for %r: %s", name, exc)
 
 
-def build_registry(config, audit=None, on_location_resolved=None, confirm=None) -> SkillRegistry:
+def build_registry(
+    config, audit=None, on_location_resolved=None, confirm=None, extra_skills=None
+) -> SkillRegistry:
     """Construct the registry from a NeroConfig.
 
     `on_location_resolved` lets the weather skill persist a newly learned
     default location without importing ConfigManager (added in Task 8).
     `confirm` gates destructive skills — see SkillRegistry.__init__.
+    `extra_skills` appends dynamically discovered skills (MCP tools), whose
+    process lifetime the caller owns.
     """
     from nero.skills.execution.server import (
         GitCommandSkill,
@@ -192,6 +196,7 @@ def build_registry(config, audit=None, on_location_resolved=None, confirm=None) 
         RunPythonSkill(),
         RunJavascriptSkill(),
     ]
+    skills.extend(extra_skills or [])
     return SkillRegistry(
         skills=skills,
         enabled=config.skills.enabled.model_dump(),

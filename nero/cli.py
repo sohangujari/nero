@@ -27,6 +27,7 @@ from nero.config.manager import ConfigError, ConfigManager
 from nero.config.schema import NeroConfig, STTConfig, TTSConfig
 from nero.core.audit_log import AuditLog, default_audit_path
 from nero.core.chat_loop import ChatLoop
+from nero.mcp import MCPConnection, MCPError, load_servers
 from nero.dashboard import run_dashboard
 from nero.hardware.detector import (
     HardwareSpecs,
@@ -139,6 +140,46 @@ def detect() -> None:
         f"Provider unchanged ([bold]{config.llm.provider}[/bold]) — "
         "switch with [bold]nero config[/bold]."
     )
+
+
+@app.command()
+def mcp() -> None:
+    """List the configured MCP servers and the tools they expose."""
+    config = _load_or_exit(ConfigManager())
+    if not config.mcp.servers:
+        console.print(
+            "[dim]No MCP servers configured.[/dim] Add one under [bold]mcp.servers[/bold] "
+            "in your config file."
+        )
+        return
+    table = Table(title="mcp servers", show_header=True)
+    table.add_column("server")
+    table.add_column("status")
+    table.add_column("trust", style="dim")
+    table.add_column("tools")
+    for name, server in config.mcp.servers.items():
+        if not server.enabled:
+            table.add_row(name, "[dim]disabled[/dim]", "", "")
+            continue
+        connection = MCPConnection(
+            name=name, command=server.command, args=server.args,
+            env=server.env, timeout=server.timeout_seconds,
+        )
+        try:
+            connection.start()
+            tools = connection.list_tools()
+        except MCPError as exc:
+            table.add_row(name, f"[red]{escape(str(exc))}[/red]", "", "")
+            continue
+        finally:
+            connection.close()
+        table.add_row(
+            name,
+            "[green]ok[/green]",
+            "trusted" if server.trusted else "confirms",
+            f"{len(tools)}: " + escape(", ".join(tool.get("name", "?") for tool in tools)),
+        )
+    console.print(table)
 
 
 @app.command()
@@ -331,7 +372,7 @@ def _build_vad(config: NeroConfig, console: Console) -> VoiceActivityDetector | 
         return None
 
 
-def _build_registry(manager: ConfigManager, config: NeroConfig):
+def _build_registry(manager: ConfigManager, config: NeroConfig, extra_skills=None):
     """The one place skills get constructed — both `nero` and `nero talk` call
     this, so the text and voice paths can never drift apart."""
 
@@ -357,6 +398,7 @@ def _build_registry(manager: ConfigManager, config: NeroConfig):
         audit=AuditLog(default_audit_path()),
         on_location_resolved=remember_location,
         confirm=confirm,
+        extra_skills=extra_skills,
     )
     registry_box.append(registry)
     return registry
@@ -415,7 +457,8 @@ def _run_chat() -> None:
     config = _load_or_exit(manager)
 
     api_key = _provider_preflight(manager, config)
-    registry = _build_registry(manager, config)
+    mcp_skills, mcp_connections = _load_mcp(config)
+    registry = _build_registry(manager, config, extra_skills=mcp_skills)
 
     fallback_clients = _build_fallback_clients(manager, config, registry)
 
@@ -425,11 +468,31 @@ def _run_chat() -> None:
         registry=registry,
         api_key=api_key,
     )
-    ChatLoop(
-        client, console=console, assistant_name=config.assistant.name,
-        history=_build_history(config), fallback_clients=fallback_clients,
-        registry=registry, security=config.security,
-    ).run()
+    try:
+        ChatLoop(
+            client, console=console, assistant_name=config.assistant.name,
+            history=_build_history(config), fallback_clients=fallback_clients,
+            registry=registry, security=config.security,
+        ).run()
+    finally:
+        # A session must never leave orphaned server processes behind.
+        for connection in mcp_connections:
+            connection.close()
+
+
+def _load_mcp(config: NeroConfig):
+    """Spawn the configured MCP servers and wrap their tools as skills.
+
+    Every failure is a warning, never a stop: a third-party server that won't
+    start must not take the assistant down with it.
+    """
+    if not config.mcp.servers:
+        return [], []
+    builtin_names = build_registry(config).known_names()
+    skills, connections, warnings = load_servers(config.mcp, builtin_names)
+    for warning in warnings:
+        console.print(f"[yellow]{escape(warning)}[/yellow]")
+    return skills, connections
 
 
 def _fallback_chain_entries(config: NeroConfig) -> tuple[list[tuple[str, str]], bool]:
