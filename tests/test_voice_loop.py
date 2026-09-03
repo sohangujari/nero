@@ -368,7 +368,9 @@ def test_voice_max_rounds_fallthrough_not_appended():
 
 
 # --- Barge-in: only what was heard is ever recorded ---
-def make_loop_with_barge_in(monkeypatch, spoken="", generated=None, prefix_value=None, turns=1):
+def make_loop_with_barge_in(
+    monkeypatch, spoken="", generated=None, prefix_value=None, turns=1, source=None
+):
     """A VoiceLoop wired for barge-in where the fake monitor interrupts every
     turn immediately. `spoken` is what FakePlayer.spoken_text() reports back
     (what actually reached the speaker); `generated` (defaults to `spoken`) is
@@ -382,8 +384,10 @@ def make_loop_with_barge_in(monkeypatch, spoken="", generated=None, prefix_value
     """
     FakePlayer.instances = []
     generated = spoken if generated is None else generated
+    seen_source: list = []
 
-    def fake_listen_for_barge_in(vad, on_detect, stop, on_error=None):
+    def fake_listen_for_barge_in(vad, on_detect, stop, on_error=None, source=None):
+        seen_source.append(source)
         on_detect(prefix_value)
 
         class _DummyThread:
@@ -424,8 +428,10 @@ def make_loop_with_barge_in(monkeypatch, spoken="", generated=None, prefix_value
         history=history,
         vad=object(),
         barge_in=True,
+        source=source,
     )
     loop._recorded_prefixes = recorded_prefixes
+    loop._seen_source = seen_source
     return loop, history
 
 
@@ -506,3 +512,31 @@ class TestBargeIn:
         # the loop, but the prompt is only ever needed once -- the second
         # iteration begins with a pending prefix and must skip it.
         assert len(prompts) == 1
+
+
+def test_barge_in_monitor_gets_the_sessions_microphone(monkeypatch):
+    """The monitor must read the stream the recorder already has open, not
+    grab a second handle on the same device mid-reply."""
+    mic = object()
+    loop, _history = make_loop_with_barge_in(monkeypatch, spoken="Hi.", source=mic)
+    loop.run()
+    assert loop._seen_source == [mic]
+
+
+# --- Latency trace ---
+class TestTurnTimer:
+    def test_one_line_per_turn_under_debug(self, monkeypatch, caplog):
+        loop = make_loop(["Hello.", "stop"], ["Hi there. Bye."])
+        with caplog.at_level("DEBUG", logger="nero.voice"):
+            loop.run()
+        lines = [r for r in caplog.records if r.getMessage().startswith("voice turn:")]
+        assert len(lines) == 1
+        message = lines[0].getMessage()
+        for mark in ("stt=", "ttft=", "speech=", "done="):
+            assert mark in message
+
+    def test_silent_when_debug_is_off(self, caplog):
+        loop = make_loop(["Hello.", "stop"], ["Hi there."])
+        with caplog.at_level("INFO", logger="nero.voice"):
+            loop.run()
+        assert "voice turn:" not in caplog.text

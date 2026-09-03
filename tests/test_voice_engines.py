@@ -1,6 +1,8 @@
 import asyncio
 import types
 
+import numpy as np
+
 from nero.voice.errors import (
     MicPermissionError,
     MicUnavailableError,
@@ -121,3 +123,71 @@ def test_ensure_kokoro_model_uses_cache_without_download(monkeypatch, tmp_path):
     model_path, voices_path = models.ensure_kokoro_model()
     assert model_path.name == "kokoro-v1.0.onnx"
     assert voices_path.name == "voices-v1.0.bin"
+
+
+# --- Latency: language pinning and cold-start warmup ---
+class _RecordingWhisper:
+    def __init__(self):
+        self.calls = []
+
+    def transcribe(self, audio, language=None):
+        self.calls.append((getattr(audio, "size", None), language))
+        return ([], None)
+
+
+def test_stt_pins_the_configured_language():
+    """Auto-detect measured ~500ms per turn to re-answer a fixed question."""
+    import asyncio
+
+    from nero.voice.stt import FasterWhisperSTT
+
+    model = _RecordingWhisper()
+    stt = FasterWhisperSTT(_model=model)
+    asyncio.run(stt.transcribe(np.zeros(16000, dtype=np.float32), 16000))
+    assert model.calls[0][1] == "en"
+
+
+def test_stt_language_none_restores_auto_detect():
+    import asyncio
+
+    from nero.voice.stt import FasterWhisperSTT
+
+    model = _RecordingWhisper()
+    stt = FasterWhisperSTT(language=None, _model=model)
+    asyncio.run(stt.transcribe(np.zeros(16000, dtype=np.float32), 16000))
+    assert model.calls[0][1] is None
+
+
+def test_stt_warmup_decodes_silence_with_the_same_language():
+    from nero.voice.stt import FasterWhisperSTT
+
+    model = _RecordingWhisper()
+    FasterWhisperSTT(_model=model).warmup()
+    assert model.calls == [(8000, "en")]
+
+
+def test_tts_warmup_synthesizes_a_throwaway_token():
+    from nero.voice.tts import KokoroTTS
+
+    class _RecordingKokoro:
+        def __init__(self):
+            self.created = []
+
+        def create(self, text, voice, speed, lang):
+            self.created.append(text)
+            return (np.zeros(4, dtype=np.float32), 24000)
+
+    model = _RecordingKokoro()
+    KokoroTTS(_model=model).warmup()
+    assert model.created == ["a"]
+
+
+def test_prewarm_never_lets_a_failure_stop_startup():
+    """An optimization is never a prerequisite for `nero talk` starting."""
+    from nero import cli
+
+    class Exploding:
+        def warmup(self):
+            raise RuntimeError("no model")
+
+    cli._prewarm(Exploding(), object())  # object() has no warmup at all

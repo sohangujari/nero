@@ -11,7 +11,7 @@ class TestDefaults:
         assert cfg.memory.max_history_turns == 20
         assert cfg.memory.notes_dir is None
         assert cfg.memory.notes_max_bytes == 2_000_000
-        assert cfg.memory.compact_after_messages == 40
+        assert cfg.memory.compact_after_messages == 60
 
     def test_roundtrips_through_full_config(self):
         data = NeroConfig().model_dump()
@@ -60,3 +60,11 @@ class TestSetValue:
         manager.save(NeroConfig())
         assert manager.set_value("memory.enabled", "false").memory.enabled is False
         assert manager.set_value("memory.max_history_turns", "8").memory.max_history_turns == 8
+
+
+def test_compaction_threshold_clears_the_restored_history_window():
+    """A session restores max_history_turns * 2 messages. If the threshold sits
+    at or below that, compaction fires on the very first turn of every session —
+    a full extra LLM round-trip before the user's first reply, forever."""
+    cfg = MemoryConfig()
+    assert cfg.compact_after_messages > cfg.max_history_turns * 2 + 1

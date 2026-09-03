@@ -20,6 +20,15 @@ from nero.skills.registry import SkillRegistry
 logger = logging.getLogger("nero.llm")
 
 MAX_TOKENS = 8192
+
+# Seconds the provider may go without sending a byte. LiteLLM hands this to
+# httpx, whose read timeout is per-read, not per-request -- so a long
+# generation is never cut off, only a stalled one. Generous because a queued
+# free tier really can take 40 s to produce its first token; the point is that
+# a dead connection surfaces as litellm.Timeout (already in both loops'
+# transient-error tuples, so the fallback chain gets its turn) instead of
+# hanging on LiteLLM's 600 s default.
+REQUEST_TIMEOUT = 120.0
 # Safety bound on tool-call round trips within a single user turn.
 MAX_TOOL_ROUNDS = 10
 
@@ -239,14 +248,24 @@ class LLMClient:
             tools=tools or None,
             max_tokens=MAX_TOKENS,
             stream=True,
+            timeout=REQUEST_TIMEOUT,
             **kwargs,
         )
         chunks = []
-        async for chunk in response:
-            chunks.append(chunk)
-            delta = chunk.choices[0].delta if chunk.choices else None
-            if delta is not None and getattr(delta, "content", None):
-                yield delta.content
+        try:
+            async for chunk in response:
+                chunks.append(chunk)
+                delta = chunk.choices[0].delta if chunk.choices else None
+                if delta is not None and getattr(delta, "content", None):
+                    yield delta.content
+        except litellm.exceptions.MidStreamFallbackError as exc:
+            # LiteLLM wraps ANY failure that arrives after the stream opened --
+            # a 429 included -- in this ServiceUnavailableError subclass. Left
+            # alone it makes a rate limit read as "could not reach the model
+            # provider" and skips key rotation, which only ever matched
+            # RateLimitError. Unwrapping here fixes every caller at once
+            # rather than teaching each handler about the wrapper.
+            raise (exc.original_exception or exc) from exc
         full = litellm.stream_chunk_builder(chunks, messages=messages)
         message = full.choices[0].message if full and full.choices else None
         self._last_round = RoundResult(

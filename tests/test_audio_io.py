@@ -2,6 +2,7 @@ import asyncio
 import io
 import threading
 import sys
+import time
 import types
 
 import numpy as np
@@ -18,30 +19,51 @@ from nero.voice.errors import (
 
 
 class FakeInputStream:
-    """Mimics sd.InputStream: hands out fixed frames on each read()."""
+    """Mimics sd.InputStream: hands out fixed frames on each read().
 
-    def __init__(self, frames, raise_on_start=None, **kwargs):
+    Supports both shapes the module uses: the context manager
+    `record_until_enter` opens per recording, and the explicit
+    start/stop/close AudioSource keeps open for the session.
+    """
+
+    def __init__(self, frames, raise_on_start=None, overflow_after=None, **kwargs):
         self._frames = frames
         self._raise = raise_on_start
+        self._overflow_after = overflow_after
         self._i = 0
         self.read_count = 0
+        self.started = False
+        self.closed = False
 
     def __enter__(self):
-        if self._raise:
-            raise self._raise
+        self.start()
         return self
 
     def __exit__(self, *a):
         return False
 
+    def start(self):
+        if self._raise:
+            raise self._raise
+        self.started = True
+
+    def stop(self):
+        pass
+
+    def close(self):
+        self.closed = True
+
     def read(self, n):
         self.read_count += 1
         block = self._frames[self._i]
         self._i = (self._i + 1) % len(self._frames)
-        return block, False
+        overflowed = (
+            self._overflow_after is not None and self.read_count > self._overflow_after
+        )
+        return block, overflowed
 
 
-def make_fake_sd(frames=None, input_error_msg=None, play_error=None):
+def make_fake_sd(frames=None, input_error_msg=None, play_error=None, overflow_after=None):
     fake = types.ModuleType("sounddevice")
 
     class PortAudioError(Exception):
@@ -54,7 +76,9 @@ def make_fake_sd(frames=None, input_error_msg=None, play_error=None):
     fake.streams = []
 
     def InputStream(**kwargs):
-        stream = FakeInputStream(frames, raise_on_start=input_error, **kwargs)
+        stream = FakeInputStream(
+            frames, raise_on_start=input_error, overflow_after=overflow_after, **kwargs
+        )
         fake.streams.append(stream)
         return stream
 
@@ -77,7 +101,47 @@ def make_fake_sd(frames=None, input_error_msg=None, play_error=None):
         fake.stop_calls.append(True)
 
     fake.stop = stop
+
+    fake.out_streams = []
+    fake.on_write = None
+    fake.output_error = None
+
+    def OutputStream(**kwargs):
+        stream = FakeOutputStream(fake, **kwargs)
+        fake.out_streams.append(stream)
+        return stream
+
+    fake.OutputStream = OutputStream
     return fake
+
+
+class FakeOutputStream:
+    """Mimics sd.OutputStream: records every write so block-level cuts show up."""
+
+    def __init__(self, module, **kwargs):
+        self._module = module
+        self.kwargs = kwargs
+        self.writes = []
+        self.started = self.closed = self.aborted = False
+
+    def start(self):
+        if self._module.output_error:
+            raise self._module.output_error
+        self.started = True
+
+    def write(self, data):
+        self.writes.append(np.asarray(data).copy())
+        if self._module.on_write is not None:
+            self._module.on_write(self)
+
+    def abort(self):
+        self.aborted = True
+
+    def stop(self):
+        pass
+
+    def close(self):
+        self.closed = True
 
 
 def install(monkeypatch, fake):
@@ -647,3 +711,236 @@ class TestOutputIsBuiltinSpeakers:
     def test_fails_open_when_sounddevice_unavailable(self, monkeypatch):
         monkeypatch.setitem(sys.modules, "sounddevice", None)
         assert audio_io.output_is_builtin_speakers() is False
+
+
+# --- Pipelined playback: synthesis must overlap the speaker ---
+class RecordingTTS:
+    """Notes when each sentence is synthesized, so overlap is observable."""
+
+    def __init__(self):
+        self.synthesized = []
+
+    async def synthesize_stream(self, text_stream):
+        async for sentence in text_stream:
+            self.synthesized.append(sentence)
+            yield np.full(4, len(sentence), dtype=np.float32)
+
+
+def _wait_until(predicate, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
+
+
+class TestPipelinedPlayback:
+    def test_synthesis_runs_ahead_of_playback(self):
+        """The defect this whole rewrite exists for.
+
+        The old single-threaded `async for audio in synth(): await play(audio)`
+        could not pull sentence N+1 out of the engine until sentence N had
+        finished playing, so every sentence boundary cost a full synthesis
+        (0.8-5.9s measured) of dead air. With playback parked on chunk 1, the
+        remaining sentences must already be synthesized.
+        """
+        tts = RecordingTTS()
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocking_play(audio, sr):
+            started.set()
+            release.wait(timeout=5)
+
+        player = Player(tts, 24000, play_fn=blocking_play)
+        player.start()
+        for sentence in ("One.", "Two.", "Three."):
+            player.enqueue(sentence)
+        player.close()
+        assert started.wait(timeout=5)
+        assert _wait_until(lambda: tts.synthesized == ["One.", "Two.", "Three."])
+        # ...while only the first has actually been spoken.
+        assert player.spoken_text() == "One."
+        release.set()
+        player.join(timeout=5)
+
+    def test_prefetch_is_bounded(self):
+        """Backpressure: a long reply must not synthesize itself into memory.
+
+        Playback holds chunk 1, the queue holds PREFETCH_CHUNKS more, and the
+        synthesis thread parks handing over one more — so the engine runs at
+        most PREFETCH_CHUNKS + 2 sentences ahead, never all ten.
+        """
+        tts = RecordingTTS()
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocking_play(audio, sr):
+            started.set()
+            release.wait(timeout=5)
+
+        player = Player(tts, 24000, play_fn=blocking_play)
+        player.start()
+        for i in range(10):
+            player.enqueue(f"Sentence {i}.")
+        player.close()
+        assert started.wait(timeout=5)
+        ceiling = Player.PREFETCH_CHUNKS + 2
+        assert _wait_until(lambda: len(tts.synthesized) >= ceiling)
+        time.sleep(0.3)  # give an unbounded implementation room to run away
+        assert len(tts.synthesized) == ceiling
+        release.set()
+        player.stop_now()
+        player.shutdown()
+
+    def test_one_output_stream_serves_every_chunk(self, monkeypatch):
+        """Per-sentence `sd.play()` measured ~130ms of device open/teardown.
+        One reused stream costs 10ms once."""
+        fake = make_fake_sd()
+        install(monkeypatch, fake)
+        player = Player(SentenceTTS(), 24000)
+        player.start()
+        for sentence in ("One.", "Two.", "Three."):
+            player.enqueue(sentence)
+        player.close()
+        player.join(timeout=5)
+        player.shutdown()
+        assert len(fake.out_streams) == 1
+        assert fake.out_streams[0].kwargs["samplerate"] == 24000
+        assert sum(w.size for w in fake.out_streams[0].writes) == 3 * 4
+
+    def test_stop_now_cuts_inside_a_chunk(self, monkeypatch):
+        """Barge-in must not wait out the sentence already handed to the device."""
+        fake = make_fake_sd()
+        install(monkeypatch, fake)
+        blocks = 10
+        big = np.ones(audio_io._StreamWriter._WRITE_BLOCK * blocks, dtype=np.float32)
+
+        class OneBigChunkTTS:
+            async def synthesize_stream(self, text_stream):
+                async for _sentence in text_stream:
+                    yield big
+
+        player = Player(OneBigChunkTTS(), 24000)
+
+        def cut_after_two(stream):
+            if len(stream.writes) == 2:
+                player.stop_now()
+
+        fake.on_write = cut_after_two
+        player.start()
+        player.enqueue("A very long sentence.")
+        player.close()
+        player.join(timeout=5)
+        stream = fake.out_streams[0]
+        assert len(stream.writes) == 2 < blocks
+        assert stream.aborted
+
+    def test_playback_device_failure_surfaces_on_join(self, monkeypatch):
+        fake = make_fake_sd()
+        fake.output_error = RuntimeError("no output device")
+        install(monkeypatch, fake)
+        player = Player(SentenceTTS(), 24000)
+        player.start()
+        player.enqueue("One.")
+        player.close()
+        with pytest.raises(PlaybackError, match="no output device"):
+            player.join(timeout=5)
+
+    def test_shutdown_releases_the_output_device(self, monkeypatch):
+        fake = make_fake_sd()
+        install(monkeypatch, fake)
+        player = Player(SentenceTTS(), 24000)
+        player.start()
+        player.enqueue("One.")
+        player.close()
+        player.join(timeout=5)
+        player.shutdown()
+        assert fake.out_streams[0].closed
+
+
+# --- Shared microphone + pre-roll padding ---
+class TestAudioSource:
+    def test_one_stream_serves_many_recordings(self, monkeypatch):
+        """Opening an InputStream measured 112ms; a turn used to pay it twice."""
+        fake = make_fake_sd(frames=vad_frames(1))
+        install(monkeypatch, fake)
+        source = audio_io.AudioSource()
+        console = Console(file=io.StringIO())
+        for _ in range(2):
+            audio_io.record_until_silence(
+                console, ScriptedVAD([True] + [False] * 25), silence_ms=800, source=source
+            )
+        assert len(fake.streams) == 1
+        source.close()
+        assert fake.streams[0].closed
+
+    def test_without_a_shared_source_each_call_opens_its_own(self, monkeypatch):
+        fake = make_fake_sd(frames=vad_frames(1))
+        install(monkeypatch, fake)
+        console = Console(file=io.StringIO())
+        for _ in range(2):
+            audio_io.record_until_silence(
+                console, ScriptedVAD([True] + [False] * 25), silence_ms=800
+            )
+        assert len(fake.streams) == 2
+        assert all(stream.closed for stream in fake.streams)
+
+    def test_permission_error_is_translated(self, monkeypatch):
+        fake = make_fake_sd(frames=vad_frames(1), input_error_msg="Permission denied")
+        install(monkeypatch, fake)
+        with pytest.raises(MicPermissionError):
+            audio_io.AudioSource().read_frame()
+
+    def test_overflow_is_logged_not_raised(self, monkeypatch, caplog):
+        """PortAudio's overflow flag was discarded; dropped input then showed
+        up only as a mysteriously garbled transcript."""
+        fake = make_fake_sd(frames=vad_frames(1), overflow_after=0)
+        install(monkeypatch, fake)
+        source = audio_io.AudioSource()
+        with caplog.at_level("DEBUG", logger="nero.voice.audio"):
+            frame = source.read_frame()
+        assert frame.shape == (512,)
+        assert "overflow" in caplog.text.lower()
+
+    def test_barge_in_monitor_reuses_the_shared_stream(self, monkeypatch):
+        fake = make_fake_sd(frames=[np.full((512, 1), 0.4, dtype="float32")])
+        install(monkeypatch, fake)
+        source = audio_io.AudioSource()
+        source.read_frame()  # opens it
+        stop = threading.Event()
+        fired = []
+        thread = audio_io.listen_for_barge_in(
+            ScriptedVAD([True] * 20), fired.append, stop, source=source
+        )
+        thread.join(timeout=5)
+        assert len(fired) == 1
+        assert len(fake.streams) == 1
+        assert not fake.streams[0].closed, "a shared mic outlives one monitor"
+
+
+class TestPreroll:
+    def test_frames_before_speech_onset_are_kept(self, monkeypatch):
+        """Silero fires on the frame where speech is already audible, so the
+        frame that trips it usually holds the first phoneme. Dropping what came
+        before clipped word onsets."""
+        fake = make_fake_sd(frames=vad_frames(1))
+        install(monkeypatch, fake)
+        vad = ScriptedVAD([False] * 15 + [True] + [False] * 25)
+        audio = audio_io.record_until_silence(
+            Console(file=io.StringIO()), vad, silence_ms=800
+        )
+        kept = audio.size // 512
+        # 1 speech + 25 trailing silence + PREROLL_FRAMES of lead-in.
+        assert kept == 26 + audio_io.PREROLL_FRAMES
+
+    def test_preroll_is_bounded(self, monkeypatch):
+        """A long silent wait must not accumulate minutes of lead-in."""
+        fake = make_fake_sd(frames=vad_frames(1))
+        install(monkeypatch, fake)
+        vad = ScriptedVAD([False] * 300 + [True] + [False] * 25)
+        audio = audio_io.record_until_silence(
+            Console(file=io.StringIO()), vad, silence_ms=800, wait_for_speech_seconds=30
+        )
+        assert audio.size // 512 == 26 + audio_io.PREROLL_FRAMES

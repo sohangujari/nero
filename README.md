@@ -115,9 +115,32 @@ Tuning (all optional):
 | `voice.vad.threshold` | `0.5` | Speech sensitivity. Raise it in a noisy room. |
 | `voice.vad.max_utterance_seconds` | `180` | Hard cap on one recording. |
 | `voice.vad.wait_for_speech_seconds` | `30` | How long Nero Agent waits for you to start. |
+| `voice.stt.language` | `"en"` | Language pinned for transcription. `null` auto-detects, costing ~0.5s per turn. |
 
 What Nero Agent heard is printed before it replies. Say "stop" (or "exit") to leave,
 or press Ctrl+C.
+
+### How the reply reaches your speakers
+
+Nero synthesizes ahead of what it is saying. The model's text is split into
+sentences as it streams, sentence one starts playing while sentence two is
+still being synthesized, and everything goes to a single audio stream that
+stays open for the turn. The first segment is cut short — at a clause, or at
+60 characters — because it is the only one you wait on in silence.
+
+Concretely, on a four-sentence reply on an M-series laptop: dead air between
+sentences dropped from 4.8s to 0.9s, and the wait for the first word from
+2.0s to 0.7s.
+
+`nero talk --debug` prints one latency line per turn:
+
+```
+voice turn: stt=0.67 ttft=0.42 speech=0.91 done=5.18 (4 sentences)
+```
+
+`stt` is transcription, `ttft` the model's first token, `speech` the first
+sentence reaching the synthesizer, `done` the end of playback — all in seconds
+from the moment you stopped talking.
 
 The default voice is `af_bella` (female); the male equivalent is `am_michael`.
 Change it — along with the STT model and TTS engine — in `nero config` (the

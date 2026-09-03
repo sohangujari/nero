@@ -97,7 +97,7 @@ def test_talk_missing_voice_deps_shows_install_hint(monkeypatch, tmp_path):
 def test_talk_once_runs_voice_loop(monkeypatch, tmp_path):
     config = NeroConfig()
     monkeypatch.setattr(cli, "ConfigManager", lambda: _fake_manager(tmp_path, config))
-    monkeypatch.setattr(cli, "FasterWhisperSTT", lambda model: object())
+    monkeypatch.setattr(cli, "FasterWhisperSTT", lambda model, language=None: object())
     monkeypatch.setattr(cli, "_build_registry", lambda manager, config: object())
     # Must be stubbed: the real pre-flight downloads ~300 MB of model weights.
     preflight_calls = []
@@ -196,7 +196,7 @@ def test_talk_ignores_interrupts_after_loop_exits(monkeypatch, tmp_path):
 
     config = NeroConfig()
     monkeypatch.setattr(cli, "ConfigManager", lambda: _fake_manager(tmp_path, config))
-    monkeypatch.setattr(cli, "FasterWhisperSTT", lambda model: object())
+    monkeypatch.setattr(cli, "FasterWhisperSTT", lambda model, language=None: object())
     monkeypatch.setattr(cli, "_build_registry", lambda manager, config: object())
     monkeypatch.setattr(cli, "_preflight_voice_models", lambda engine: None)
 
@@ -331,7 +331,7 @@ class TestBargeInSpeakerSuppression:
         from nero import cli
 
         monkeypatch.setattr(cli, "ConfigManager", lambda: _fake_manager(tmp_path, config))
-        monkeypatch.setattr(cli, "FasterWhisperSTT", lambda model: object())
+        monkeypatch.setattr(cli, "FasterWhisperSTT", lambda model, language=None: object())
         monkeypatch.setattr(cli, "_build_registry", lambda manager, config: object())
         monkeypatch.setattr(cli, "_preflight_voice_models", lambda engine: None)
 

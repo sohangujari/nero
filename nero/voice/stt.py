@@ -22,11 +22,19 @@ class STTEngine(ABC):
     async def transcribe(self, audio, sample_rate: int) -> str:
         """Transcribe mono float32 audio to text."""
 
+    def warmup(self) -> None:
+        """Optional: pay a cold-start cost now rather than on the first turn."""
+
 
 class FasterWhisperSTT(STTEngine):
     """faster-whisper STT. Expects 16 kHz mono float32 audio (what audio_io records)."""
 
-    def __init__(self, model: str = "base", _model=None):
+    def __init__(self, model: str = "base", language: str | None = "en", _model=None):
+        # Language auto-detection measured 1137-1286 ms on a 2.3 s utterance
+        # against 671 ms with the language pinned -- roughly 500 ms per turn,
+        # every turn, to re-answer a question whose answer never changes.
+        # `None` restores auto-detect for anyone who needs it.
+        self._language = language
         self._model = _model if _model is not None else self._load(model)
 
     @staticmethod
@@ -40,5 +48,11 @@ class FasterWhisperSTT(STTEngine):
         return WhisperModel(model, device="cpu", compute_type="int8")
 
     async def transcribe(self, audio, sample_rate: int) -> str:
-        segments, _info = self._model.transcribe(audio, language=None)
+        segments, _info = self._model.transcribe(audio, language=self._language)
         return " ".join(segment.text.strip() for segment in segments).strip()
+
+    def warmup(self) -> None:
+        """Decode half a second of silence to force CTranslate2's first-run setup."""
+        import numpy as np
+
+        self._model.transcribe(np.zeros(8000, dtype=np.float32), language=self._language)

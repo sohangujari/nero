@@ -45,7 +45,12 @@ from nero.memory.notes import NoteIndex, default_notes_index_path
 from nero.security import denylisted
 from nero.skills.registry import build_registry
 from nero.voice import audio_io
-from nero.voice.audio_io import Player, record_until_enter, record_until_silence
+from nero.voice.audio_io import (
+    AudioSource,
+    Player,
+    record_until_enter,
+    record_until_silence,
+)
 from nero.voice.errors import TTSLoadError, VoiceDependencyError
 from nero.voice.models import ensure_vad_model
 from nero.voice.stt import STT_MODELS, FasterWhisperSTT
@@ -529,7 +534,7 @@ def talk(
     )
 
     try:
-        stt = FasterWhisperSTT(config.voice.stt.model)
+        stt = FasterWhisperSTT(config.voice.stt.model, language=config.voice.stt.language)
     except VoiceDependencyError as exc:
         console.print(f"[red]{escape(str(exc))}[/red]")
         raise typer.Exit(1) from exc
@@ -548,10 +553,15 @@ def talk(
         console.print(f"[red]{escape(str(exc))}[/red]")
         raise typer.Exit(1) from exc
 
+    _prewarm(stt, tts)
+
     def make_player():
         return Player(tts, sample_rate=tts.SAMPLE_RATE)
 
     vad = _build_vad(config, console)
+    # One microphone for the session: the recorder and the barge-in monitor
+    # share it instead of opening (and contending for) the device per turn.
+    source = AudioSource() if vad is not None else None
     if vad is not None:
         def record(prefix=None):
             return record_until_silence(
@@ -561,6 +571,7 @@ def talk(
                 max_utterance_seconds=config.voice.vad.max_utterance_seconds,
                 wait_for_speech_seconds=config.voice.vad.wait_for_speech_seconds,
                 prefix=prefix,
+                source=source,
             )
     else:
         def record(prefix=None):
@@ -592,10 +603,31 @@ def talk(
             history=_build_history(config),
             vad=vad,
             barge_in=barge_in,
+            source=source,
         ).run()
     finally:
+        if source is not None:
+            source.close()
         # We're exiting; a further Ctrl+C would only corrupt teardown output.
         _ignore_further_interrupts()
+
+
+def _prewarm(*engines) -> None:
+    """Pay each engine's cold-start cost before the loop starts.
+
+    Kokoro's first synthesis measured 1383 ms against ~830 ms warm for the same
+    sentence; CTranslate2 does comparable first-run setup. Paid here it is
+    invisible next to the model loads that already happen; paid lazily it lands
+    in the middle of the user's first turn, where it reads as a hang.
+
+    Best-effort by definition: a warmup that fails costs nothing but the
+    speed-up, so it must never keep `nero talk` from starting.
+    """
+    for engine in engines:
+        try:
+            engine.warmup()
+        except Exception:  # noqa: BLE001 — an optimization is never a prerequisite
+            logger.debug("warmup failed for %s", type(engine).__name__, exc_info=True)
 
 
 def _build_history(config: NeroConfig) -> HistoryStore | None:

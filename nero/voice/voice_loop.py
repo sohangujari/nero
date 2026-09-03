@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sys  # DEBUG(hang)
-import threading  # DEBUG(hang)
-import time  # DEBUG(hang)
-import traceback  # DEBUG(hang)
+import sys
+import threading
+import time
+import traceback
 from collections.abc import Callable
 
 import httpx
@@ -22,6 +22,7 @@ from nero.voice.errors import (
     TTSLoadError,
 )
 from nero.voice.sentence_buffer import SentenceBuffer
+from nero.spinner import Spinner
 
 logger = logging.getLogger("nero.voice")
 
@@ -52,6 +53,38 @@ def _debug_dump_interrupt(where: str) -> None:
     print("--- end thread stacks ---", file=sys.stderr)
 
 
+class TurnTimer:
+    """Per-turn latency trace, emitted as one line under `--debug`.
+
+    Replaces a scatter of ad-hoc STAGE log lines left over from a hang hunt.
+    The individual numbers say very little on their own — what diagnoses a slow
+    turn is seeing them beside each other, so they are collected and printed
+    once, at the end of the turn:
+
+        voice turn: stt=0.67 ttft=0.42 speech=0.91 done=5.18 (4 sentences)
+
+    `stt` is transcription, `ttft` the model's first token, `speech` the first
+    sentence reaching the TTS queue — the moment the user stops waiting in
+    silence — and `done` the end of playback. All offsets are seconds from the
+    end of recording.
+    """
+
+    def __init__(self):
+        self._start = time.monotonic()
+        self._marks: dict[str, float] = {}
+
+    def mark(self, name: str) -> None:
+        """Record the first time `name` happened. Later calls are ignored."""
+        self._marks.setdefault(name, time.monotonic() - self._start)
+
+    def log(self, sentences: int) -> None:
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+        self.mark("done")
+        trace = " ".join(f"{name}={at:.2f}" for name, at in self._marks.items())
+        logger.debug("voice turn: %s (%d sentences)", trace, sentences)
+
+
 class VoiceLoop:
     """Voice REPL: record → transcribe → chat (reusing LLMClient + tools) → speak."""
 
@@ -70,6 +103,7 @@ class VoiceLoop:
         history=None,
         vad=None,
         barge_in: bool = False,
+        source=None,
     ):
         self.client = client
         self.stt = stt
@@ -84,6 +118,9 @@ class VoiceLoop:
         self.messages: list[dict] = history.recent() if history else []
         self.vad = vad
         self.barge_in = barge_in
+        # The session's shared microphone, so the barge-in monitor reads the
+        # same open stream the recorder does instead of grabbing its own.
+        self.source = source
         self._pending_prefix = None
         self._barge_in_broken = False
         self._hinted = False
@@ -118,15 +155,9 @@ class VoiceLoop:
                 )
                 return
 
-            logger.debug("STAGE 1a: recording stopped, starting transcription")  # DEBUG(hang)
-            _t_stt = time.monotonic()  # DEBUG(hang)
+            timer = TurnTimer()
             transcript = asyncio.run(self.stt.transcribe(audio, self.sample_rate)).strip()
-            # DEBUG(hang) STAGE 1: transcription complete
-            logger.debug(
-                "STAGE 1: transcription done in %.2fs -> %r",
-                time.monotonic() - _t_stt,
-                transcript,
-            )
+            timer.mark("stt")
             if not transcript:
                 if prefix is not None and audio.size == 0:
                     # The barge-in handoff came back empty: nothing followed
@@ -145,21 +176,18 @@ class VoiceLoop:
                 self._goodbye()
                 return
 
-            if not self._handle_turn(transcript):
+            if not self._handle_turn(transcript, timer):
                 return
             if self.once:
                 return
 
-    def _handle_turn(self, transcript: str) -> bool:
+    def _handle_turn(self, transcript: str, timer: TurnTimer | None = None) -> bool:
         """Run one chat turn; speak the reply. Returns False if the loop should end."""
+        timer = timer or TurnTimer()
         turn_start = len(self.messages)
         self.messages.append({"role": "user", "content": transcript})
         buffer = SentenceBuffer()
-        # DEBUG(hang) STAGE 1b: this used to build the TTS engine (and download
-        # ~300 MB) on the first turn — the gap between "heard:" and STAGE 2.
-        logger.debug("STAGE 1b: building player (TTS engine should already be loaded)")
         player = self.make_player()
-        logger.debug("STAGE 1c: player built, starting playback thread")  # DEBUG(hang)
         player.start()
 
         barge_event = threading.Event()
@@ -169,32 +197,24 @@ class VoiceLoop:
         monitor = None
         prefix_holder: list = []
 
-        _t_turn = time.monotonic()  # DEBUG(hang)
-        _seen = {"first_chunk": False, "sentences": 0}  # DEBUG(hang)
+        spoken_count = [0]
 
         def tap(chunk: str) -> None:
             if barge_event.is_set():
                 raise BargeIn
-            if not _seen["first_chunk"]:  # DEBUG(hang) STAGE 3: first LLM chunk
-                _seen["first_chunk"] = True
-                logger.debug(
-                    "STAGE 3: first LLM chunk after %.2fs %r",
-                    time.monotonic() - _t_turn,
-                    chunk,
-                )
+            spinner.stop()
+            timer.mark("ttft")
             print(chunk, end="", flush=True, file=self.console.file)
             for sentence in buffer.feed(chunk):
-                # DEBUG(hang) STAGE 4: complete sentence flushed to TTS
-                _seen["sentences"] += 1
-                logger.debug(
-                    "STAGE 4: sentence #%d -> TTS queue at %.2fs %r",
-                    _seen["sentences"],
-                    time.monotonic() - _t_turn,
-                    sentence,
-                )
+                timer.mark("speech")
+                spoken_count[0] += 1
                 player.enqueue(sentence)
 
         self.console.print(f"[bold magenta]{self.assistant_name}>[/bold magenta] ", end="")
+        # A slow provider is worse here than in text chat: nothing prints AND
+        # nothing speaks, so the turn is indistinguishable from a hung one.
+        spinner = Spinner(self.console.file)
+        spinner.start()
         try:
 
             def on_barge_in(prefix):
@@ -215,32 +235,22 @@ class VoiceLoop:
 
             if self.barge_in and self.vad is not None and not self._barge_in_broken:
                 monitor = listen_for_barge_in(
-                    self.vad, on_barge_in, stop_monitor, on_error=on_monitor_error
+                    self.vad,
+                    on_barge_in,
+                    stop_monitor,
+                    on_error=on_monitor_error,
+                    source=self.source,
                 )
 
-            # DEBUG(hang) STAGE 2: about to hand the transcript to the LLM
-            logger.debug(
-                "STAGE 2: sending to LLM (provider=%s, %d messages)",
-                getattr(self.client, "provider", "?"),
-                len(self.messages),
-            )
             self.client.send(self.messages, on_text=tap)
-            logger.debug(  # DEBUG(hang)
-                "STAGE 4b: LLM stream finished at %.2fs (%d sentences queued)",
-                time.monotonic() - _t_turn,
-                _seen["sentences"],
-            )
             tail = buffer.flush()
             if tail:
-                logger.debug("STAGE 4c: tail -> TTS queue %r", tail)  # DEBUG(hang)
+                timer.mark("speech")
+                spoken_count[0] += 1
                 player.enqueue(tail)
             player.close()
-            logger.debug("STAGE 7a: waiting for playback thread to drain")  # DEBUG(hang)
             player.join()
-            logger.debug(  # DEBUG(hang)
-                "STAGE 7b: turn complete, playback drained at %.2fs",
-                time.monotonic() - _t_turn,
-            )
+            timer.log(spoken_count[0])
             if barge_event.is_set():
                 raise BargeIn
             self.console.print()
@@ -302,12 +312,25 @@ class VoiceLoop:
             del self.messages[turn_start:]
             self.console.print(f"\n[red]{escape(str(exc))}[/red]")
             return True
+        except litellm.exceptions.RateLimitError:
+            # A free-tier quota (Gemini allows 5 requests/minute) arrives
+            # mid-stream, where LiteLLM wraps it in a ServiceUnavailableError
+            # subclass -- so before nero.llm.client unwrapped it this printed
+            # "could not reach the model provider", which sent users to debug a
+            # working network. The provider answered; it just said no.
+            del self.messages[turn_start:]
+            self.console.print(
+                "\n[yellow]The provider is rate-limiting you.[/yellow] Wait a "
+                "moment and try again, or switch models with [bold]nero config[/bold]."
+            )
+            return True
         except (
             litellm.exceptions.APIConnectionError,
             litellm.exceptions.ServiceUnavailableError,
             litellm.exceptions.Timeout,
             httpx.HTTPError,
         ):
+            logger.debug("provider unreachable", exc_info=True)
             del self.messages[turn_start:]
             hint = (
                 " If you're using Ollama, make sure it's running ([bold]ollama serve[/bold])."
@@ -324,10 +347,12 @@ class VoiceLoop:
             )
             return False
         except Exception as exc:  # noqa: BLE001 — the loop must never crash on a turn
+            logger.debug("voice turn failed", exc_info=True)
             del self.messages[turn_start:]
             self.console.print(f"\n[red]Something went wrong with that turn:[/red] {exc}")
             return True
         finally:
+            spinner.stop()
             stop_monitor.set()
             if monitor is not None:
                 monitor.join(timeout=2)

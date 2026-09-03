@@ -25,6 +25,9 @@ class TTSEngine(ABC):
     async def synthesize_stream(self, text_stream: AsyncIterator[str]) -> AsyncIterator:
         """Yield an audio chunk per sentence as each becomes ready."""
 
+    def warmup(self) -> None:
+        """Optional: pay a cold-start cost now rather than on the first turn."""
+
 
 class KokoroTTS(TTSEngine):
     """Kokoro TTS via kokoro-onnx (onnxruntime, no PyTorch — bundle-friendly).
@@ -66,6 +69,15 @@ class KokoroTTS(TTSEngine):
                 sentence, voice=self._voice, speed=1.0, lang="en-us"
             )
             yield samples
+
+    def warmup(self) -> None:
+        """Synthesize one throwaway character.
+
+        Kokoro's first call measured 1383 ms against ~830 ms warm for the same
+        five-word sentence — a cold start the user would otherwise pay while
+        waiting for Nero's very first word.
+        """
+        self._model.create("a", voice=self._voice, speed=1.0, lang="en-us")
 
 
 class ChatterboxTTS(TTSEngine):

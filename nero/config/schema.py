@@ -102,6 +102,10 @@ class STTConfig(BaseModel):
 
     engine: Literal["faster-whisper"] = "faster-whisper"
     model: str = "base"
+    # Pinned rather than auto-detected: detection measured ~500 ms per turn,
+    # and Nero only speaks English back (Kokoro's voices are all en). Set to
+    # null to restore per-utterance auto-detection.
+    language: str | None = "en"
 
 
 class TTSConfig(BaseModel):
@@ -165,8 +169,12 @@ class MemoryConfig(BaseModel):
     notes_dir: str | None = None
     notes_max_bytes: int = Field(default=2_000_000, gt=0)  # per-file guard
     # Messages beyond this trigger session compaction (see chat_loop.py). 0
-    # disables compaction entirely.
-    compact_after_messages: int = Field(default=40, ge=0)
+    # disables compaction entirely. Must clear max_history_turns * 2 (the
+    # restored window's message count) with room to spare: at 40 it fired on
+    # the *first* turn of every session, spending a full extra LLM round-trip
+    # summarizing a window the history store had already capped. 60 leaves ten
+    # live exchanges of headroom.
+    compact_after_messages: int = Field(default=60, ge=0)
 
 
 class SkillToggles(BaseModel):

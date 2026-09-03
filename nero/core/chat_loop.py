@@ -13,6 +13,7 @@ from rich.markup import escape
 
 from nero.llm.ollama_adapter import OllamaModelError
 from nero.llm.routing import SessionStats, order_chain
+from nero.spinner import Spinner
 
 logger = logging.getLogger("nero.chat")
 
@@ -214,6 +215,8 @@ class ChatLoop:
         self.quality_rank = quality_rank or []
         self.health_check = health_check
         self.stats = SessionStats()
+        # Set by _prefix() and stopped by _print_chunk() or the turn's finally.
+        self._spinner: Spinner | None = None
         # Keys available for the PRIMARY provider only; rotation never
         # touches a /code-routed client. Slot 0 is whatever `client` already
         # holds, so rotation always advances from there.
@@ -296,7 +299,7 @@ class ChatLoop:
             # only ever touches a prefix of self.messages), so this is valid
             # whether or not compaction actually fired this turn.
             turn_start = len(self.messages) - 1
-            self.console.print(f"[bold magenta]{self.assistant_name}>[/bold magenta] ", end="")
+            self._prefix()
             try:
                 try:
                     started = time.monotonic()
@@ -316,9 +319,7 @@ class ChatLoop:
                             f"{primary_client.model} via {primary_client.provider} "
                             "with another key.[/yellow]"
                         )
-                        self.console.print(
-                            f"[bold magenta]{self.assistant_name}>[/bold magenta] ", end=""
-                        )
+                        self._prefix()
                         started = time.monotonic()
                         primary_client.send(self.messages, on_text=self._print_chunk)
                     provider_key, model_key = _client_key(primary_client)
@@ -344,9 +345,7 @@ class ChatLoop:
                             f"{fallback_client.model} via "
                             f"{fallback_client.provider}.[/yellow]"
                         )
-                        self.console.print(
-                            f"[bold magenta]{self.assistant_name}>[/bold magenta] ", end=""
-                        )
+                        self._prefix()
                         try:
                             started = time.monotonic()
                             fallback_client.send(self.messages, on_text=self._print_chunk)
@@ -402,12 +401,22 @@ class ChatLoop:
                     f"\n[red]The provider has no model called [bold]{model}[/bold].[/red] "
                     "Check the model name in [bold]nero config[/bold]."
                 )
+            except litellm.exceptions.RateLimitError:
+                # Reached only once rotation and the fallback chain are spent.
+                # Distinct from the connection branch below on purpose: the
+                # provider answered, so "check your connection" is wrong advice.
+                del self.messages[turn_start:]
+                self.console.print(
+                    "\n[yellow]The provider is rate-limiting you.[/yellow] Wait a "
+                    "moment and try again, or switch models with [bold]nero config[/bold]."
+                )
             except (
                 litellm.exceptions.APIConnectionError,
                 litellm.exceptions.ServiceUnavailableError,
                 litellm.exceptions.Timeout,
                 httpx.HTTPError,  # direct-Ollama path talks httpx, not litellm
             ):
+                logger.debug("provider unreachable", exc_info=True)
                 del self.messages[turn_start:]
                 provider = getattr(primary_client, "provider", None)
                 api_base = getattr(primary_client, "api_base", None)
@@ -419,14 +428,30 @@ class ChatLoop:
                     hint = " Check your connection and try again."
                 self.console.print(f"\n[red]Could not reach the model provider.[/red]{hint}")
             except Exception as exc:  # noqa: BLE001 — the REPL must never crash on a turn
+                logger.debug("turn failed", exc_info=True)
                 del self.messages[turn_start:]
                 self.console.print(
                     f"\n[red]Something went wrong with that turn:[/red] {exc}\n"
                     "You can retry, or type exit to quit."
                 )
+            finally:
+                # Every branch above is reached without a single chunk having
+                # arrived, so _print_chunk never got to stop the thread.
+                if self._spinner is not None:
+                    self._spinner.stop()
+                    self._spinner = None
 
     def _maybe_compact(self) -> None:
-        result = compact_messages(self.messages, self.client, self.compact_after_messages)
+        # Compaction is a full LLM round-trip of its own, run before the reply
+        # prefix is even printed -- the silent half of a slow first turn.
+        # Started unconditionally: compact_messages returns immediately when it
+        # is under threshold, and the spinner draws nothing in its first 100 ms.
+        spinner = Spinner(self.console.file)
+        spinner.start()
+        try:
+            result = compact_messages(self.messages, self.client, self.compact_after_messages)
+        finally:
+            spinner.stop()
         if result is None:
             return
         self.messages, dropped = result
@@ -534,7 +559,15 @@ class ChatLoop:
         ]
         return healthy or ordered_clients
 
+    def _prefix(self) -> None:
+        """Print the assistant prompt and spin until the first token lands."""
+        self.console.print(f"[bold magenta]{self.assistant_name}>[/bold magenta] ", end="")
+        self._spinner = Spinner(self.console.file)
+        self._spinner.start()
+
     def _print_chunk(self, text: str) -> None:
+        if self._spinner is not None:
+            self._spinner.stop()
         # Raw print, not console.print: streamed chunks must not be markup-parsed
         # or line-wrapped mid-token.
         print(text, end="", flush=True, file=self.console.file)
