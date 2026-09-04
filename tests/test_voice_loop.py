@@ -6,6 +6,16 @@ from nero.voice.errors import MicPermissionError, TTSLoadError
 from nero.voice.voice_loop import VoiceLoop
 
 
+def speech():
+    """Stand-in for a recording that actually has something in it.
+
+    The loop reads the buffer now -- an empty one is how hands-free mode
+    recognises an idle room -- so a double that returns a bare object() would
+    be asserting against a shape production never sees.
+    """
+    return np.ones(1600, dtype=np.float32)
+
+
 class FakeSTT:
     def __init__(self, transcripts):
         self._transcripts = list(transcripts)
@@ -73,7 +83,7 @@ def make_loop(transcripts, chunks, once=False, record=None):
     return VoiceLoop(
         client=FakeClient(chunks),
         stt=FakeSTT(transcripts),
-        record=record or (lambda prefix=None: object()),
+        record=record or (lambda prefix=None: speech()),
         make_player=FakePlayer,
         console=Console(),
         assistant_name="Nero",
@@ -237,7 +247,7 @@ def test_aborted_turn_still_shuts_player_down():
     inputs = iter([""] * 5)
     loop = VoiceLoop(
         client=InterruptingClient(), stt=FakeSTT(["hello"]),
-        record=lambda prefix=None: object(), make_player=FakePlayer,
+        record=lambda prefix=None: speech(), make_player=FakePlayer,
         console=Console(), assistant_name="Nero",
         input_fn=lambda *_a: next(inputs), once=True,
     )
@@ -269,7 +279,7 @@ def _run_failing_voice_turn(error):
     inputs = iter([""] * 5)
     VoiceLoop(
         client=FailingClient(), stt=FakeSTT(["hello"]),
-        record=lambda prefix=None: object(), make_player=FakePlayer,
+        record=lambda prefix=None: speech(), make_player=FakePlayer,
         console=console, assistant_name="Nero",
         input_fn=lambda *_a: next(inputs), once=True,
     ).run()
@@ -323,7 +333,7 @@ class FakeHistory:
 def _history_loop(transcripts, reply, history):
     return VoiceLoop(
         client=AppendingClient(reply), stt=FakeSTT(transcripts),
-        record=lambda prefix=None: object(), make_player=FakePlayer,
+        record=lambda prefix=None: speech(), make_player=FakePlayer,
         console=Console(), assistant_name="Nero",
         input_fn=lambda *_a: "", once=True, history=history,
     )
@@ -359,7 +369,7 @@ def test_voice_max_rounds_fallthrough_not_appended():
     hist = FakeHistory()
     loop = VoiceLoop(
         client=MaxRoundsClient(), stt=FakeSTT(["Hello."]),
-        record=lambda prefix=None: object(), make_player=FakePlayer,
+        record=lambda prefix=None: speech(), make_player=FakePlayer,
         console=Console(), assistant_name="Nero",
         input_fn=lambda *_a: "", once=True, history=hist,
     )
@@ -405,7 +415,7 @@ def make_loop_with_barge_in(
 
     def record(prefix=None):
         recorded_prefixes.append(prefix)
-        return object()
+        return speech()
 
     def make_player():
         player = FakePlayer()
@@ -498,20 +508,18 @@ class TestBargeIn:
         out = capsys.readouterr().out
         assert out.count("voice.barge_in") == 1
 
-    def test_prompt_is_skipped_when_a_barge_in_prefix_is_pending(self, monkeypatch):
-        """Rule 3: barge-in hands off directly into recording. The turn that
-        begins with a pending prefix must not show "Press Enter to start
-        speaking" again -- that would throw away the words that triggered the
-        barge-in."""
+    def test_hands_free_never_waits_on_a_keypress_between_turns(self, monkeypatch):
+        """Rule 3, generalised: a barge-in hands off straight into recording,
+        and so does an ordinary reply. With a VAD present nothing waits on a
+        key unless the session actually fell asleep. (That the prefix itself
+        survives the handoff is
+        test_prefix_audio_is_carried_into_the_next_recording.)"""
         loop, _history = make_loop_with_barge_in(monkeypatch, spoken="One.", prefix_value=0.7)
         prompts = []
         real_input_fn = loop.input_fn
         loop.input_fn = lambda *a: (prompts.append(a), real_input_fn(*a))[-1]
         loop.run()
-        # One barge-in turn, then the following "stop" turn: two iterations of
-        # the loop, but the prompt is only ever needed once -- the second
-        # iteration begins with a pending prefix and must skip it.
-        assert len(prompts) == 1
+        assert prompts == []
 
 
 def test_barge_in_monitor_gets_the_sessions_microphone(monkeypatch):
@@ -540,3 +548,89 @@ class TestTurnTimer:
         with caplog.at_level("INFO", logger="nero.voice"):
             loop.run()
         assert "voice turn:" not in caplog.text
+
+
+# --- Hands-free: reply, listen again, sleep when the room goes quiet ---
+class TestHandsFree:
+    """`nero talk` re-arms itself after every reply. The Enter prompt that used
+    to separate turns is gone, so the only thing that stops an unattended
+    session holding the microphone open forever is the idle timeout."""
+
+    @staticmethod
+    def _loop(recordings, transcripts, chunks=("Sure.",)):
+        recorded = iter(recordings)
+        return VoiceLoop(
+            client=FakeClient(list(chunks)),
+            stt=FakeSTT(list(transcripts)),
+            record=lambda prefix=None: next(recorded),
+            make_player=FakePlayer,
+            console=Console(),
+            assistant_name="Nero",
+            input_fn=lambda *_a: "",
+            vad=object(),
+        )
+
+    def test_a_reply_flows_straight_back_into_listening(self, capsys):
+        """Two spoken turns, no keypress between them."""
+        prompts = []
+        loop = self._loop([speech(), speech()], ["what's the weather", "stop"])
+        loop.input_fn = lambda *a: (prompts.append(a), "")[-1]
+        loop.run()
+        assert prompts == []
+        assert "signing off" in capsys.readouterr().out
+
+    def test_silence_puts_the_session_to_sleep(self, capsys):
+        """An empty recording means record() waited out the whole speech window."""
+        loop = self._loop([np.zeros(0, dtype=np.float32), speech()], ["stop"])
+        woke = []
+        loop.input_fn = lambda *a: (woke.append(a), "")[-1]
+        loop.run()
+        assert woke, "an idle session must wait to be woken"
+        assert "Press Enter" in woke[0][0]
+        assert "Asleep" in capsys.readouterr().out
+
+    def test_the_microphone_is_released_while_asleep(self):
+        class FakeSource:
+            closed = 0
+
+            def close(self):
+                FakeSource.closed += 1
+
+        loop = self._loop([np.zeros(0, dtype=np.float32), speech()], ["stop"])
+        loop.source = FakeSource()
+        loop.run()
+        assert FakeSource.closed == 1
+
+    def test_enter_wakes_it_back_up(self):
+        """After waking, the next recording is transcribed and answered."""
+        loop = self._loop(
+            [np.zeros(0, dtype=np.float32), speech(), speech()],
+            ["what's the weather", "stop"],
+        )
+        FakePlayer.instances.clear()
+        loop.run()
+        spoken = [s for player in FakePlayer.instances for s in player.sentences]
+        assert spoken == ["Sure."], "the turn after waking must be answered and spoken"
+
+    def test_a_spurious_barge_in_resumes_listening_instead_of_sleeping(self, capsys):
+        """An empty recording carrying a prefix is Nero hearing itself, not an
+        empty room -- sleeping there would strand a session mid-conversation."""
+        loop = self._loop([np.zeros(0, dtype=np.float32), speech()], ["stop"])
+        loop._pending_prefix = np.ones(160, dtype=np.float32)
+        woke = []
+        loop.input_fn = lambda *a: (woke.append(a), "")[-1]
+        loop.run()
+        assert woke == []
+        assert "Asleep" not in capsys.readouterr().out
+
+    def test_press_to_talk_still_prompts_every_turn(self):
+        """Without a VAD there is no endpointing and no idle timeout, so the
+        press-to-talk path keeps the prompt it always had."""
+        prompts = []
+        loop = self._loop([speech(), speech()], ["hello", "stop"])
+        loop._hands_free = False
+        loop._awake = False
+        loop.input_fn = lambda *a: (prompts.append(a), "")[-1]
+        loop.run()
+        assert len(prompts) == 2
+        assert "Press Enter" in prompts[0][0]

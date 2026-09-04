@@ -18,6 +18,31 @@ VOICE_CATALOG: list[tuple[str, str, str]] = [
 ]
 
 
+# Kokoro pads every chunk with silence -- measured 22-41 ms of lead and
+# 57-152 ms of tail. Between two sentences that is a natural breath, but a
+# reply is cut at a clause boundary too (see sentence_buffer.FIRST_MAX_LEN), and
+# there the padding lands mid-sentence: ~190 ms of dead air right after a comma,
+# on every reply, which is what "it pauses too long at commas" describes.
+_SILENCE = 0.005  # amplitude below which a sample counts as silence
+
+
+def trim_silence(samples, keep_tail: bool):
+    """Drop a chunk's padding. `keep_tail` leaves the trailing silence intact --
+    that is the pause between two sentences, and speech without it sounds
+    rushed. Mid-sentence chunks trim both ends so the clause flows on."""
+    import numpy as np
+
+    data = np.asarray(samples, dtype=np.float32).reshape(-1)
+    loud = np.flatnonzero(np.abs(data) > _SILENCE)
+    if loud.size == 0:
+        return data[:0]
+    return data[loud[0] : (data.size if keep_tail else loud[-1] + 1)]
+
+
+def _ends_a_sentence(text: str) -> bool:
+    return text.rstrip().endswith((".", "!", "?", '."', ".'", '!"', '?"'))
+
+
 class TTSEngine(ABC):
     SAMPLE_RATE: int = 24000
 
@@ -68,7 +93,7 @@ class KokoroTTS(TTSEngine):
             samples, _sample_rate = self._model.create(
                 sentence, voice=self._voice, speed=1.0, lang="en-us"
             )
-            yield samples
+            yield trim_silence(samples, keep_tail=_ends_a_sentence(sentence))
 
     def warmup(self) -> None:
         """Synthesize one throwaway character.

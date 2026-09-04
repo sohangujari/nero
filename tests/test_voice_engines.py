@@ -57,18 +57,34 @@ def test_is_sttengine():
 
 
 # --- Task 8: TTS (kokoro-onnx) ---
-from nero.voice.tts import VOICE_CATALOG, KokoroTTS, TTSEngine, build_tts
+from nero.voice.tts import (
+    VOICE_CATALOG,
+    KokoroTTS,
+    TTSEngine,
+    build_tts,
+    trim_silence,
+)
 
 
 class FakeKokoro:
-    """Mimics kokoro_onnx.Kokoro: .create(text, voice=...) -> (samples, sample_rate)."""
+    """Mimics kokoro_onnx.Kokoro: .create(text, voice=...) -> (samples, sample_rate).
+
+    Real samples, not a sentinel string: synthesize_stream trims each chunk's
+    padding now, so a double that hands back something unarray-like would be
+    asserting against a shape Kokoro never produces. Every chunk is padded with
+    silence at both ends, exactly as Kokoro's are.
+    """
+
+    PAD = 240  # 10 ms at 24 kHz
 
     def __init__(self):
         self.calls = []
 
     def create(self, text, voice=None, speed=1.0, lang="en-us"):
         self.calls.append((text, voice, speed, lang))
-        return f"AUDIO[{voice}:{text}]", 24000
+        body = np.full(len(text) * 10, 0.5, dtype=np.float32)
+        pad = np.zeros(self.PAD, dtype=np.float32)
+        return np.concatenate([pad, body, pad]), 24000
 
 
 async def _drain(engine, sentences):
@@ -83,11 +99,46 @@ def test_kokoro_synthesizes_each_sentence_with_voice():
     model = FakeKokoro()
     tts = KokoroTTS(voice_id="am_michael", _model=model)
     out = asyncio.run(_drain(tts, ["Hello.", "Bye."]))
-    assert out == ["AUDIO[am_michael:Hello.]", "AUDIO[am_michael:Bye.]"]
-    assert [(t, v) for t, v, _s, _l in model.calls] == [
-        ("Hello.", "am_michael"),
-        ("Bye.", "am_michael"),
-    ]
+    assert [len(chunk) for chunk in out] == [len("Hello.") * 10 + FakeKokoro.PAD,
+                                             len("Bye.") * 10 + FakeKokoro.PAD]
+    assert [call[0] for call in model.calls] == ["Hello.", "Bye."]
+    assert {call[1] for call in model.calls} == {"am_michael"}
+
+
+class TestTrimSilence:
+    """Kokoro pads every chunk. Between sentences that padding is a breath;
+    inside one, it is the ~190 ms stall people hear after a comma."""
+
+    @staticmethod
+    def _padded():
+        return np.concatenate([
+            np.zeros(240, dtype=np.float32),
+            np.full(1000, 0.5, dtype=np.float32),
+            np.zeros(480, dtype=np.float32),
+        ])
+
+    def test_a_sentence_keeps_its_trailing_pause(self):
+        assert len(trim_silence(self._padded(), keep_tail=True)) == 1000 + 480
+
+    def test_a_mid_sentence_chunk_trims_both_ends(self):
+        assert len(trim_silence(self._padded(), keep_tail=False)) == 1000
+
+    def test_the_lead_in_always_goes(self):
+        """The previous chunk's own tail already supplies the gap."""
+        for keep_tail in (True, False):
+            assert trim_silence(self._padded(), keep_tail=keep_tail)[0] == 0.5
+
+    def test_a_silent_chunk_survives_as_empty(self):
+        assert len(trim_silence(np.zeros(500, dtype=np.float32), keep_tail=True)) == 0
+
+    def test_a_clause_cut_is_treated_as_mid_sentence(self):
+        """This is the case that matters: the first segment of a reply is cut
+        at a comma, so its padding lands inside a sentence."""
+        model = FakeKokoro()
+        tts = KokoroTTS(voice_id="af_bella", _model=model)
+        clause, sentence = asyncio.run(_drain(tts, ["Sure thing,", "here it is."]))
+        assert len(clause) == len("Sure thing,") * 10          # both ends trimmed
+        assert len(sentence) == len("here it is.") * 10 + FakeKokoro.PAD
 
 
 def test_kokoro_is_ttsengine_with_sample_rate():
@@ -191,3 +242,43 @@ def test_prewarm_never_lets_a_failure_stop_startup():
             raise RuntimeError("no model")
 
     cli._prewarm(Exploding(), object())  # object() has no warmup at all
+
+
+class TestNoSpeechFilter:
+    """Hands-free listening feeds whisper every noise the VAD mistook for
+    speech, and whisper answers those with a fluent hallucination rather than
+    an empty string. Measured against the real model: room tone and a thump
+    decode to 'You' at p=0.65-0.73, real speech at p=0.018."""
+
+    class FakeSegment:
+        def __init__(self, text, no_speech_prob):
+            self.text = text
+            self.no_speech_prob = no_speech_prob
+
+    class FakeModel:
+        def __init__(self, segments):
+            self._segments = segments
+
+        def transcribe(self, audio, language=None):
+            return iter(self._segments), None
+
+    def _transcribe(self, segments):
+        stt = FasterWhisperSTT(_model=self.FakeModel(segments))
+        return asyncio.run(stt.transcribe(np.zeros(16000, dtype=np.float32), 16000))
+
+    def test_a_hallucination_on_noise_is_dropped(self):
+        assert self._transcribe([self.FakeSegment(" You", 0.727)]) == ""
+
+    def test_real_speech_is_kept(self):
+        assert self._transcribe([self.FakeSegment(" Hello there.", 0.018)]) == "Hello there."
+
+    def test_only_the_noise_segment_is_dropped(self):
+        assert self._transcribe([
+            self.FakeSegment(" Turn on the lights.", 0.02),
+            self.FakeSegment(" Thanks for watching!", 0.91),
+        ]) == "Turn on the lights."
+
+    def test_a_segment_without_the_field_is_kept(self):
+        """Not every engine reports one; absence must not silence a transcript."""
+        segment = types.SimpleNamespace(text=" Hello.")
+        assert self._transcribe([segment]) == "Hello."

@@ -124,6 +124,16 @@ class VoiceLoop:
         self._pending_prefix = None
         self._barge_in_broken = False
         self._hinted = False
+        # Hands-free needs somewhere to stand still. Awake means the mic is
+        # open and every reply flows straight back into listening; asleep means
+        # the device is released until a keypress.
+        #
+        # Only endpointing makes that safe: without a VAD nothing can tell when
+        # the user stopped talking, so the no-VAD path keeps its press-to-talk
+        # prompt before every turn and never sleeps. Hands-free sessions start
+        # awake -- the user just typed `nero talk`, so they are ready to speak.
+        self._hands_free = vad is not None
+        self._awake = self._hands_free
 
     def run(self) -> None:
         self.console.print(
@@ -131,13 +141,8 @@ class VoiceLoop:
             "Say [dim]stop[/dim] or press Ctrl+C to leave.\n"
         )
         while True:
-            if self._pending_prefix is None:
-                try:
-                    self.input_fn("🎙️  Press Enter to start speaking... ")
-                except (KeyboardInterrupt, EOFError) as exc:
-                    if isinstance(exc, KeyboardInterrupt):
-                        _debug_dump_interrupt("interrupted at the prompt")
-                    self._goodbye()
+            if self._pending_prefix is None and not self._awake:
+                if not self._wake():
                     return
             try:
                 prefix, self._pending_prefix = self._pending_prefix, None
@@ -154,6 +159,16 @@ class VoiceLoop:
                     "Check that an input device is connected and accessible."
                 )
                 return
+
+            if self._hands_free and prefix is None and audio.size == 0:
+                # record() waited out the whole speech window without hearing
+                # anything. Hands-free, that is the idle case, not a failure --
+                # an open mic and a spinning VAD are not what an empty room
+                # needs. The barge-in handoff (prefix set) is excluded: an empty
+                # result there means Nero heard itself, and the session should
+                # go straight back to listening rather than fall asleep.
+                self._sleep()
+                continue
 
             timer = TurnTimer()
             transcript = asyncio.run(self.stt.transcribe(audio, self.sample_rate)).strip()
@@ -180,6 +195,8 @@ class VoiceLoop:
                 return
             if self.once:
                 return
+            if not self._hands_free:
+                self._awake = False
 
     def _handle_turn(self, transcript: str, timer: TurnTimer | None = None) -> bool:
         """Run one chat turn; speak the reply. Returns False if the loop should end."""
@@ -362,6 +379,41 @@ class VoiceLoop:
             # success path's close()/join() never ran, which would leave the
             # playback thread parked on the queue and hang interpreter shutdown.
             player.shutdown()
+
+    def _sleep(self) -> None:
+        """Release the microphone and wait to be woken.
+
+        Without an Enter prompt to pause at, an unattended session would hold
+        the device open and burn a VAD inference every 32 ms forever.
+        """
+        self._awake = False
+        if self.source is not None:
+            self.source.close()
+        self.console.print(
+            "\n[dim]💤 Asleep — press Enter to wake me, or Ctrl+C to leave.[/dim]"
+        )
+
+    def _wake(self) -> bool:
+        """Block until Enter. False means the user asked to leave instead."""
+        try:
+            self.input_fn(
+                "💤 Press Enter to wake me... "
+                if self._hands_free
+                # Press-to-talk, unchanged: a deliberate Enter starts the
+                # recording, and a second one ends it.
+                else "🎙️  Press Enter to start speaking... "
+            )
+        except (KeyboardInterrupt, EOFError) as exc:
+            if isinstance(exc, KeyboardInterrupt):
+                _debug_dump_interrupt(
+                    "interrupted while asleep"
+                    if self._hands_free
+                    else "interrupted at the prompt"
+                )
+            self._goodbye()
+            return False
+        self._awake = True
+        return True
 
     def _hint_once(self) -> None:
         """Explain barge-in the first time it fires, then never again.

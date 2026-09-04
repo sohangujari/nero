@@ -90,10 +90,29 @@ nero talk          # speak; Nero Agent transcribes, answers, and speaks back
 nero talk --once   # a single exchange, then exit
 ```
 
-Press Enter to start speaking — Nero Agent stops recording on its own when you stop
-talking. Talk over Nero Agent while it's replying to interrupt it; it stops, and what
-it managed to say is kept in the conversation so your follow-up still makes
-sense.
+`nero talk` is hands-free. It starts listening immediately, stops recording on
+its own when you stop talking, answers, and then goes straight back to
+listening — there is no key to press between turns. Talk over Nero Agent while
+it's replying to interrupt it; it stops, keeps what it managed to say in the
+conversation, and answers your new question instead, so you can change the
+subject mid-reply.
+
+If nobody speaks for a minute (`voice.vad.wait_for_speech_seconds`) the session
+falls asleep: it releases the microphone and stops running speech detection.
+Press Enter to wake it, or Ctrl+C to leave.
+
+```
+● Listening — I'll stop when you do
+🗣  heard: what's the weather in mumbai
+Nero> It's 31°C and humid right now.
+
+● Listening — I'll stop when you do
+
+💤 Asleep — press Enter to wake me, or Ctrl+C to leave.
+```
+
+With `voice.vad.enabled` set to `false` there is no endpointing, so that mode
+keeps its press-Enter-to-start, press-Enter-to-stop prompt and never sleeps.
 
 Barge-in needs headphones in practice: on built-in speakers, Nero Agent hears its
 own reply through the mic and interrupts itself almost every time, so Nero Agent
@@ -114,8 +133,14 @@ Tuning (all optional):
 | `voice.vad.silence_ms` | `800` | Silence that ends your turn. Raise it if you're cut off mid-thought. |
 | `voice.vad.threshold` | `0.5` | Speech sensitivity. Raise it in a noisy room. |
 | `voice.vad.max_utterance_seconds` | `180` | Hard cap on one recording. |
-| `voice.vad.wait_for_speech_seconds` | `30` | How long Nero Agent waits for you to start. |
+| `voice.vad.wait_for_speech_seconds` | `60` | Silence before a hands-free session sleeps and releases the mic. |
 | `voice.stt.language` | `"en"` | Language pinned for transcription. `null` auto-detects, costing ~0.5s per turn. |
+
+Nero speaks the reply, it doesn't read it out. Markdown is stripped before
+synthesis — `**bold**`, headings, list markers, and links are formatting, and
+pronouncing them costs real time (measured against Kokoro: +2.7 s for one bold
+pair, +4.8 s for a link, because the URL itself gets spoken). Your terminal
+still shows the original text.
 
 What Nero Agent heard is printed before it replies. Say "stop" (or "exit") to leave,
 or press Ctrl+C.

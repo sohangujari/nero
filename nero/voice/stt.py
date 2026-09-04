@@ -17,6 +17,17 @@ STT_MODELS: list[tuple[str, str]] = [
 ]
 
 
+# Hands-free listening hands whisper every noise the VAD mistook for speech --
+# a chair scrape, a door, a cough -- and whisper answers those with a fluent,
+# confident hallucination rather than an empty string ("Be sure to attach them
+# to each other." came out of one second of room tone). Pressing Enter used to
+# gate that; a session that re-arms itself after every reply has no such gate,
+# so the decoder's own no-speech estimate has to be the filter. Matches
+# faster-whisper's own no_speech_threshold default, which it applies only in
+# combination with a log-prob check and so lets these through.
+NO_SPEECH_PROB = 0.6
+
+
 class STTEngine(ABC):
     @abstractmethod
     async def transcribe(self, audio, sample_rate: int) -> str:
@@ -49,7 +60,11 @@ class FasterWhisperSTT(STTEngine):
 
     async def transcribe(self, audio, sample_rate: int) -> str:
         segments, _info = self._model.transcribe(audio, language=self._language)
-        return " ".join(segment.text.strip() for segment in segments).strip()
+        return " ".join(
+            segment.text.strip()
+            for segment in segments
+            if getattr(segment, "no_speech_prob", 0.0) < NO_SPEECH_PROB
+        ).strip()
 
     def warmup(self) -> None:
         """Decode half a second of silence to force CTranslate2's first-run setup."""

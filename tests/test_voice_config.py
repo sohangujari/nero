@@ -230,7 +230,7 @@ class TestVADConfig:
         assert vad.silence_ms == 800
         assert vad.threshold == 0.5
         assert vad.max_utterance_seconds == 180
-        assert vad.wait_for_speech_seconds == 30
+        assert vad.wait_for_speech_seconds == 60
 
     def test_barge_in_defaults_on(self):
         from nero.config.schema import NeroConfig

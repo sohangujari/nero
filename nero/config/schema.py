@@ -130,7 +130,12 @@ class VADConfig(BaseModel):
     # Generous on purpose: dictating a long message is a real use case, not an
     # error. These caps exist to stop a stuck stream, not to police the user.
     max_utterance_seconds: int = Field(default=180, ge=1)
-    wait_for_speech_seconds: int = Field(default=30, ge=1)
+    # Doubles as the hands-free idle timeout: this much silence with nobody
+    # speaking releases the microphone and puts the session to sleep until a
+    # keypress. 30 s was tuned for a press-to-talk turn that a human had just
+    # started deliberately; a session that re-arms itself after every reply
+    # needs longer before it decides the room is empty.
+    wait_for_speech_seconds: int = Field(default=60, ge=1)
 
 
 class VoiceConfig(BaseModel):
