@@ -8,14 +8,15 @@ class TestDefaults:
     def test_memory_defaults(self):
         cfg = NeroConfig()
         assert cfg.memory.enabled is True
-        assert cfg.memory.max_history_turns == 20
+        assert cfg.memory.max_history_turns == 8
         assert cfg.memory.notes_dir is None
         assert cfg.memory.notes_max_bytes == 2_000_000
-        assert cfg.memory.compact_after_messages == 60
+        assert cfg.memory.compact_after_messages == 16
+        assert cfg.memory.semantic_recall is True
 
     def test_roundtrips_through_full_config(self):
         data = NeroConfig().model_dump()
-        assert data["memory"]["max_history_turns"] == 20
+        assert data["memory"]["max_history_turns"] == 8
         assert NeroConfig.model_validate(data).memory.enabled is True
 
 
@@ -38,7 +39,7 @@ class TestValidation:
 
     def test_accepts_zero_and_default_max_history_turns(self):
         assert MemoryConfig.model_validate({"max_history_turns": 0}).max_history_turns == 0
-        assert MemoryConfig.model_validate({"max_history_turns": 20}).max_history_turns == 20
+        assert MemoryConfig.model_validate({"max_history_turns": 8}).max_history_turns == 8
 
     def test_accepts_zero_compact_after_messages(self):
         assert MemoryConfig.model_validate({"compact_after_messages": 0}).compact_after_messages == 0
@@ -63,8 +64,7 @@ class TestSetValue:
 
 
 def test_compaction_threshold_clears_the_restored_history_window():
-    """A session restores max_history_turns * 2 messages. If the threshold sits
-    at or below that, compaction fires on the very first turn of every session —
-    a full extra LLM round-trip before the user's first reply, forever."""
+    """The restored window must fit inside the live window, or a session
+    would open by trimming away most of what it just read off disk."""
     cfg = MemoryConfig()
-    assert cfg.compact_after_messages > cfg.max_history_turns * 2 + 1
+    assert cfg.compact_after_messages >= cfg.max_history_turns * 2

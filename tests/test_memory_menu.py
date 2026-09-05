@@ -73,4 +73,4 @@ class TestInvalidMaxTurnsDoesNotCrash:
         # Row 13, feed -1 (violates ge=0), then finish. Menu must not crash.
         result = runner.invoke(cli.app, ["config"], input="13\n-1\n\n")
         assert result.exit_code == 0
-        assert manager.load().memory.max_history_turns == 20  # unchanged
+        assert manager.load().memory.max_history_turns == 8  # unchanged

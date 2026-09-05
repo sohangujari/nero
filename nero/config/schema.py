@@ -167,19 +167,28 @@ class MemoryConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = True
-    max_history_turns: int = Field(default=20, ge=0)  # counts exchanges (user+assistant pairs)
+    # Exchanges (user+assistant pairs) restored from disk when a session
+    # starts. Matched to compact_after_messages on purpose: restoring more
+    # than the live window holds only to trim it away again is wasted work,
+    # and everything older is retrieved on demand anyway.
+    max_history_turns: int = Field(default=8, ge=0)
     # A directory of the user's own .md/.txt/.markdown files, indexed for
     # search_notes. None means notes search is unconfigured (actionable
     # message, not an error).
     notes_dir: str | None = None
     notes_max_bytes: int = Field(default=2_000_000, gt=0)  # per-file guard
-    # Messages beyond this trigger session compaction (see chat_loop.py). 0
-    # disables compaction entirely. Must clear max_history_turns * 2 (the
-    # restored window's message count) with room to spare: at 40 it fired on
-    # the *first* turn of every session, spending a full extra LLM round-trip
-    # summarizing a window the history store had already capped. 60 leaves ten
-    # live exchanges of headroom.
-    compact_after_messages: int = Field(default=60, ge=0)
+    # The live context window: messages beyond this are trimmed off the front
+    # of what Nero sends (nero/memory/recall.py). Small on purpose — its only
+    # job is to carry the live thread so "it" and "that one" still resolve.
+    # Anything older is *retrieved* when it's relevant rather than re-sent
+    # every turn, which is what makes a long session cost the same as a short
+    # one. 0 disables trimming and sends the whole transcript again.
+    compact_after_messages: int = Field(default=16, ge=0)
+    # Fuse a local embedding model into recall alongside keyword search, when
+    # one is available (see nero/memory/embeddings.py — it needs a running
+    # ollama and numpy, and silently stays off otherwise). Worth about +9
+    # points of recall; costs ~25 ms on the turn and nothing on the network.
+    semantic_recall: bool = True
 
 
 class SkillToggles(BaseModel):

@@ -16,7 +16,7 @@ class TestBuildHistory:
     def test_returns_store_when_enabled(self, isolate_audit_log):
         store = cli._build_history(NeroConfig())
         assert isinstance(store, HistoryStore)
-        assert store.max_turns == 20
+        assert store.max_turns == 8
 
 
 class TestForget:

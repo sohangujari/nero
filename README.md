@@ -188,8 +188,8 @@ you> open Spotify for me
 Nero> Done — Spotify is opening now.
 ```
 
-Type `exit`, `quit`, or press Ctrl+C to leave. Conversation history lives only
-in memory for the current session.
+Type `exit`, `quit`, or press Ctrl+C to leave. Conversation history persists
+across restarts — see [Memory](#memory).
 
 ## Commands
 
@@ -222,6 +222,112 @@ Valid config keys include `assistant.name`, `llm.provider`, `llm.model`,
 the current values. The `hardware.*` block is
 auto-populated by detection. The RAM → local-model table lives in
 `nero/hardware/tiers.py` — edit it as models improve.
+
+## Memory
+
+Every turn re-sends what Nero is given, and a provider spends most of its
+time-to-first-token *prefilling* that prompt. Sending the whole conversation
+means it grows forever and gets slower forever. Sending a fixed window of the
+last N messages is constant, but it pays full price for N messages that are
+usually irrelevant — and still forgets anything older.
+
+Nero does neither. Each turn it sends:
+
+| | what it is | cost |
+| --- | --- | --- |
+| system prompt + facts | stable across the session, so it caches | fixed |
+| recalled exchanges | top-4, retrieved *for this message* | ~300 tokens |
+| the last 16 messages | recency, so "it" and "that one" resolve | ~500 tokens |
+
+Everything else is retrieved, not carried. The same 120-turn conversation,
+asking a question whose answer is 100 turns back (llama3.2 on an M3):
+
+| policy | messages sent | ~tokens | time to first token |
+| --- | --- | --- | --- |
+| whole conversation | 242 | 7,285 | 141.7 s |
+| fixed 60-message window | 32 | 936 | 12.9 s |
+| **window + retrieval** | **14** | **588** | **6.8 s** |
+
+All three answer the question. The last one does it with 12× fewer tokens.
+
+### How retrieval works
+
+Two rankings, fused with [Reciprocal Rank Fusion](https://mem0.ai/blog/ai-memory-benchmarks-in-2026):
+
+- **keyword** — SQLite FTS5 with Porter stemming, so "running" finds "run".
+  About 86% recall on its own.
+- **semantic** — a local embedding model (`nomic-embed-text` via ollama).
+  Optional; fusing it in is worth about +9 points, the largest single gain
+  measured on LongMemEval.
+
+RRF reads only ranks, never scores, so a bm25 score and a cosine similarity
+never have to be made comparable. With no embedder the semantic list is empty
+and recall degrades cleanly to keyword-only.
+
+Both streams have a floor, because "nothing is relevant" is the common answer
+and neither ranker gives it for free — vector search always has a nearest
+neighbour, and bm25 ranks hits against each other with no absolute cutoff.
+Semantic hits must clear 0.55 cosine (measured: relevant queries score
+0.60–0.81, irrelevant ones 0.40–0.47); keyword-only hits must share more than
+one word with the query, or *"write a python function"* recalls an old turn
+purely because *"functionality"* stems to *"function"*. Asked seven questions
+against a real transcript — three that should recall, four that shouldn't —
+this gets all seven right.
+
+The difference is not academic. Against a real transcript, asking *"what
+colour do I like"* when the stored turn says *"favorite color"*:
+
+```
+keyword only        (nothing recalled)
+keyword + semantic  you: What is my favorite color?
+                    Nero: Your favorite color is blue!
+```
+
+Lookup costs **31 ms** over 600 indexed turns.
+
+### Recalled memory must not sound recalled
+
+Retrieved context rides on the user's message, so how it is framed decides
+whether the model *talks about it*. Rendered as a headed transcript, models
+answer it as a document the user pasted — *"I see you're sharing a previous
+conversation snippet!"*. Two things fix that, both measured against a 3B local
+model because that is the hardest case:
+
+- the block is **tagged** `<memory>`, not headed, and the system prompt says
+  what the tag is — your own recollection, not something they just sent you
+- speakers are labelled `user:` / `assistant:`. The friendlier `they said:` /
+  `you said:` made the model lose track of whose preference it was reading
+  (*"blue is my favourite colour"*) — 2 slips in 6 against 0.
+
+The system prompt also forbids narrating provenance *by name* — `"in my
+notes"`, `"you shared"`, `"memory system"`, `"no facts found"` — because an
+abstract rule was not enough for a small model. Talk about what you know,
+never about how you know it.
+
+Ten questions against a real transcript: 8/10 clean on llama3.2 (3B), 5/5 on
+glm-4.5-flash. The residual is model size, not framing — a 3B model also
+contradicts memory it was handed.
+
+### Turning it on
+
+Semantic recall needs a running ollama with `nomic-embed-text` (274 MB), plus
+numpy — it is probed once per session and silently stays off otherwise.
+
+```sh
+ollama pull nomic-embed-text
+nero config set memory.semantic_recall false   # to opt out
+```
+
+If your *chat* model also runs on ollama and the machine is short on VRAM, the
+two models will evict each other; the probe times out after 5 s and Nero falls
+back to keyword-only rather than making you wait.
+
+Nothing is ever deleted. Every exchange stays in `history.db`; the window only
+governs what gets re-sent. `memory.compact_after_messages` (default 16) is the
+window, `memory.max_history_turns` (default 8) is how much of the last session
+is restored at startup, and `0` for the window sends the whole transcript
+again. Durable knowledge ("I live in Mumbai") belongs in `nero facts`, which
+goes into the system prompt every turn.
 
 ## Skills, and what asks permission
 

@@ -39,6 +39,7 @@ from nero.hardware.detector import (
 )
 from nero.llm import ollama, openai_compat, providers
 from nero.llm.client import LLMClient
+from nero.memory.embeddings import Embedder
 from nero.memory.facts import FactStore, default_facts_path
 from nero.memory.history_store import HistoryStore, default_history_path
 from nero.memory.notes import NoteIndex, default_notes_index_path
@@ -604,6 +605,7 @@ def talk(
             vad=vad,
             barge_in=barge_in,
             source=source,
+            context_window=config.memory.compact_after_messages,
         ).run()
     finally:
         if source is not None:
@@ -640,6 +642,7 @@ def _build_history(config: NeroConfig) -> HistoryStore | None:
         default_history_path(),
         session_id=uuid.uuid4().hex,
         max_turns=config.memory.max_history_turns,
+        embedder=Embedder(enabled=config.memory.semantic_recall),
     )
 
 

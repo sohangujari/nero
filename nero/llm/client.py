@@ -148,7 +148,13 @@ class LLMClient:
             "other message, including ordinary questions, do not call any tool: "
             "just reply with text.\n\n"
             "When you are not calling a tool, reply with plain text only — never "
-            "write tool-call JSON as text. Keep replies concise."
+            "write tool-call JSON as text. Keep replies concise.\n\n"
+            "A <memory> block on a message is your own recollection of earlier "
+            "talks with this user — not something they just sent you. Answer as "
+            "if you simply remember. Never say where an answer came from: no "
+            '"based on what I have stored", "in my notes", "in my memory system", '
+            '"you shared", "conversation history", "no facts found". Talk about '
+            "what you know, never about how you know it."
         )
         # Empty/None facts leaves the prompt byte-identical to before this
         # feature existed — a regression lock (see TestSystemPromptFraming).

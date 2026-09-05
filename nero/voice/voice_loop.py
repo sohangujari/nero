@@ -13,6 +13,7 @@ import litellm
 from rich.markup import escape
 
 from nero.llm.ollama_adapter import OllamaModelError
+from nero.memory.recall import recall_block, trim_to_window
 from nero.voice.audio_io import RECORD_SAMPLE_RATE, listen_for_barge_in
 from nero.voice.errors import (
     BargeIn,
@@ -104,6 +105,7 @@ class VoiceLoop:
         vad=None,
         barge_in: bool = False,
         source=None,
+        context_window: int = 0,
     ):
         self.client = client
         self.stt = stt
@@ -115,6 +117,11 @@ class VoiceLoop:
         self.input_fn = input_fn or console.input
         self.once = once
         self.history = history
+        # Live-window cap. A voice session used to grow its prompt for as long
+        # as it ran, which is the whole reason a long talk got slower and
+        # slower; 0 keeps the old unbounded behavior for callers that don't
+        # pass it.
+        self.context_window = context_window
         self.messages: list[dict] = history.recent() if history else []
         self.vad = vad
         self.barge_in = barge_in
@@ -201,8 +208,11 @@ class VoiceLoop:
     def _handle_turn(self, transcript: str, timer: TurnTimer | None = None) -> bool:
         """Run one chat turn; speak the reply. Returns False if the loop should end."""
         timer = timer or TurnTimer()
-        turn_start = len(self.messages)
-        self.messages.append({"role": "user", "content": transcript})
+        self.messages.append({"role": "user", "content": self._recalled(transcript) + transcript})
+        self._trim()
+        # After trimming, not before the append: the user message is always the
+        # last element, since trimming only ever drops a prefix.
+        turn_start = len(self.messages) - 1
         buffer = SentenceBuffer()
         player = self.make_player()
         player.start()
@@ -276,7 +286,7 @@ class VoiceLoop:
             # final assistant text; the role check excludes that case.
             if self.history is not None and self.messages[-1].get("role") == "assistant":
                 self.history.append_turn(
-                    self.messages[turn_start]["content"],
+                    transcript,
                     self.messages[-1]["content"],
                 )
             return True
@@ -310,7 +320,7 @@ class VoiceLoop:
             del self.messages[turn_start + 1 :]
             self.messages.append({"role": "assistant", "content": reply})
             if self.history is not None:
-                self.history.append_turn(self.messages[turn_start]["content"], reply)
+                self.history.append_turn(transcript, reply)
             return True
         except KeyboardInterrupt:
             _debug_dump_interrupt("interrupted during turn")
@@ -379,6 +389,21 @@ class VoiceLoop:
             # success path's close()/join() never ran, which would leave the
             # playback thread parked on the queue and hang interpreter shutdown.
             player.shutdown()
+
+    def _trim(self) -> None:
+        """Cap the live window so the prompt — and so the wait before Nero
+        starts speaking — stops growing with the session. What gets dropped is
+        still in the history store; `_recalled` brings back what matters."""
+        trim_to_window(self.messages, self.context_window)
+
+    def _recalled(self, text: str) -> str:
+        """Relevant older exchanges to carry on this turn's user message, or "".
+        Never raises: recall is an optimisation, not part of the turn."""
+        try:
+            return recall_block(self.history, text, self.messages)
+        except Exception:  # noqa: BLE001 — see docstring
+            logger.debug("recall failed", exc_info=True)
+            return ""
 
     def _sleep(self) -> None:
         """Release the microphone and wait to be woken.

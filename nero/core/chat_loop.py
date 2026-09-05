@@ -1,4 +1,3 @@
-import asyncio
 import base64
 import logging
 import shlex
@@ -13,6 +12,7 @@ from rich.markup import escape
 
 from nero.llm.ollama_adapter import OllamaModelError
 from nero.llm.routing import SessionStats, order_chain
+from nero.memory.recall import recall_block, trim_to_window
 from nero.spinner import Spinner
 
 logger = logging.getLogger("nero.chat")
@@ -75,95 +75,6 @@ def _client_key(client) -> tuple[str, str]:
     )
 
 
-def find_compaction_cut(messages: list[dict], keep_recent: int) -> int | None:
-    """The largest `cut` that both leaves a clean boundary and keeps at least
-    `keep_recent` messages: messages[cut] is a user message and
-    messages[cut - 1] is an assistant message carrying no tool_calls.
-
-    `keep_recent` is what stops compaction from eating the whole conversation.
-    Without it the largest valid cut is almost always "everything but the last
-    message", so the model would lose the live thread it is mid-way through
-    and see only a summary — technically correct, conversationally useless.
-
-    Scanning from the end means a cut point that would split a tool-call
-    sequence is skipped automatically: right after an assistant message with
-    tool_calls comes a `tool` role message, never `user`, so that candidate
-    fails and the search keeps walking left until it clears the whole
-    tool_calls/tool group. Returns None if no valid boundary exists at all —
-    compaction must be skipped rather than guess.
-    """
-    for cut in range(len(messages) - keep_recent, 0, -1):
-        before, after = messages[cut - 1], messages[cut]
-        if after.get("role") == "user" and before.get("role") == "assistant" and not before.get("tool_calls"):
-            return cut
-    return None
-
-
-def _transcript_text(messages: list[dict]) -> str:
-    """Flatten messages to plain "role: content" lines for summarization.
-    Only string content is included — tool-call payloads (content is always
-    "" for those, by convention) carry nothing worth summarizing."""
-    lines = []
-    for message in messages:
-        content = message.get("content")
-        if isinstance(content, str) and content:
-            lines.append(f"{message.get('role')}: {content}")
-    return "\n".join(lines)
-
-
-def summarize_messages(client, messages: list[dict]) -> str | None:
-    """One plain, tool-free LLM call on `client` to summarize `messages`.
-
-    Never raises: compaction is a nice-to-have, and losing the turn over a
-    failed summary call would be far worse than just skipping compaction.
-    Returns None on any failure.
-    """
-    try:
-        prompt = (
-            "Summarize the following conversation concisely, preserving "
-            "important facts, decisions, and context that will be needed "
-            "later:\n\n" + _transcript_text(messages)
-        )
-
-        chunks: list[str] = []
-
-        async def _run() -> None:
-            async for text in client.stream_chat([{"role": "user", "content": prompt}], []):
-                chunks.append(text)
-
-        asyncio.run(_run())
-        summary = "".join(chunks).strip()
-        return summary or None
-    except Exception as exc:  # noqa: BLE001 — never raise; see docstring
-        logger.warning("Session compaction summary failed: %s", exc)
-        return None
-
-
-def compact_messages(messages: list[dict], client, threshold: int) -> tuple[list[dict], int] | None:
-    """Replace the oldest span of `messages` with one summary message, if
-    `messages` is over `threshold` and a clean cut boundary exists.
-
-    Returns (new_messages, dropped_count), or None if compaction did not fire
-    (disabled, under threshold, no valid boundary, or the summary call
-    failed) — in every None case the caller must leave `messages` untouched.
-    """
-    if not threshold or len(messages) <= threshold:
-        return None
-    # Keep a recent window so compaction trims history without erasing the
-    # conversation the user is actually having.
-    cut = find_compaction_cut(messages, keep_recent=max(10, threshold // 2))
-    if cut is None:
-        return None
-    summary = summarize_messages(client, messages[:cut])
-    if summary is None:
-        return None
-    new_messages = [
-        {"role": "user", "content": f"[Earlier conversation summary]\n{summary}"},
-        *messages[cut:],
-    ]
-    return new_messages, cut
-
-
 def _supports_vision(model: str) -> bool:
     """Never-raise: unknown/custom models assume capable, since custom rows
     have no catalog truth — let the provider error surface through the
@@ -205,8 +116,9 @@ class ChatLoop:
         # this feature existed.
         self.registry = registry
         self.security = security
-        # 0 (the default) disables compaction entirely — unchanged behavior
-        # for every caller that doesn't pass this.
+        # Live-window cap: messages beyond this are trimmed off the front
+        # (and recalled on demand). 0 disables trimming entirely — unchanged
+        # behavior for every caller that doesn't pass this.
         self.compact_after_messages = compact_after_messages
         # v1.6.0 routing/health/key-rotation — all default to today's
         # behavior (off / all keys healthy / no rotation) for every caller
@@ -270,7 +182,7 @@ class ChatLoop:
                 user_message, history_text = code_turn
                 is_code_turn = True
             else:
-                user_message = {"role": "user", "content": text}
+                user_message = {"role": "user", "content": self._recalled(text) + text}
                 history_text = text
 
             self.turns_used += 1
@@ -293,11 +205,11 @@ class ChatLoop:
                     )
             used_client = primary_client
             self.messages.append(user_message)
-            self._maybe_compact()
-            # Recomputed after compaction rather than captured before the
-            # append: user_message is always the last element (compaction
+            self._trim()
+            # Recomputed after trimming rather than captured before the
+            # append: user_message is always the last element (trimming
             # only ever touches a prefix of self.messages), so this is valid
-            # whether or not compaction actually fired this turn.
+            # whether or not anything was actually dropped this turn.
             turn_start = len(self.messages) - 1
             self._prefix()
             try:
@@ -441,23 +353,27 @@ class ChatLoop:
                     self._spinner.stop()
                     self._spinner = None
 
-    def _maybe_compact(self) -> None:
-        # Compaction is a full LLM round-trip of its own, run before the reply
-        # prefix is even printed -- the silent half of a slow first turn.
-        # Started unconditionally: compact_messages returns immediately when it
-        # is under threshold, and the spinner draws nothing in its first 100 ms.
-        spinner = Spinner(self.console.file)
-        spinner.start()
-        try:
-            result = compact_messages(self.messages, self.client, self.compact_after_messages)
-        finally:
-            spinner.stop()
-        if result is None:
+    def _trim(self) -> None:
+        """Cap the live window so the prompt — and so the wait for a reply —
+        stops growing with the session. What gets dropped is still in the
+        history store, and `_recalled` brings back the parts that matter."""
+        dropped = trim_to_window(self.messages, self.compact_after_messages)
+        if not dropped:
             return
-        self.messages, dropped = result
-        # escape(): the literal "[compacted ...]" text must not be parsed as
+        # escape(): the literal "[trimmed ...]" text must not be parsed as
         # rich markup itself (only the surrounding [dim]...[/dim] tags should be).
-        self.console.print(f"[dim]{escape(f'[compacted {dropped} earlier messages]')}[/dim]")
+        self.console.print(
+            f"[dim]{escape(f'[trimmed {dropped} older messages — still searchable]')}[/dim]"
+        )
+
+    def _recalled(self, text: str) -> str:
+        """Relevant older exchanges to carry on this turn's user message, or "".
+        Never raises: recall is an optimisation, not part of the turn."""
+        try:
+            return recall_block(self.history, text, self.messages)
+        except Exception:  # noqa: BLE001 — see docstring
+            logger.debug("recall failed", exc_info=True)
+            return ""
 
     def _limit_message(self) -> str | None:
         """None if the turn may proceed, else the message to show instead.

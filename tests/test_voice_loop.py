@@ -634,3 +634,44 @@ class TestHandsFree:
         loop.run()
         assert len(prompts) == 2
         assert "Press Enter" in prompts[0][0]
+
+
+# --- A long talk must not grow the prompt forever (nero/memory/recall.py) ---
+
+
+class TestVoiceContextWindow:
+    class ReplyingClient(FakeClient):
+        """FakeClient, but it records its turn the way LLMClient.send does —
+        without an assistant message there is no cut boundary to trim at."""
+
+        def send(self, messages, on_text):
+            super().send(messages, on_text)
+            messages.append({"role": "assistant", "content": "".join(self._chunks)})
+
+    def _loop(self, transcripts, **kwargs):
+        inputs = iter([""] * 200)
+        return VoiceLoop(
+            client=self.ReplyingClient(["ok."]), stt=FakeSTT(transcripts),
+            record=lambda prefix=None: speech(), make_player=FakePlayer,
+            console=Console(), assistant_name="Nero",
+            input_fn=lambda *_a: next(inputs), **kwargs,
+        )
+
+    def test_unbounded_by_default(self):
+        loop = self._loop(["hello"] * 30)
+        for i in range(30):
+            loop._handle_turn(f"turn {i}")
+        assert len(loop.messages) == 60
+
+    def test_the_window_holds_flat_over_a_long_session(self):
+        """The bug: a voice session used to send its whole transcript back on
+        every turn, so the wait before Nero spoke grew with the session."""
+        loop = self._loop(["hello"] * 100, context_window=20)
+        sizes = []
+        for i in range(100):
+            loop._handle_turn(f"turn {i}")
+            sizes.append(len(loop.messages))
+        assert max(sizes) <= 22  # the window, plus the exchange that tripped it
+        # The live thread survives — trimming drops the front, never the tail.
+        assert loop.messages[-1] == {"role": "assistant", "content": "ok."}
+        assert loop.messages[-2]["content"].endswith("turn 99")

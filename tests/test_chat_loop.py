@@ -794,10 +794,28 @@ class TestSystemPromptFraming:
         assert "never" in make_client().system_prompt
         assert "tool-call JSON" in make_client().system_prompt
 
+    def test_explains_what_a_memory_block_is(self):
+        """Without this the model reads recalled context as something the user
+        just pasted, and says so out loud."""
+        prompt = make_client().system_prompt
+        assert "<memory>" in prompt
+        assert "not something they just sent you" in prompt
+
+    def test_forbids_narrating_where_an_answer_came_from(self):
+        # Abstract wording ("don't mention memory") was not enough for a 3B
+        # model; naming the actual phrases was.
+        prompt = make_client().system_prompt.lower()
+        for phrase in ("in my notes", "you shared", "memory system", "no facts found"):
+            assert phrase in prompt, f"prompt should forbid {phrase!r} by name"
+        assert "never about how you know it" in prompt
+
     def test_stays_short(self):
         # The previous regression came from an over-long, over-specific prompt.
-        # Small local models follow terse instructions far better.
-        assert len(make_client().system_prompt) < 900
+        # Small local models follow terse instructions far better. The budget
+        # rose once, for the <memory> rules: without them the model narrates
+        # its own recall ("I see you're sharing a previous conversation
+        # snippet!"), which is worse than a slightly longer prompt.
+        assert len(make_client().system_prompt) < 1200
 
 
 class TestFactsInPrompt:
