@@ -7,14 +7,23 @@ from nero.voice.errors import TTSLoadError, VoiceDependencyError
 
 # Curated Kokoro voices with human-readable labels so config can offer a
 # gender-labeled picker without exposing Kokoro's naming scheme.
+#
+# Ordered best-first by Kokoro's own published per-voice quality grades, which
+# is what "curated" has to mean here — the picker shows this order. The list
+# previously offered am_adam (graded F+, the worst voice in the American English
+# set) while omitting af_heart (A) and both C+ male alternatives, so a user
+# picking "Adam" got audibly the least intelligible voice the model ships.
+# Grades are in the comment beside each row; anything below C+ is left out.
 VOICE_CATALOG: list[tuple[str, str, str]] = [
-    ("af_bella", "Bella", "female"),
-    ("af_sarah", "Sarah", "female"),
-    ("af_nicole", "Nicole", "female"),
-    ("am_michael", "Michael", "male"),
-    ("am_adam", "Adam", "male"),
-    ("bf_emma", "Emma", "female"),
-    ("bm_george", "George", "male"),
+    ("af_heart", "Heart", "female"),      # A
+    ("af_bella", "Bella", "female"),      # A-
+    ("af_nicole", "Nicole", "female"),    # B-
+    ("am_fenrir", "Fenrir", "male"),      # C+
+    ("am_michael", "Michael", "male"),    # C+
+    ("am_puck", "Puck", "male"),          # C+
+    ("af_sarah", "Sarah", "female"),      # C+
+    ("bf_emma", "Emma", "female"),        # British
+    ("bm_george", "George", "male"),      # British
 ]
 
 

@@ -145,6 +145,20 @@ still shows the original text.
 What Nero Agent heard is printed before it replies. Say "stop" (or "exit") to leave,
 or press Ctrl+C.
 
+### Choosing a voice
+
+`nero config` offers Kokoro voices ordered best-first by Kokoro's own published
+per-voice grades. Anything below C+ is left out — the list used to offer
+`am_adam`, graded **F+** and the least intelligible voice the model ships,
+while omitting `af_heart` (A). If your replies sound muddy, the voice is the
+first thing to change:
+
+```sh
+nero config set voice.tts.voice_id af_heart    # A     (female)
+nero config set voice.tts.voice_id af_bella    # A-    (female, default)
+nero config set voice.tts.voice_id am_michael  # C+    (male)
+```
+
 ### How the reply reaches your speakers
 
 Nero synthesizes ahead of what it is saying. The model's text is split into
@@ -156,6 +170,21 @@ stays open for the turn. The first segment is cut short — at a clause, or at
 Concretely, on a four-sentence reply on an M-series laptop: dead air between
 sentences dropped from 4.8s to 0.9s, and the wait for the first word from
 2.0s to 0.7s.
+
+How long a segment may be is not fixed — it grows with how much audio the
+speaker already has banked. Capping only the *first* segment was not enough: a
+27-character opener ("Sure, I can help with that.") gives 1.49s of speech,
+and the 73-character sentence after it took 1.87s to synthesize, so the
+speaker ran dry in the middle of the reply. Every reply, at the same place.
+Each segment is now limited to what synthesis can finish in time
+(`catch_up_limit`), and when that bites, the break lands on a clause rather
+than the last space. Measured, same replies, first word unchanged:
+
+| reply | dead air before | after |
+| --- | --- | --- |
+| weather forecast | 0.70 s | **0.00 s** |
+| casual greeting | 1.96 s | **0.49 s** |
+| dense explanation | 0.00 s | 0.00 s |
 
 `nero talk --debug` prints one latency line per turn:
 
@@ -191,11 +220,31 @@ Nero> Done — Spotify is opening now.
 Type `exit`, `quit`, or press Ctrl+C to leave. Conversation history persists
 across restarts — see [Memory](#memory).
 
+### One command, or one interface
+
+`nero` on its own is the universal session: the terminal chat, and the Telegram
+bridge alongside it if you have paired a phone. Both share one conversation, so
+a question asked from your phone and one typed here continue each other — turns
+are serialized, never interleaved. If Telegram isn't set up, `nero` behaves
+exactly as it always has.
+
+| Command | What runs |
+| --- | --- |
+| `nero` | terminal chat + Telegram |
+| `nero chat` | terminal chat alone |
+| `nero talk` | voice alone |
+| `nero telegram` | the Telegram bridge alone |
+
+A reply arriving from your phone prints into the terminal while `nero` is
+running, which can land mid-prompt. Use `nero chat` if you would rather the
+terminal stayed yours alone.
+
 ## Commands
 
 | Command | What it does |
 | --- | --- |
-| `nero` | Start the chat REPL (first run triggers setup) |
+| `nero` | Everything at once: terminal chat, plus Telegram if paired (first run triggers setup) |
+| `nero chat` | Terminal chat only |
 | `nero config` | Interactive menu: assistant name, model, API key |
 | `nero config set <key> <value>` | Scriptable edit, e.g. `nero config set llm.provider ollama` |
 | `nero config show` | Print current config (API key masked) |
@@ -207,6 +256,9 @@ across restarts — see [Memory](#memory).
 | `nero routine list` \| `run` \| `install` \| `uninstall` | Manage scheduled routines (launchd) |
 | `nero approvals` | Review destructive actions a routine queued for you |
 | `nero dashboard` | Read-only localhost viewer: history, skill audit, config |
+| `nero telegram setup` \| `approve <code>` \| `pending` | Connect a Telegram bot and pair a phone |
+| `nero telegram` | Answer Telegram messages from paired chats |
+| `nero telegram install` \| `uninstall` | Run the bridge in the background, from login |
 | `nero config set-key <provider> --slot N` | Store an extra API key for rotation |
 | `nero --debug` | Chat with verbose stderr logging (tool-call plumbing, per-turn history) |
 | `nero --version` | Print the installed version |
@@ -329,6 +381,28 @@ is restored at startup, and `0` for the window sends the whole transcript
 again. Durable knowledge ("I live in Mumbai") belongs in `nero facts`, which
 goes into the system prompt every turn.
 
+## Knowing what day it is
+
+A model's only sense of "now" is its training cutoff, so asked for the date it
+answers confidently and months out of date. Nero puts the local date, weekday
+and clock into the system prompt on **every request** — not once at startup,
+because the Telegram bridge and a launchd-installed session can run for days.
+
+```
+Right now it is Sunday, 6 September 2026, 18:42 IST.
+```
+
+Truncated to the minute on purpose: the string then stays identical across a
+quick back-and-forth, so the prefix a provider (or ollama's KV cache) has
+already processed still matches. Measured on llama3.2 — minute precision costs
+nothing, an ISO timestamp with microseconds costs nearly double:
+
+| timestamp in the system prompt | time to first token |
+| --- | --- |
+| none | 0.20 s |
+| **to the minute** | **0.20 s** |
+| to the microsecond | 0.37 s |
+
 ## Skills, and what asks permission
 
 Skills reach the model through one registry, so every call is audited and
@@ -350,6 +424,86 @@ untrusted data, and marks the turn — the confirmation prompt then says so,
 because an injected instruction could be behind the call that follows.
 
 Enable one with `nero config set skills.enabled.run_shell true`.
+
+## Telegram
+
+Talk to Nero from your phone. It uses long polling, so nothing is hosted and no
+port is opened — Nero connects out to Telegram, and your machine stays where it
+is. Built on `httpx`, which was already a dependency; there is no bot framework.
+
+**1. Create the bot.** Message [@BotFather](https://t.me/BotFather), send
+`/newbot`, copy the token it gives you.
+
+**2. Store the token.** Either route — both run the same routine, so they
+cannot drift into asking for different things:
+
+```sh
+nero config           # pick the "Telegram" row
+nero telegram setup   # or straight from the command line
+```
+
+**3. Pair and verify.** Open your bot's link, press **Start**. It replies with
+a six-digit pairing code. Type that code where Nero is running:
+
+```sh
+nero telegram approve 483920
+```
+
+`setup` prompts for it right there; if the bridge is already running, use the
+command. `nero telegram pending` lists chats waiting to be approved.
+
+**4. Run it.** Messages are only answered while something is serving them —
+either `nero` (which answers Telegram alongside the terminal chat) or the
+bridge on its own:
+
+```sh
+nero                  # terminal chat + Telegram
+nero telegram         # the bridge alone, until you close it (Ctrl+C)
+```
+
+That stops when you close the terminal. To have it always on — starting at
+login and restarting if it ever dies:
+
+```sh
+nero telegram install     # a launchd agent; running now, and after every reboot
+nero telegram uninstall   # stop it again
+```
+
+Logs land in `~/Library/Logs/nero/telegram.err.log`. Approving a new chat takes
+effect on the running bridge within a few seconds — no restart.
+
+A turn from your phone is the *same* turn as a turn in the terminal — both go
+through `ChatLoop.ask`, so the fallback chain, key rotation, memory recall,
+skills and every error message behave identically.
+
+### Why a code, and not just "the first chat wins"
+
+A bot token is a URL anyone can message, and Nero can open apps and read files
+on your machine. So an unpaired chat gets exactly one thing back: a code, which
+grants nothing on its own.
+
+The code is shown **only in Telegram** — never printed at the terminal. That is
+the whole point of the two channels: typing it into the terminal proves that
+whoever is approving is also holding the phone. Pairing depends on possession,
+not on being the first to find the bot.
+
+- an unpaired chat's message is **never run as a turn**, only answered with a code
+- codes expire after 10 minutes, are single-use, and one chat holds at most one
+  — asking again invalidates the last, so a stranger cannot farm guesses
+- the waiting queue is capped, so spam cannot grow it without bound
+- codes are compared with `secrets.compare_digest`, so a wrong guess leaks no
+  prefix through timing
+- destructive skills stay refused: the registry fails closed with no confirm
+  callback (the rule voice mode already follows), and there is no safe way to
+  approve `rm -rf` from a phone keyboard
+
+Pair another device by messaging the bot from it and approving its code.
+Approved chats live in `telegram.allowed_chat_ids`, which stays the single
+source of truth:
+
+```sh
+nero config set telegram.allowed_chat_ids 12345678,87654321
+```
 
 ## MCP servers
 

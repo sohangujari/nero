@@ -191,6 +191,20 @@ class MemoryConfig(BaseModel):
     semantic_recall: bool = True
 
 
+class TelegramConfig(BaseModel):
+    """Talking to Nero from a phone (nero/telegram.py).
+
+    `allowed_chat_ids` is the entire security model: a bot token is a URL
+    anyone can message, and Nero can open apps and read files. Empty means the
+    bridge refuses to start — never "anyone who finds the bot".
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    allowed_chat_ids: list[int] = []
+
+
 class SkillToggles(BaseModel):
     """One field per skill, rather than dict[str, bool], so a typo'd skill name
     is rejected instead of silently ignored. Adding a skill means adding a field
@@ -311,4 +325,5 @@ class NeroConfig(BaseModel):
     memory: MemoryConfig = MemoryConfig()
     security: SecurityConfig = SecurityConfig()
     mcp: MCPConfig = MCPConfig()
+    telegram: TelegramConfig = TelegramConfig()
     routines: RoutinesConfig = RoutinesConfig()

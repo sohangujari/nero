@@ -5,6 +5,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 import uuid
 
 import typer
@@ -57,6 +58,7 @@ from nero.voice.models import ensure_vad_model
 from nero.voice.stt import STT_MODELS, FasterWhisperSTT
 from nero.voice.tts import VOICE_CATALOG, build_tts
 from nero.voice.vad import VoiceActivityDetector
+from nero.telegram import PairingStore, TelegramBot, TelegramError, incoming, serve
 from nero.voice.voice_loop import VoiceLoop
 
 app = typer.Typer(add_completion=False, invoke_without_command=True)
@@ -68,6 +70,8 @@ notes_app = typer.Typer(help="Search and (re)index your notes directory.")
 app.add_typer(notes_app, name="notes")
 routine_app = typer.Typer(invoke_without_command=True, help="Manage scheduled routines (launchd).")
 app.add_typer(routine_app, name="routine")
+telegram_app = typer.Typer(invoke_without_command=True, help="Talk to Nero Agent from Telegram on your phone.")
+app.add_typer(telegram_app, name="telegram")
 approvals_app = typer.Typer(
     invoke_without_command=True, help="Review actions routines queued for approval."
 )
@@ -103,7 +107,12 @@ def main(
         help="Verbose logging to stderr (tool-call plumbing, per-turn history).",
     ),
 ) -> None:
-    """Nero Agent — your personal AI assistant in the terminal. Run with no arguments to chat."""
+    """Nero Agent — your personal AI assistant.
+
+    Run with no arguments for the universal session: the terminal chat, plus
+    the Telegram bridge if you have paired a phone. `nero chat` is the terminal
+    on its own, `nero talk` is voice, `nero telegram` is the bridge on its own.
+    """
     if debug:
         _enable_debug_logging()
     warning = check_python_version()
@@ -111,7 +120,7 @@ def main(
         # Frozen binaries bundle 3.12, so only warn on the pip/pipx path.
         Console(stderr=True).print(f"[yellow dim]{warning}[/yellow dim]")
     if ctx.invoked_subcommand is None:
-        _run_chat()
+        _run_chat(with_telegram=True)
 
 
 def _load_or_exit(manager: ConfigManager) -> NeroConfig:
@@ -489,6 +498,266 @@ def notes_search_cmd(
     console.print(table)
 
 
+@telegram_app.callback()
+def telegram_main(ctx: typer.Context) -> None:
+    """Answer Telegram messages until you stop it (Ctrl+C)."""
+    if ctx.invoked_subcommand is not None:
+        return
+    manager = ConfigManager()
+    if not manager.exists():
+        _first_time_setup(manager)
+    config = _load_or_exit(manager)
+
+    token = manager.get_telegram_token()
+    if not token:
+        console.print(
+            "[yellow]No Telegram bot token stored.[/yellow] Run "
+            "[bold]nero telegram setup[/bold] first."
+        )
+        raise typer.Exit(1)
+    _print_pending_approvals_notice()
+    api_key = _provider_preflight(manager, config)
+    mcp_skills, mcp_connections = _load_mcp(config)
+    registry = _build_registry(manager, config, extra_skills=mcp_skills)
+    loop, mcp_connections = _build_chat_loop(manager, config, api_key, registry, mcp_connections)
+
+    bot = TelegramBot(token)
+    try:
+        name = bot.username()
+    except TelegramError as exc:
+        console.print(f"[red]{escape(str(exc))}[/red]")
+        raise typer.Exit(1) from exc
+
+    allowed = set(config.telegram.allowed_chat_ids)
+    console.print(
+        f"[bold]{config.assistant.name}[/bold] is on Telegram as "
+        f"[bold]@{name}[/bold], answering {len(allowed)} paired "
+        f"chat{'s' if len(allowed) != 1 else ''}. Press Ctrl+C to stop."
+    )
+    if not allowed:
+        console.print(
+            f"[yellow]Nothing is paired yet.[/yellow] Open [bold]t.me/{name}[/bold], "
+            "press Start, then run [bold]nero telegram approve <code>[/bold] with the "
+            "code it sends you."
+        )
+    console.print(
+        "[dim]Destructive skills stay refused here — there is no safe way to "
+        "approve them from a phone.[/dim]\n"
+    )
+    try:
+        serve(bot, allowed, loop.ask, pairings=PairingStore(),
+              refresh=lambda: _allowed_chats(manager),
+              on_event=lambda m: console.print(f"[dim]{escape(m)}[/dim]"))
+    except KeyboardInterrupt:
+        console.print("\n[dim]Telegram bridge stopped.[/dim]")
+    except TelegramError as exc:
+        console.print(f"[red]{escape(str(exc))}[/red]")
+        raise typer.Exit(1) from exc
+    finally:
+        bot.close()
+        for connection in mcp_connections:
+            connection.close()
+
+
+@telegram_app.command("install")
+def telegram_install() -> None:
+    """Keep the bridge running: at login, and again if it ever stops.
+
+    Without this, `nero telegram` only answers while that terminal is open —
+    close it and your phone goes quiet.
+    """
+    manager = ConfigManager()
+    config = _load_or_exit(manager)
+    if not manager.get_telegram_token():
+        console.print(
+            "[yellow]No Telegram bot token stored.[/yellow] Run "
+            "[bold]nero telegram setup[/bold] first."
+        )
+        raise typer.Exit(1)
+    if not config.telegram.allowed_chat_ids:
+        console.print(
+            "[yellow]Nothing is paired yet.[/yellow] Pair a chat first, or the "
+            "service will start with nobody to answer."
+        )
+        raise typer.Exit(1)
+    try:
+        message = routines.install_bridge(
+            routines.resolve_executable(), routines.default_agents_dir()
+        )
+    except routines.RoutineError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(message)
+    console.print(
+        "[dim]It is running now and will start again at login. "
+        "Stop it with [bold]nero telegram uninstall[/bold].[/dim]"
+    )
+
+
+@telegram_app.command("uninstall")
+def telegram_uninstall() -> None:
+    """Stop the background bridge and remove its launchd agent."""
+    console.print(routines.uninstall_bridge(routines.default_agents_dir()))
+
+
+@telegram_app.command("approve")
+def telegram_approve(
+    code: str = typer.Argument(..., help="The six-digit code the bot sent you in Telegram."),
+) -> None:
+    """Pair the chat that was given this code.
+
+    The code travels by phone and is typed here, so approving it is proof that
+    whoever is at this terminal is also holding the paired device.
+    """
+    manager = ConfigManager()
+    config = _load_or_exit(manager)
+    chat_id = PairingStore().approve(code)
+    if chat_id is None:
+        console.print(
+            "[red]No pending request matches that code.[/red] Codes expire after "
+            "10 minutes — message the bot again for a fresh one."
+        )
+        raise typer.Exit(1)
+    allowed = sorted(set(config.telegram.allowed_chat_ids) | {chat_id})
+    manager.set_value("telegram.allowed_chat_ids", ",".join(str(i) for i in allowed))
+    manager.set_value("telegram.enabled", "true")
+    console.print(
+        f"[green]Paired chat {chat_id}.[/green] "
+        "A running [bold]nero telegram[/bold] picks it up within a few seconds."
+    )
+
+
+@telegram_app.command("pending")
+def telegram_pending() -> None:
+    """Chats waiting to be paired. Codes are shown in Telegram, never here."""
+    waiting = PairingStore().pending()
+    if not waiting:
+        console.print("[dim]No chats are waiting to pair.[/dim]")
+        return
+    table = Table(title="pending pairings", show_header=True)
+    table.add_column("Chat ID")
+    table.add_column("Asked")
+    for request in waiting:
+        table.add_row(str(request.chat_id), request.age())
+    console.print(table)
+    console.print(
+        "[dim]Approve with the code the bot sent to that chat: "
+        "nero telegram approve <code>[/dim]"
+    )
+
+
+@telegram_app.command("setup")
+def telegram_setup() -> None:
+    """Store a bot token and pair the chat that is allowed to use it."""
+    manager = ConfigManager()
+    if not manager.exists():
+        _first_time_setup(manager)
+    if not _connect_telegram(manager):
+        raise typer.Exit(1)
+
+
+def _connect_telegram(manager: ConfigManager) -> bool:
+    """Store a bot token and pair a chat. Returns False if nothing was set up.
+
+    One routine, so `nero telegram setup` and the config menu can never drift
+    into asking for different things. Never raises on a user mistake — the
+    menu has to survive a cancelled step and redraw.
+    """
+    existing = manager.get_telegram_token()
+    console.print(
+        "Create a bot first: message [bold]@BotFather[/bold] on Telegram, send "
+        "[bold]/newbot[/bold], and copy the token it gives you.\n"
+        + ("[dim]A token is already stored — press Enter to keep it.[/dim]\n" if existing else "")
+    )
+    token = Prompt.ask("Bot token", password=True, default="", console=console).strip()
+    if not token:
+        if not existing:
+            console.print("[yellow]Nothing entered — setup cancelled.[/yellow]")
+            return False
+        token = existing
+
+    bot = TelegramBot(token)
+    try:
+        name = bot.username()
+    except TelegramError as exc:
+        console.print(f"[red]{escape(str(exc))}[/red]")
+        return False
+    manager.set_telegram_token(token)
+    console.print(f"[green]Connected as @{name}.[/green]")
+
+    console.print(
+        f"\nNow open [bold]t.me/{name}[/bold] in Telegram and press [bold]Start[/bold]. "
+        "The bot will reply with a pairing code.\n[dim]Waiting… Ctrl+C to cancel.[/dim]"
+    )
+    pairings = PairingStore()
+    try:
+        chat_id = _await_pairing(bot, pairings)
+    except KeyboardInterrupt:
+        console.print("\n[dim]Pairing cancelled. The token was saved.[/dim]")
+        return False
+    except TelegramError as exc:
+        console.print(f"[red]{escape(str(exc))}[/red]")
+        return False
+    finally:
+        bot.close()
+
+    console.print(f"[green]Chat {chat_id} is asking to pair.[/green]")
+    # Deliberately not shown here: typing the code Telegram displayed is the
+    # only thing that proves the person at this terminal holds that phone.
+    for attempt in range(3):
+        entered = Prompt.ask("Enter the code shown in Telegram", console=console).strip()
+        approved = pairings.approve(entered)
+        if approved is not None:
+            chat_id = approved
+            break
+        console.print("[red]That code does not match.[/red]" if attempt < 2 else "")
+    else:
+        console.print(
+            "[yellow]Not paired.[/yellow] The token was saved — message the bot "
+            "again and run [bold]nero telegram approve <code>[/bold]."
+        )
+        return False
+
+    config = _load_or_exit(manager)
+    allowed = sorted(set(config.telegram.allowed_chat_ids) | {chat_id})
+    manager.set_value("telegram.allowed_chat_ids", ",".join(str(i) for i in allowed))
+    manager.set_value("telegram.enabled", "true")
+    console.print(
+        f"[green]Paired chat {chat_id}.[/green] Start it with [bold]nero telegram[/bold]."
+    )
+    return True
+
+
+def _allowed_chats(manager: ConfigManager) -> set[int]:
+    """The paired chats, re-read from disk. Never raises: the bridge is a
+    long-running server, and a config the user is mid-edit must not stop it."""
+    try:
+        return set(manager.load().telegram.allowed_chat_ids)
+    except (ConfigError, OSError) as exc:
+        logger.debug("could not re-read the allowlist: %s", exc)
+        return set()
+
+
+def _await_pairing(bot: TelegramBot, pairings: PairingStore) -> int:
+    """Block until someone messages the bot, send them a code, return their id.
+
+    Whoever arrives first only gets a *request*; it still has to be approved
+    with the code they were sent, so being first is not enough to get paired.
+    """
+    from nero.telegram import PAIRING_REPLY
+
+    offset = None
+    while True:
+        for update in bot.updates(offset):
+            offset = update["update_id"] + 1
+            received = incoming(update)
+            if received is None:
+                continue
+            chat_id = received[0]
+            bot.send(chat_id, PAIRING_REPLY.format(code=pairings.request(chat_id)))
+            return chat_id
+
+
 @app.command()
 def dashboard(
     port: int = typer.Option(8642, "--port", help="Port to serve the local dashboard on."),
@@ -745,7 +1014,13 @@ def _confirm_skill(name: str, tier: str, arguments: dict, security, tainted: boo
     return Confirm.ask("Proceed?", default=False, console=console)
 
 
-def _run_chat() -> None:
+@app.command()
+def chat() -> None:
+    """Chat in this terminal only — no Telegram bridge."""
+    _run_chat(with_telegram=False)
+
+
+def _run_chat(with_telegram: bool = False) -> None:
     manager = ConfigManager()
     if not manager.exists():
         _first_time_setup(manager)
@@ -756,6 +1031,61 @@ def _run_chat() -> None:
     mcp_skills, mcp_connections = _load_mcp(config)
     registry = _build_registry(manager, config, extra_skills=mcp_skills)
 
+    loop, mcp_connections = _build_chat_loop(manager, config, api_key, registry, mcp_connections)
+    bridge = _start_telegram_bridge(manager, config, loop) if with_telegram else None
+    try:
+        loop.run()
+    finally:
+        if bridge is not None:
+            bridge.set()
+        # A session must never leave orphaned server processes behind.
+        for connection in mcp_connections:
+            connection.close()
+
+
+def _start_telegram_bridge(manager: ConfigManager, config: NeroConfig, loop):
+    """Answer Telegram in the background of a terminal session, or None.
+
+    Silent when Telegram isn't set up — `nero` must behave exactly as it always
+    has for anyone who never touched it. The bridge shares `loop`, so a
+    question asked from the phone and one typed here are the same conversation;
+    ChatLoop.ask serializes them.
+    """
+    token = manager.get_telegram_token()
+    if not token or not config.telegram.allowed_chat_ids:
+        return None
+
+    stop = threading.Event()
+
+    def run() -> None:
+        bot = TelegramBot(token)
+        try:
+            serve(
+                bot,
+                set(config.telegram.allowed_chat_ids),
+                loop.ask,
+                pairings=PairingStore(),
+                refresh=lambda: _allowed_chats(manager),
+                stop=stop,
+                on_event=lambda m: logger.info("telegram: %s", m),
+            )
+        except Exception:  # noqa: BLE001 — a phone going quiet must not end the session
+            logger.debug("telegram bridge stopped", exc_info=True)
+        finally:
+            bot.close()
+
+    threading.Thread(target=run, daemon=True, name="nero-telegram").start()
+    console.print(
+        f"[dim]Also answering Telegram ({len(config.telegram.allowed_chat_ids)} paired). "
+        "Run [/dim][bold]nero chat[/bold][dim] for the terminal alone.[/dim]"
+    )
+    return stop
+
+
+def _build_chat_loop(manager, config, api_key, registry, mcp_connections):
+    """The one place a ChatLoop is assembled — `nero` and `nero telegram` both
+    call it, so a turn from a phone is the same turn as a turn in the terminal:
+    same fallback chain, key rotation, memory and skills."""
     fallback_clients = _build_fallback_clients(manager, config, registry)
     coding_client = _resolve_coding_client(manager, config, registry)
     facts = [(fact.key, fact.value) for fact in FactStore(default_facts_path()).all()]
@@ -767,21 +1097,17 @@ def _run_chat() -> None:
         api_key=api_key,
         facts=facts,
     )
-    try:
-        ChatLoop(
-            client, console=console, assistant_name=config.assistant.name,
-            history=_build_history(config), fallback_clients=fallback_clients,
-            registry=registry, security=config.security,
-            compact_after_messages=config.memory.compact_after_messages,
-            route_by=config.llm.route_by, quality_rank=config.llm.quality_rank,
-            health_check=config.llm.health_check,
-            primary_api_keys=manager.get_api_keys(config.llm.provider),
-            coding_client=coding_client,
-        ).run()
-    finally:
-        # A session must never leave orphaned server processes behind.
-        for connection in mcp_connections:
-            connection.close()
+    loop = ChatLoop(
+        client, console=console, assistant_name=config.assistant.name,
+        history=_build_history(config), fallback_clients=fallback_clients,
+        registry=registry, security=config.security,
+        compact_after_messages=config.memory.compact_after_messages,
+        route_by=config.llm.route_by, quality_rank=config.llm.quality_rank,
+        health_check=config.llm.health_check,
+        primary_api_keys=manager.get_api_keys(config.llm.provider),
+        coding_client=coding_client,
+    )
+    return loop, mcp_connections
 
 
 def _load_mcp(config: NeroConfig):
@@ -1286,10 +1612,17 @@ def _preflight_voice_models(engine: str) -> None:
 
 
 def _voice_gender(voice_id: str) -> str:
+    """Female/male for a voice id, catalog or not.
+
+    A hand-set voice_id need not be one Nero curates — the config field is a
+    plain string on purpose — so fall back to Kokoro's own naming, where the
+    second letter of `<lang><gender>_name` is the gender.
+    """
     for vid, _name, gender in VOICE_CATALOG:
         if vid == voice_id:
             return gender
-    return "?"
+    initial = voice_id[1:2]
+    return {"f": "female", "m": "male"}.get(initial, "?")
 
 
 def _key_display(manager: ConfigManager, provider: str, masked: bool = True) -> str:
@@ -1350,8 +1683,19 @@ def _config_table(
     table.add_row("Memory", "yes" if memory.enabled else "no")
     if memory.enabled:
         table.add_row("History Turns", str(memory.max_history_turns))
+    table.add_row("Telegram", _telegram_summary(manager, config).split("  (")[0])
     table.add_row("Security", _security_summary(config.security))
     return table
+
+
+def _telegram_summary(manager: ConfigManager, config: NeroConfig) -> str:
+    """One line describing whether the phone bridge is usable, and why not."""
+    if not manager.get_telegram_token():
+        return "not set up  (connect)"
+    paired = len(config.telegram.allowed_chat_ids)
+    if not paired:
+        return "token stored, no chat paired  (pair)"
+    return f"{paired} chat{'s' if paired != 1 else ''} paired  (add another)"
 
 
 def _security_summary(security) -> str:
@@ -1411,6 +1755,7 @@ def _interactive_menu() -> None:
             rows.append(("16", "Endpoint URL", config.llm.base_url or "not set"))
         elif provider == "bedrock":
             rows.append(("16", "AWS Region", config.llm.aws_region or "not set"))
+        rows.append(("17", "Telegram", _telegram_summary(manager, config)))
         # "" is the Done row: falsy, so it exits on the same branch Esc does,
         # and so does the blank answer the numbered fallback still accepts.
         choice = ui.pick(
@@ -1513,6 +1858,8 @@ def _interactive_menu() -> None:
                         manager.set_value("llm.base_url", new_url)
                     except ConfigError as exc:
                         console.print(f"[yellow]{exc}[/yellow]")
+        elif choice == "17":
+            _connect_telegram(manager)
         console.print("[green]Saved.[/green]\n")
 
 

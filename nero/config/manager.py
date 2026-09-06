@@ -132,6 +132,19 @@ class ConfigManager:
         keyring_entry = entry if slot == 1 else f"{entry}_{slot}"
         keyring.set_password(KEYRING_SERVICE, keyring_entry, value)
 
+    def get_telegram_token(self) -> str | None:
+        """The bot token, or None. Stored in the keyring beside the provider
+        keys — it grants the same reach into this machine, so it gets the same
+        handling and never lands in the YAML."""
+        from nero.telegram import KEYRING_ENTRY
+
+        return self._read_key(KEYRING_ENTRY)
+
+    def set_telegram_token(self, value: str) -> None:
+        from nero.telegram import KEYRING_ENTRY
+
+        keyring.set_password(KEYRING_SERVICE, KEYRING_ENTRY, value)
+
     @staticmethod
     def mask_api_key(key: str) -> str:
         if len(key) < 8:

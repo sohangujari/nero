@@ -53,6 +53,9 @@ def _fake_manager(tmp_path, config: NeroConfig):
             # One key, no rotation slots — the base-slot case.
             return ["sk-ant-test"]
 
+        def get_telegram_token(self):
+            return None
+
         def mask_api_key(self, key):
             return "sk-ant-...test"
 

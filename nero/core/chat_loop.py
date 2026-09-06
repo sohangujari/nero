@@ -1,5 +1,6 @@
 import base64
 import logging
+import threading
 import shlex
 import time
 from collections.abc import Callable
@@ -9,6 +10,7 @@ import httpx
 import litellm
 from rich.console import Console
 from rich.markup import escape
+from rich.text import Text
 
 from nero.llm.ollama_adapter import OllamaModelError
 from nero.llm.routing import SessionStats, order_chain
@@ -139,6 +141,14 @@ class ChatLoop:
         self.coding_client = coding_client
         self.turns_used = 0
         self.cost_usd = 0.0
+        # Last thing _report() showed — what ask() hands back when a turn
+        # was refused before it started.
+        self._last_report: str | None = None
+        # One turn at a time. `nero` runs the terminal REPL and the Telegram
+        # bridge against this same loop, so without it two turns could append
+        # to self.messages at once and hand the provider an interleaved
+        # conversation.
+        self._turn_lock = threading.RLock()
         # Seed from persisted history when memory is on; else a blank session.
         self.messages: list[dict] = history.recent() if history else []
 
@@ -160,198 +170,216 @@ class ChatLoop:
             if text.lower() in EXIT_COMMANDS:
                 self._goodbye()
                 return
+            self.ask(text)
 
-            if self.registry is not None:
-                self.registry.reset_turn()
+    def ask(self, text: str) -> str | None:
+        """Run one user turn to completion, and return what the user should be
+        shown: the reply, or the message explaining why there isn't one.
 
-            limit_message = self._limit_message()
-            if limit_message is not None:
-                self.console.print(f"[red]{limit_message}[/red]")
-                continue
+        The REPL ignores the return value — it has already watched the reply
+        stream past. It exists for interfaces with no terminal to stream to
+        (nero/telegram.py), which need the same turn — fallback chain, key
+        rotation, recall, every error branch — without reimplementing it.
 
-            is_code_turn = False
-            if text == "/image" or text.startswith("/image "):
-                image_turn = self._image_turn(text)
-                if image_turn is None:
-                    continue
-                user_message, history_text = image_turn
-            elif text == "/code" or text.startswith("/code "):
-                code_turn = self._code_turn(text)
-                if code_turn is None:
-                    continue
-                user_message, history_text = code_turn
-                is_code_turn = True
+        Serialized: `nero` drives this from both the terminal and the Telegram
+        bridge, and one conversation cannot have two turns in flight.
+        """
+        with self._turn_lock:
+            return self._ask(text)
+
+    def _ask(self, text: str) -> str | None:
+        if self.registry is not None:
+            self.registry.reset_turn()
+
+        limit_message = self._limit_message()
+        if limit_message is not None:
+            return self._report(f"[red]{limit_message}[/red]")
+
+        is_code_turn = False
+        if text == "/image" or text.startswith("/image "):
+            image_turn = self._image_turn(text)
+            if image_turn is None:
+                return self._last_report
+            user_message, history_text = image_turn
+        elif text == "/code" or text.startswith("/code "):
+            code_turn = self._code_turn(text)
+            if code_turn is None:
+                return self._last_report
+            user_message, history_text = code_turn
+            is_code_turn = True
+        else:
+            user_message = {"role": "user", "content": self._recalled(text) + text}
+            history_text = text
+
+        self.turns_used += 1
+        # /code routes this one turn to llm.coding_model; every other
+        # turn (and /code with nothing resolved) uses the primary. Key
+        # rotation is scoped to the real primary only — a one-off routed
+        # client never rotates.
+        primary_client = self.coding_client if (is_code_turn and self.coding_client) else self.client
+        allow_rotation = primary_client is self.client
+        if is_code_turn:
+            if self.coding_client:
+                self.console.print(
+                    f"[dim]Routing to {primary_client.model} via "
+                    f"{primary_client.provider} for this turn.[/dim]"
+                )
             else:
-                user_message = {"role": "user", "content": self._recalled(text) + text}
-                history_text = text
-
-            self.turns_used += 1
-            # /code routes this one turn to llm.coding_model; every other
-            # turn (and /code with nothing resolved) uses the primary. Key
-            # rotation is scoped to the real primary only — a one-off routed
-            # client never rotates.
-            primary_client = self.coding_client if (is_code_turn and self.coding_client) else self.client
-            allow_rotation = primary_client is self.client
-            if is_code_turn:
-                if self.coding_client:
-                    self.console.print(
-                        f"[dim]Routing to {primary_client.model} via "
-                        f"{primary_client.provider} for this turn.[/dim]"
-                    )
-                else:
-                    self.console.print(
-                        "[dim]No coding model configured — using the primary "
-                        "model for this turn.[/dim]"
-                    )
-            used_client = primary_client
-            self.messages.append(user_message)
-            self._trim()
-            # Recomputed after trimming rather than captured before the
-            # append: user_message is always the last element (trimming
-            # only ever touches a prefix of self.messages), so this is valid
-            # whether or not anything was actually dropped this turn.
-            turn_start = len(self.messages) - 1
-            self._prefix()
+                self.console.print(
+                    "[dim]No coding model configured — using the primary "
+                    "model for this turn.[/dim]"
+                )
+        used_client = primary_client
+        self.messages.append(user_message)
+        self._trim()
+        # Recomputed after trimming rather than captured before the
+        # append: user_message is always the last element (trimming
+        # only ever touches a prefix of self.messages), so this is valid
+        # whether or not anything was actually dropped this turn.
+        turn_start = len(self.messages) - 1
+        self._prefix()
+        try:
             try:
+                started = time.monotonic()
                 try:
-                    started = time.monotonic()
-                    try:
-                        primary_client.send(self.messages, on_text=self._print_chunk)
-                    except litellm.exceptions.RateLimitError:
-                        # One rotation per turn, primary only, before the
-                        # fallback chain is even considered — see v1.6.0 spec.
-                        rotated_key = self._next_key_for_rotation() if allow_rotation else None
-                        if rotated_key is None:
-                            raise
-                        primary_client.api_key = rotated_key
-                        del self.messages[turn_start:]
-                        self.messages.append(user_message)
-                        self.console.print(
-                            "\n[yellow]Rate limited — retrying "
-                            f"{primary_client.model} via {primary_client.provider} "
-                            "with another key.[/yellow]"
-                        )
-                        self._prefix()
-                        started = time.monotonic()
-                        primary_client.send(self.messages, on_text=self._print_chunk)
-                    provider_key, model_key = _client_key(primary_client)
-                    self.stats.record_success(provider_key, model_key)
-                    self.stats.record_latency(
-                        provider_key, model_key, time.monotonic() - started
-                    )
-                except TRANSIENT_ERRORS:
-                    self.stats.record_failure(*_client_key(primary_client))
-                    if not self.fallback_clients:
+                    primary_client.send(self.messages, on_text=self._print_chunk)
+                except litellm.exceptions.RateLimitError:
+                    # One rotation per turn, primary only, before the
+                    # fallback chain is even considered — see v1.6.0 spec.
+                    rotated_key = self._next_key_for_rotation() if allow_rotation else None
+                    if rotated_key is None:
                         raise
-                    # Walk the chain in routed/health-filtered order; first
-                    # success wins. Each attempt rolls back first — partial
-                    # tool/assistant turns from the failed stream must not leak
-                    # into the retry, and a failed fallback attempt can leave
-                    # its own partial state.
-                    candidates = self._ordered_fallback_candidates()
-                    for i, fallback_client in enumerate(candidates):
-                        del self.messages[turn_start:]
-                        self.messages.append(user_message)
-                        self.console.print(
-                            "\n[yellow]Primary model unreachable — retrying with "
-                            f"{fallback_client.model} via "
-                            f"{fallback_client.provider}.[/yellow]"
-                        )
-                        self._prefix()
-                        try:
-                            started = time.monotonic()
-                            fallback_client.send(self.messages, on_text=self._print_chunk)
-                            used_client = fallback_client
-                            self.stats.record_success(*_client_key(fallback_client))
-                            self.stats.record_latency(
-                                *_client_key(fallback_client), time.monotonic() - started
-                            )
-                            break
-                        except TRANSIENT_ERRORS:
-                            self.stats.record_failure(*_client_key(fallback_client))
-                            # Exceptions from the last attempt propagate to the
-                            # existing outer handlers unchanged.
-                            if i == len(candidates) - 1:
-                                raise
-                self.cost_usd += getattr(used_client, "last_turn_cost", 0.0) or 0.0
-                self.console.print()
-                if self.history is not None and self.messages[-1].get("role") == "assistant":
-                    # Persist only on success — past every rollback branch below.
-                    # history_text is the user text (plain, or "[image: ...] "
-                    # for an image turn — history is text-only); messages[-1] is
-                    # the final assistant text turn — except when MAX_TOOL_ROUNDS
-                    # is exhausted, which leaves a tool message last; the role
-                    # check excludes that case.
-                    self.history.append_turn(
-                        history_text,
-                        self.messages[-1]["content"],
+                    primary_client.api_key = rotated_key
+                    del self.messages[turn_start:]
+                    self.messages.append(user_message)
+                    self.console.print(
+                        "\n[yellow]Rate limited — retrying "
+                        f"{primary_client.model} via {primary_client.provider} "
+                        "with another key.[/yellow]"
                     )
-                # Inspection hook (visible under `nero --debug`): history must
-                # contain only clean text turns and structured tool pairs.
-                logger.debug("history after turn: %r", self.messages)
-            except KeyboardInterrupt:
-                del self.messages[turn_start:]
-                self.console.print("\n[dim]Interrupted.[/dim]")
-            except litellm.exceptions.AuthenticationError:
-                del self.messages[turn_start:]
-                self.console.print(
-                    "\n[red]Your API key was rejected.[/red] "
-                    "Update it with [bold]nero config[/bold]."
+                    self._prefix()
+                    started = time.monotonic()
+                    primary_client.send(self.messages, on_text=self._print_chunk)
+                provider_key, model_key = _client_key(primary_client)
+                self.stats.record_success(provider_key, model_key)
+                self.stats.record_latency(
+                    provider_key, model_key, time.monotonic() - started
                 )
-            except OllamaModelError as exc:
-                # Ordered before the connection branch on purpose: the server
-                # answered, so "is Ollama running?" is the wrong question.
-                del self.messages[turn_start:]
-                self.console.print(f"\n[red]{escape(str(exc))}[/red]")
-            except litellm.exceptions.NotFoundError:
-                # The most likely custom-endpoint failure: a model id the server
-                # doesn't have, or a base URL with the wrong /v1 shape for its
-                # dialect.
-                del self.messages[turn_start:]
-                model = getattr(primary_client, "model", None) or "that model"
-                self.console.print(
-                    f"\n[red]The provider has no model called [bold]{model}[/bold].[/red] "
-                    "Check the model name in [bold]nero config[/bold]."
+            except TRANSIENT_ERRORS:
+                self.stats.record_failure(*_client_key(primary_client))
+                if not self.fallback_clients:
+                    raise
+                # Walk the chain in routed/health-filtered order; first
+                # success wins. Each attempt rolls back first — partial
+                # tool/assistant turns from the failed stream must not leak
+                # into the retry, and a failed fallback attempt can leave
+                # its own partial state.
+                candidates = self._ordered_fallback_candidates()
+                for i, fallback_client in enumerate(candidates):
+                    del self.messages[turn_start:]
+                    self.messages.append(user_message)
+                    self.console.print(
+                        "\n[yellow]Primary model unreachable — retrying with "
+                        f"{fallback_client.model} via "
+                        f"{fallback_client.provider}.[/yellow]"
+                    )
+                    self._prefix()
+                    try:
+                        started = time.monotonic()
+                        fallback_client.send(self.messages, on_text=self._print_chunk)
+                        used_client = fallback_client
+                        self.stats.record_success(*_client_key(fallback_client))
+                        self.stats.record_latency(
+                            *_client_key(fallback_client), time.monotonic() - started
+                        )
+                        break
+                    except TRANSIENT_ERRORS:
+                        self.stats.record_failure(*_client_key(fallback_client))
+                        # Exceptions from the last attempt propagate to the
+                        # existing outer handlers unchanged.
+                        if i == len(candidates) - 1:
+                            raise
+            self.cost_usd += getattr(used_client, "last_turn_cost", 0.0) or 0.0
+            self.console.print()
+            if self.history is not None and self.messages[-1].get("role") == "assistant":
+                # Persist only on success — past every rollback branch below.
+                # history_text is the user text (plain, or "[image: ...] "
+                # for an image turn — history is text-only); messages[-1] is
+                # the final assistant text turn — except when MAX_TOOL_ROUNDS
+                # is exhausted, which leaves a tool message last; the role
+                # check excludes that case.
+                self.history.append_turn(
+                    history_text,
+                    self.messages[-1]["content"],
                 )
-            except litellm.exceptions.RateLimitError:
-                # Reached only once rotation and the fallback chain are spent.
-                # Distinct from the connection branch below on purpose: the
-                # provider answered, so "check your connection" is wrong advice.
-                del self.messages[turn_start:]
-                self.console.print(
-                    "\n[yellow]The provider is rate-limiting you.[/yellow] Wait a "
-                    "moment and try again, or switch models with [bold]nero config[/bold]."
-                )
-            except (
-                litellm.exceptions.APIConnectionError,
-                litellm.exceptions.ServiceUnavailableError,
-                litellm.exceptions.Timeout,
-                httpx.HTTPError,  # direct-Ollama path talks httpx, not litellm
-            ):
-                logger.debug("provider unreachable", exc_info=True)
-                del self.messages[turn_start:]
-                provider = getattr(primary_client, "provider", None)
-                api_base = getattr(primary_client, "api_base", None)
-                if provider == "ollama":
-                    hint = " If you're using Ollama, make sure it's running ([bold]ollama serve[/bold])."
-                elif api_base:
-                    hint = f" Check that a server is running at [bold]{api_base}[/bold]."
-                else:
-                    hint = " Check your connection and try again."
-                self.console.print(f"\n[red]Could not reach the model provider.[/red]{hint}")
-            except Exception as exc:  # noqa: BLE001 — the REPL must never crash on a turn
-                logger.debug("turn failed", exc_info=True)
-                del self.messages[turn_start:]
-                self.console.print(
-                    f"\n[red]Something went wrong with that turn:[/red] {exc}\n"
-                    "You can retry, or type exit to quit."
-                )
-            finally:
-                # Every branch above is reached without a single chunk having
-                # arrived, so _print_chunk never got to stop the thread.
-                if self._spinner is not None:
-                    self._spinner.stop()
-                    self._spinner = None
+            # Inspection hook (visible under `nero --debug`): history must
+            # contain only clean text turns and structured tool pairs.
+            logger.debug("history after turn: %r", self.messages)
+            last = self.messages[-1]
+            return last["content"] if last.get("role") == "assistant" else None
+        except KeyboardInterrupt:
+            del self.messages[turn_start:]
+            return self._report("\n[dim]Interrupted.[/dim]")
+        except litellm.exceptions.AuthenticationError:
+            del self.messages[turn_start:]
+            return self._report(
+                "\n[red]Your API key was rejected.[/red] "
+                "Update it with [bold]nero config[/bold]."
+            )
+        except OllamaModelError as exc:
+            # Ordered before the connection branch on purpose: the server
+            # answered, so "is Ollama running?" is the wrong question.
+            del self.messages[turn_start:]
+            return self._report(f"\n[red]{escape(str(exc))}[/red]")
+        except litellm.exceptions.NotFoundError:
+            # The most likely custom-endpoint failure: a model id the server
+            # doesn't have, or a base URL with the wrong /v1 shape for its
+            # dialect.
+            del self.messages[turn_start:]
+            model = getattr(primary_client, "model", None) or "that model"
+            return self._report(
+                f"\n[red]The provider has no model called [bold]{model}[/bold].[/red] "
+                "Check the model name in [bold]nero config[/bold]."
+            )
+        except litellm.exceptions.RateLimitError:
+            # Reached only once rotation and the fallback chain are spent.
+            # Distinct from the connection branch below on purpose: the
+            # provider answered, so "check your connection" is wrong advice.
+            del self.messages[turn_start:]
+            return self._report(
+                "\n[yellow]The provider is rate-limiting you.[/yellow] Wait a "
+                "moment and try again, or switch models with [bold]nero config[/bold]."
+            )
+        except (
+            litellm.exceptions.APIConnectionError,
+            litellm.exceptions.ServiceUnavailableError,
+            litellm.exceptions.Timeout,
+            httpx.HTTPError,  # direct-Ollama path talks httpx, not litellm
+        ):
+            logger.debug("provider unreachable", exc_info=True)
+            del self.messages[turn_start:]
+            provider = getattr(primary_client, "provider", None)
+            api_base = getattr(primary_client, "api_base", None)
+            if provider == "ollama":
+                hint = " If you're using Ollama, make sure it's running ([bold]ollama serve[/bold])."
+            elif api_base:
+                hint = f" Check that a server is running at [bold]{api_base}[/bold]."
+            else:
+                hint = " Check your connection and try again."
+            return self._report(f"\n[red]Could not reach the model provider.[/red]{hint}")
+        except Exception as exc:  # noqa: BLE001 — the REPL must never crash on a turn
+            logger.debug("turn failed", exc_info=True)
+            del self.messages[turn_start:]
+            return self._report(
+                f"\n[red]Something went wrong with that turn:[/red] {exc}\n"
+                "You can retry, or type exit to quit."
+            )
+        finally:
+            # Every branch above is reached without a single chunk having
+            # arrived, so _print_chunk never got to stop the thread.
+            if self._spinner is not None:
+                self._spinner.stop()
+                self._spinner = None
 
     def _trim(self) -> None:
         """Cap the live window so the prompt — and so the wait for a reply —
@@ -402,21 +430,21 @@ class ChatLoop:
         try:
             parts = shlex.split(text)
         except ValueError as exc:
-            self.console.print(f"[red]Could not parse that command: {escape(str(exc))}[/red]")
+            self._report(f"[red]Could not parse that command: {escape(str(exc))}[/red]")
             return None
         if len(parts) < 2:
-            self.console.print(escape("Usage: /image <path> [question]"), style="red")
+            self._report("[red]" + escape("Usage: /image <path> [question]") + "[/red]")
             return None
         path_str = parts[1]
         question = " ".join(parts[2:]) or DEFAULT_IMAGE_QUESTION
 
         error = _validate_image(path_str)
         if error:
-            self.console.print(f"[red]{escape(error)}[/red]")
+            self._report(f"[red]{escape(error)}[/red]")
             return None
 
         if self.client.provider == "ollama":
-            self.console.print(
+            self._report(
                 "[red]Image input isn't supported on the local Ollama path yet.[/red]"
             )
             return None
@@ -437,7 +465,7 @@ class ChatLoop:
         """
         request = text.removeprefix("/code").strip()
         if not request:
-            self.console.print(escape("Usage: /code <request>"), style="red")
+            self._report("[red]" + escape("Usage: /code <request>") + "[/red]")
             return None
         return {"role": "user", "content": request}, request
 
@@ -474,6 +502,15 @@ class ChatLoop:
             if not self.stats.is_unhealthy(*_client_key(client))
         ]
         return healthy or ordered_clients
+
+    def _report(self, markup: str) -> str:
+        """Show `markup` on the console and return it as plain text.
+
+        One place, so the terminal and a text-only interface can never drift
+        into saying different things about the same failure."""
+        self.console.print(markup)
+        self._last_report = Text.from_markup(markup).plain.strip()
+        return self._last_report
 
     def _prefix(self) -> None:
         """Print the assistant prompt and spin until the first token lands."""

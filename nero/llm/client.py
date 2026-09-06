@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from datetime import datetime
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 
@@ -33,6 +34,34 @@ REQUEST_TIMEOUT = 120.0
 MAX_TOOL_ROUNDS = 10
 
 APOLOGY = "I didn't quite catch that — could you rephrase?"
+
+
+def current_time_line() -> str:
+    """Today's date and the local clock, as one line for the system prompt.
+
+    A model's only sense of "now" is its training cutoff, so without this it
+    confidently answers with a date months or years in the past.
+
+    Resolved per request, not once at startup: the Telegram bridge and a
+    launchd-installed session can run for days, and a date captured at boot
+    goes stale exactly as badly as no date at all.
+
+    Truncated to the minute on purpose. The string then stays identical across
+    a quick back-and-forth, so the prompt prefix a provider (or ollama's KV
+    cache) has already processed still matches. Measured on llama3.2: minute
+    precision costs nothing against no timestamp at all (0.20 s to first token
+    either way), where an ISO timestamp with microseconds cost 0.37 s by
+    invalidating the cache on every single turn.
+    """
+    now = datetime.now().astimezone()
+    zone = now.strftime("%Z") or now.strftime("%z")
+    # Day and year are interpolated rather than formatted: the dash-prefixed
+    # strftime codes that strip leading zeros are a glibc extension, and Nero
+    # ships a Windows binary where they raise.
+    return (
+        f"\n\nRight now it is {now:%A}, {now.day} {now:%B} {now.year}, "
+        f"{now:%H:%M} {zone}."
+    )
 
 litellm.suppress_debug_info = True
 
@@ -227,6 +256,12 @@ class LLMClient:
     def _tool_definitions(self) -> list[dict]:
         return self.registry.tool_definitions()
 
+    def system_message(self) -> str:
+        """The system prompt as sent right now — the stable core plus today's
+        date. Separate from `self.system_prompt` so the core stays a fixed,
+        testable string and only this varies."""
+        return self.system_prompt + current_time_line()
+
     async def stream_chat(self, messages: list, tools: list) -> AsyncIterator[str]:
         """One completion round: yields display-text deltas as they arrive.
 
@@ -250,7 +285,7 @@ class LLMClient:
             kwargs["aws_region_name"] = self.aws_region
         response = await litellm.acompletion(
             model=self.litellm_model,
-            messages=[{"role": "system", "content": self.system_prompt}, *messages],
+            messages=[{"role": "system", "content": self.system_message()}, *messages],
             tools=tools or None,
             max_tokens=MAX_TOKENS,
             stream=True,
@@ -307,7 +342,7 @@ class LLMClient:
 
     async def _ollama_chat(self, messages: list, tools: list) -> AsyncIterator[str]:
         """Native Ollama path: /api/chat directly, no LiteLLM translation."""
-        request_messages = [{"role": "system", "content": self.system_prompt}]
+        request_messages = [{"role": "system", "content": self.system_message()}]
         request_messages += [self._to_ollama_message(m) for m in messages]
         model = self.config.model.removeprefix("ollama/")
         parts: list[str] = []

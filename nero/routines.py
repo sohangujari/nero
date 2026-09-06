@@ -137,6 +137,62 @@ def install_routine(
     return f"Installed {label} ({path})."
 
 
+BRIDGE_LABEL = "com.neroagent.telegram"
+
+
+def bridge_plist_path(agents_dir: Path) -> Path:
+    return Path(agents_dir) / f"{BRIDGE_LABEL}.plist"
+
+
+def install_bridge(executable: str, agents_dir: Path) -> str:
+    """Keep `nero telegram` running: at login, and again if it ever stops.
+
+    A routine is a schedule (`StartCalendarInterval`); this is a daemon, so it
+    takes RunAtLoad + KeepAlive instead. Same plist plumbing either way.
+    """
+    agents_dir = Path(agents_dir)
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    path = bridge_plist_path(agents_dir)
+    log_dir = Path(user_log_dir("nero"))
+    log_dir.mkdir(parents=True, exist_ok=True)
+    plist = {
+        "Label": BRIDGE_LABEL,
+        "ProgramArguments": [executable, "telegram"],
+        "RunAtLoad": True,
+        "KeepAlive": True,
+        # Long polling reconnects on its own; this only bites if the process
+        # dies instantly and repeatedly, where a tight respawn loop would burn
+        # CPU and hammer Telegram.
+        "ThrottleInterval": 30,
+        "StandardOutPath": str(log_dir / "telegram.out.log"),
+        "StandardErrorPath": str(log_dir / "telegram.err.log"),
+    }
+    with path.open("wb") as f:
+        plistlib.dump(plist, f)
+
+    if sys.platform != "darwin":
+        return f"Wrote {path}. Loading skipped: launchd is darwin-only."
+
+    _run_launchctl("bootout", f"gui/{os.getuid()}/{BRIDGE_LABEL}")
+    result = _run_launchctl("bootstrap", f"gui/{os.getuid()}", str(path))
+    if result.returncode != 0:
+        result = _run_launchctl("load", "-w", str(path))
+        if result.returncode != 0:
+            return f"Wrote {path}, but launchctl could not load it: {result.stderr.strip()}"
+    return f"Installed {BRIDGE_LABEL}. Logs: {log_dir / 'telegram.err.log'}"
+
+
+def uninstall_bridge(agents_dir: Path) -> str:
+    path = bridge_plist_path(Path(agents_dir))
+    if sys.platform == "darwin":
+        _run_launchctl("bootout", f"gui/{os.getuid()}/{BRIDGE_LABEL}")
+        _run_launchctl("unload", "-w", str(path))
+    if not path.exists():
+        return "The Telegram bridge was not installed."
+    path.unlink()
+    return f"Removed {BRIDGE_LABEL}."
+
+
 def uninstall_routine(name: str, agents_dir: Path) -> str:
     """Unload from launchd and remove the plist. A missing plist is a no-op,
     not an error."""

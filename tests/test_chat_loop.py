@@ -773,6 +773,61 @@ class TestGeneralPurposeRegression:
         assert "".join(shown) == "Calculator is open."
 
 
+class TestCurrentTime:
+    """A model's only sense of "now" is its training cutoff, so without this it
+    answers date questions confidently and months out of date."""
+
+    def test_the_sent_system_prompt_carries_todays_date(self):
+        from datetime import datetime
+
+        sent = make_client().system_message()
+        now = datetime.now().astimezone()
+        assert f"{now:%A}" in sent
+        assert str(now.year) in sent
+        assert f"{now:%H:%M}" in sent
+
+    def test_the_core_prompt_itself_stays_fixed(self):
+        # system_prompt is the stable, testable half; only system_message varies.
+        assert "Right now it is" not in make_client().system_prompt
+
+    def test_it_is_resolved_per_request_not_at_startup(self, monkeypatch):
+        """The Telegram bridge and a launchd session can run for days. A date
+        captured once at boot is as wrong as no date at all."""
+        from nero.llm import client as client_module
+
+        client = make_client()
+        monkeypatch.setattr(client_module, "current_time_line", lambda: "\n\nSTAMP-A")
+        first = client.system_message()
+        monkeypatch.setattr(client_module, "current_time_line", lambda: "\n\nSTAMP-B")
+        assert client.system_message() != first
+
+    def test_it_is_stable_within_a_minute(self):
+        """Truncated to the minute so a quick back-and-forth still matches the
+        prefix a provider has already processed — measured on llama3.2 as the
+        difference between 0.20 s and 0.37 s to first token."""
+        from nero.llm.client import current_time_line
+
+        assert current_time_line() == current_time_line()
+        assert ":" in current_time_line()  # has a clock, not just a date
+
+    def test_it_uses_no_glibc_only_format_codes(self):
+        """%-d and %-I raise on Windows, and Nero ships a Windows binary."""
+        import inspect
+
+        from nero.llm.client import current_time_line
+
+        source = inspect.getsource(current_time_line)
+        assert "%-" not in source
+
+    def test_both_provider_paths_send_it(self):
+        import inspect
+
+        from nero.llm.client import LLMClient
+
+        for method in (LLMClient._litellm_chat, LLMClient._ollama_chat):
+            assert "system_message()" in inspect.getsource(method)
+
+
 class TestSystemPromptFraming:
     def test_states_general_capability_first(self):
         prompt = make_client().system_prompt

@@ -152,6 +152,29 @@ def test_voice_catalog_has_labeled_genders():
     assert all(gender in ("female", "male") for _vid, _name, gender in VOICE_CATALOG)
 
 
+def test_catalog_offers_no_voice_kokoro_grades_poorly():
+    """The picker is the only place most users choose a voice, so what it
+    offers IS the quality of the product. It used to list am_adam — graded F+,
+    the worst voice in Kokoro's American English set — which is what "the reply
+    doesn't sound clear or human" turned out to be."""
+    ids = {vid for vid, _name, _gender in VOICE_CATALOG}
+    for rejected in ("am_adam", "af_jessica", "af_river", "am_echo", "am_eric",
+                     "am_liam", "am_onyx", "af_sky"):
+        assert rejected not in ids, f"{rejected} grades below C+ and must not be offered"
+
+
+def test_catalog_leads_with_the_best_graded_voice():
+    assert VOICE_CATALOG[0][0] == "af_heart"  # grade A
+    assert VOICE_CATALOG[1][0] == "af_bella"  # grade A-
+
+
+def test_catalog_offers_a_male_voice_that_is_not_the_worst_one():
+    males = [vid for vid, _name, gender in VOICE_CATALOG if gender == "male"]
+    # am_michael, am_fenrir, am_puck are the C+ options; at least two, so
+    # dropping am_adam did not leave male users with a single choice.
+    assert len(males) >= 3
+
+
 def test_build_tts_returns_kokoro(monkeypatch):
     monkeypatch.setattr(KokoroTTS, "_load", staticmethod(lambda: FakeKokoro()))
     engine = build_tts("kokoro", "af_bella")
