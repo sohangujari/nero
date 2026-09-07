@@ -11,3 +11,6 @@ build/
 
 # specs/plans/PRDs — local working notes, never committed
 docs/
+# web UI build inputs (the built bundle in nero/webui_dist IS committed)
+web/node_modules/
+web/.vite/

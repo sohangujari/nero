@@ -1,60 +1,62 @@
+"""The dashboard's read side (nero/dashboard.py) and its routes in the web UI.
+
+The page is now the React/shadcn app; this module is only the data behind the
+Activity and Config tabs. The whitelist is the part that matters — it decides
+what a browser is allowed to see, and it must never reach the keyring.
+"""
+
 import json
 import threading
+import time
 import urllib.error
 import urllib.request
 from datetime import UTC, datetime
-from http.server import ThreadingHTTPServer
 
 import pytest
 
+from nero import dashboard
 from nero.config.manager import ConfigManager
 from nero.core.audit_log import AuditEntry, AuditLog
-from nero.dashboard import DashboardHandler
 from nero.memory.history_store import HistoryStore
+from nero.webui import TOKEN_HEADER, serve
 
 
 @pytest.fixture
-def dashboard_server(tmp_path, monkeypatch):
-    """A real dashboard server on an ephemeral port, pointed at tmp_path DBs."""
+def isolated(tmp_path, monkeypatch):
+    """Point every store at tmp_path — never the developer's real files."""
     audit_path = tmp_path / "audit.db"
     history_path = tmp_path / "history.db"
     monkeypatch.setattr("nero.dashboard.default_audit_path", lambda: audit_path)
     monkeypatch.setattr("nero.dashboard.default_history_path", lambda: history_path)
-    # Never read the developer's real config file.
     monkeypatch.setattr(
         "nero.dashboard.ConfigManager", lambda: ConfigManager(config_dir=tmp_path / "config")
     )
-
-    httpd = ThreadingHTTPServer(("127.0.0.1", 0), DashboardHandler)
-    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield httpd, audit_path, history_path
-    finally:
-        httpd.shutdown()
-        httpd.server_close()
-        thread.join(timeout=2)
+    return audit_path, history_path
 
 
-def _url(httpd, path: str) -> str:
-    port = httpd.server_address[1]
-    return f"http://127.0.0.1:{port}{path}"
+class TestPayloads:
+    def test_config_excludes_anything_from_the_keyring(self, isolated):
+        body = json.dumps(dashboard.config_payload())
+        assert "api_key" not in body.lower()
+        assert "token" not in body.lower()
 
+    def test_config_includes_the_provider_and_model(self, isolated):
+        payload = dashboard.config_payload()
+        assert payload["llm"]["provider"] == "claude"
+        assert payload["llm"]["model"]
+        assert set(payload) == {"mode", "llm", "skills", "voice"}
 
-def _get(httpd, path: str):
-    return urllib.request.urlopen(_url(httpd, path))
+    def test_a_broken_config_file_does_not_crash_the_view(self, tmp_path, monkeypatch):
+        from nero.config.manager import ConfigError
 
+        def boom():
+            raise ConfigError("bad yaml")
 
-class TestDashboard:
-    def test_index_page_is_html_with_nero_agent(self, dashboard_server):
-        httpd, _, _ = dashboard_server
-        resp = _get(httpd, "/")
-        assert resp.status == 200
-        assert resp.headers["Content-Type"].startswith("text/html")
-        assert "Nero Agent" in resp.read().decode()
+        monkeypatch.setattr("nero.dashboard.ConfigManager", lambda: type("M", (), {"load": staticmethod(boom)})())
+        assert dashboard.config_payload()["llm"]["provider"] == "claude"  # defaults
 
-    def test_audit_endpoint_returns_recorded_entries(self, dashboard_server):
-        httpd, audit_path, _ = dashboard_server
+    def test_audit_reports_recorded_entries(self, isolated):
+        audit_path, _ = isolated
         AuditLog(audit_path).record(
             AuditEntry(
                 timestamp=datetime.now(UTC),
@@ -64,46 +66,78 @@ class TestDashboard:
                 provider="claude",
             )
         )
-        data = json.loads(_get(httpd, "/api/audit").read())
-        assert len(data) == 1
-        assert data[0]["skill_name"] == "open_app"
-        assert data[0]["provider"] == "claude"
+        entries = dashboard.audit_payload()
+        assert len(entries) == 1
+        assert entries[0]["skill_name"] == "open_app"
+        assert entries[0]["provider"] == "claude"
 
-    def test_history_endpoint_returns_appended_turns(self, dashboard_server):
-        httpd, _, history_path = dashboard_server
+    def test_history_reports_appended_turns(self, isolated):
+        _, history_path = isolated
         HistoryStore(history_path, session_id="s1").append_turn("hi", "hello")
-        data = json.loads(_get(httpd, "/api/history").read())
-        assert data == [
+        assert dashboard.history_payload() == [
             {"role": "user", "content": "hi"},
             {"role": "assistant", "content": "hello"},
         ]
 
-    def test_config_endpoint_includes_provider_excludes_keys(self, dashboard_server):
-        httpd, _, _ = dashboard_server
-        body = _get(httpd, "/api/config").read().decode()
-        assert "api_key" not in body
-        data = json.loads(body)
-        assert data["llm"]["provider"] == "claude"
-        assert data["llm"]["model"]
+    def test_empty_stores_are_empty_lists_not_errors(self, isolated):
+        assert dashboard.audit_payload() == []
+        assert dashboard.history_payload() == []
 
-    def test_empty_dbs_render_as_empty_lists(self, dashboard_server):
-        httpd, _, _ = dashboard_server
-        assert json.loads(_get(httpd, "/api/audit").read()) == []
-        assert json.loads(_get(httpd, "/api/history").read()) == []
 
-    def test_post_is_rejected(self, dashboard_server):
-        httpd, _, _ = dashboard_server
-        request = urllib.request.Request(_url(httpd, "/api/audit"), method="POST")
-        with pytest.raises(urllib.error.HTTPError) as exc_info:
-            urllib.request.urlopen(request)
-        assert exc_info.value.code == 405
+@pytest.fixture
+def server(isolated):
+    import socket
 
-    def test_unknown_path_is_404(self, dashboard_server):
-        httpd, _, _ = dashboard_server
-        with pytest.raises(urllib.error.HTTPError) as exc_info:
-            _get(httpd, "/nope")
-        assert exc_info.value.code == 404
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
 
-    def test_binds_localhost_only(self, dashboard_server):
-        httpd, _, _ = dashboard_server
-        assert httpd.server_address[0] == "127.0.0.1"
+    thread = threading.Thread(
+        target=lambda: serve(lambda t: "ok", None, "Nero", port=port, token="SECRET",
+                             on_ready=lambda _u: None),
+        daemon=True,
+    )
+    thread.start()
+    for _ in range(50):
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=0.2)
+            break
+        except urllib.error.HTTPError:
+            break
+        except OSError:
+            time.sleep(0.02)
+    return port
+
+
+def call(port, path, headers=None, host=None):
+    request = urllib.request.Request(f"http://127.0.0.1:{port}{path}")
+    request.add_header("Host", host or f"127.0.0.1:{port}")
+    for key, value in (headers or {}).items():
+        request.add_header(key, value)
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return response.status, response.read().decode()
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode()
+
+
+class TestRoutes:
+    """These used to be open on a loopback port. They now sit behind the token,
+    because the same server also accepts chat turns that can run skills."""
+
+    def test_audit_needs_the_token(self, server):
+        assert call(server, "/api/audit")[0] == 403
+        status, body = call(server, "/api/audit", {TOKEN_HEADER: "SECRET"})
+        assert status == 200 and json.loads(body) == []
+
+    def test_config_needs_the_token(self, server):
+        assert call(server, "/api/config")[0] == 403
+        status, body = call(server, "/api/config", {TOKEN_HEADER: "SECRET"})
+        assert status == 200 and json.loads(body)["llm"]["provider"] == "claude"
+
+    def test_config_over_the_wire_still_carries_no_key(self, server):
+        _, body = call(server, "/api/config", {TOKEN_HEADER: "SECRET"})
+        assert "api_key" not in body.lower()
+
+    def test_a_rebound_host_is_refused(self, server):
+        assert call(server, "/api/config", {TOKEN_HEADER: "SECRET"}, host="evil.com")[0] == 403

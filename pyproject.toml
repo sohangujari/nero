@@ -43,6 +43,11 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["nero*"]
 
+# The built web UI (web/ -> nero/webui_dist). Committed and shipped so
+# `pip install nero` and the frozen binary both carry it with no node involved.
+[tool.setuptools.package-data]
+nero = ["webui_dist/**/*"]
+
 [tool.uv]
 # uv manages an isolated Python 3.12 (see .python-version); never the system one.
 

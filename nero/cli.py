@@ -31,7 +31,6 @@ from nero.core.approvals import ApprovalQueue, default_approvals_path, queue_con
 from nero.core.audit_log import AuditLog, default_audit_path
 from nero.core.chat_loop import ChatLoop
 from nero.mcp import MCPConnection, MCPError, load_servers
-from nero.dashboard import run_dashboard
 from nero.hardware.detector import (
     HardwareSpecs,
     detect_hardware,
@@ -59,6 +58,7 @@ from nero.voice.stt import STT_MODELS, FasterWhisperSTT
 from nero.voice.tts import VOICE_CATALOG, build_tts
 from nero.voice.vad import VoiceActivityDetector
 from nero.telegram import PairingStore, TelegramBot, TelegramError, incoming, serve
+from nero import webui
 from nero.voice.voice_loop import VoiceLoop
 
 app = typer.Typer(add_completion=False, invoke_without_command=True)
@@ -760,16 +760,45 @@ def _await_pairing(bot: TelegramBot, pairings: PairingStore) -> int:
 
 @app.command()
 def dashboard(
-    port: int = typer.Option(8642, "--port", help="Port to serve the local dashboard on."),
+    port: int = typer.Option(webui.DEFAULT_PORT, "--port", help="Port to serve the dashboard on."),
 ) -> None:
-    """Serve a local read-only dashboard: history, skill audit, and config."""
+    """Nero Agent in a browser: chat, recent activity, and current config."""
+    manager = ConfigManager()
+    if not manager.exists():
+        _first_time_setup(manager)
+    config = _load_or_exit(manager)
+    _print_pending_approvals_notice()
+    api_key = _provider_preflight(manager, config)
+    mcp_skills, mcp_connections = _load_mcp(config)
+    registry = _build_registry(manager, config, extra_skills=mcp_skills)
+    loop, mcp_connections = _build_chat_loop(manager, config, api_key, registry, mcp_connections)
+
+    def ready(url: str) -> None:
+        console.print(
+            f"[bold]{config.assistant.name}[/bold] is at [bold]{escape(url)}[/bold]\n"
+            "[dim]The token in that link is what keeps other pages on this machine "
+            "out. It changes every run. Ctrl+C to stop.[/dim]"
+        )
+
     try:
-        run_dashboard(port)
+        webui.serve(
+            loop.ask,
+            _build_history(config),
+            config.assistant.name,
+            port=port,
+            on_ready=ready,
+        )
     except OSError as exc:
-        console.print(f"[red]Could not start dashboard: {exc}[/red]")
+        console.print(
+            f"[red]Could not start the dashboard: {escape(str(exc))}[/red] "
+            "Another process may be on that port — try [bold]--port[/bold]."
+        )
         raise typer.Exit(1) from exc
     except KeyboardInterrupt:
-        console.print("[dim]Dashboard stopped.[/dim]")
+        console.print("\n[dim]Dashboard stopped.[/dim]")
+    finally:
+        for connection in mcp_connections:
+            connection.close()
 
 
 @app.command()

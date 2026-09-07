@@ -11,6 +11,8 @@ from PyInstaller.utils.hooks import collect_dynamic_libs, collect_submodules, co
 
 hiddenimports = []
 datas = []
+# The built web UI; without it `nero web` starts and serves a build hint.
+datas += [("../nero/webui_dist", "nero/webui_dist")]
 binaries = []
 
 # play_music imports pynput.keyboard lazily inside WindowsController, and pynput

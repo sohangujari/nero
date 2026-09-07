@@ -233,6 +233,7 @@ exactly as it always has.
 | `nero` | terminal chat + Telegram |
 | `nero chat` | terminal chat alone |
 | `nero talk` | voice alone |
+| `nero dashboard` | the browser UI: chat, activity, config |
 | `nero telegram` | the Telegram bridge alone |
 
 A reply arriving from your phone prints into the terminal while `nero` is
@@ -255,7 +256,7 @@ terminal stayed yours alone.
 | `nero notes index` \| `nero notes search <q>` | Build and query the local FTS5 index over your notes |
 | `nero routine list` \| `run` \| `install` \| `uninstall` | Manage scheduled routines (launchd) |
 | `nero approvals` | Review destructive actions a routine queued for you |
-| `nero dashboard` | Read-only localhost viewer: history, skill audit, config |
+| `nero dashboard` | Browser UI: chat, skill activity, and current config |
 | `nero telegram setup` \| `approve <code>` \| `pending` | Connect a Telegram bot and pair a phone |
 | `nero telegram` | Answer Telegram messages from paired chats |
 | `nero telegram install` \| `uninstall` | Run the bridge in the background, from login |
@@ -424,6 +425,72 @@ untrusted data, and marks the turn — the confirmation prompt then says so,
 because an injected instruction could be behind the call that follows.
 
 Enable one with `nero config set skills.enabled.run_shell true`.
+
+## Dashboard
+
+Nero in a browser: chat, recent activity, and current config. React + Tailwind
+with real [shadcn/ui](https://ui.shadcn.com) components, served by stdlib
+`http.server`.
+
+```sh
+nero dashboard        # prints a link; --port to move it
+```
+
+```
+Nero is at http://127.0.0.1:8643/?token=jU69VwdSNaQci96f-j0wXC571Kf4IxNd
+```
+
+Three tabs:
+
+- **Chat** — your history from earlier sessions loads in, and a turn here is the
+  same turn as one in the terminal. `ChatLoop.ask` runs it, so the fallback
+  chain, key rotation, memory recall and skills all behave identically.
+- **Activity** — the skill audit: what Nero actually did, and whether it worked.
+- **Config** — the current settings, flattened to the `a.b.c` keys you would
+  type at `nero config set`. Read-only, and API keys are never sent: they live
+  in the OS keyring and the payload is whitelisted server-side.
+
+**The token is not decoration.** The old dashboard was GET-only and read-only;
+this one also accepts POST and can open apps and read files, which makes a
+loopback port a real trust boundary:
+
+- any website you have open can POST to `127.0.0.1` — a cross-origin form post
+  needs no preflight, and the attacker being unable to read the reply doesn't
+  help, because running the skill was the damage
+- so every `/api/` request carries a token, generated fresh each run and printed
+  once
+- the `Host` header is checked against loopback, or an attacker's hostname
+  resolving to `127.0.0.1` would count as same-origin (DNS rebinding)
+- `application/json` is required on chat, a second lock on the same door: a
+  browser only sends it cross-origin after a preflight this server never answers
+- other accounts on the machine can reach a loopback port; the token is what
+  keeps this to whoever can read the terminal that started it
+
+The page itself is served without a token: the bundle holds no secret and can't
+be read cross-origin, and serving it openly is what lets a reload work after the
+app takes the token out of the address bar (it keeps it in `sessionStorage`
+instead, so it stays out of browser history and out of any `Referer`).
+
+Replies arrive whole rather than streaming — the window shows *Thinking…* while
+a turn runs. `nero dashboard` does not start automatically with bare `nero`:
+opening a port should be something you asked for.
+
+### Working on the UI
+
+The source is in `web/`; the build output is committed to `nero/webui_dist/`, so
+`pip install nero` and the frozen binary carry the UI with **no node on the
+user's machine**. You only need node to change it:
+
+```sh
+cd web
+npm install
+npm run dev      # Vite dev server, with `nero dashboard` running for the API
+npm run build    # rebuilds nero/webui_dist — commit the result
+```
+
+Adding a component is the normal shadcn flow — `npx shadcn@latest add dialog` —
+then rebuild. A test fails if `nero/webui_dist` is missing, so a forgotten build
+can't ship.
 
 ## Telegram
 
