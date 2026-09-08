@@ -140,6 +140,58 @@ class HistoryStore:
             return []
         return [{"role": role, "content": content} for role, content in reversed(rows)]
 
+    def sessions(self) -> list[dict]:
+        """One row per session in the transcript, newest first.
+
+        `turns` is already keyed by session_id, so this is a group-by rather
+        than a second table — nothing to keep in sync, and it stays honest
+        about sessions written by the terminal, voice, Telegram and the
+        dashboard alike.
+        """
+        try:
+            connection = self._connect()
+            try:
+                rows = connection.execute(
+                    "SELECT session_id, COUNT(*), MIN(created_at), MAX(created_at) "
+                    "FROM turns GROUP BY session_id ORDER BY MAX(created_at) DESC"
+                ).fetchall()
+            finally:
+                connection.close()
+        except (sqlite3.Error, OSError) as exc:
+            logger.warning("Could not read sessions: %s", exc)
+            return []
+        return [
+            {"session_id": sid, "turns": count, "started_at": first, "last_at": last}
+            for sid, count, first, last in rows
+        ]
+
+    def forget_session(self, session_id: str) -> int:
+        """Delete one session's turns; returns the number of rows removed.
+
+        The FTS index and the vector table follow the rows: the triggers on
+        `turns` handle the former, and `turn_vectors` is cleared by the same
+        transaction so a deleted turn cannot come back through semantic recall.
+        """
+        self._vectors = None
+        try:
+            connection = self._connect()
+            try:
+                with connection:
+                    connection.execute(
+                        "DELETE FROM turn_vectors WHERE turn_id IN "
+                        "(SELECT id FROM turns WHERE session_id = ?)",
+                        (session_id,),
+                    )
+                    cursor = connection.execute(
+                        "DELETE FROM turns WHERE session_id = ?", (session_id,)
+                    )
+                    return cursor.rowcount
+            finally:
+                connection.close()
+        except (sqlite3.Error, OSError) as exc:
+            logger.warning("Could not forget session %s: %s", session_id, exc)
+            return 0
+
     def clear(self) -> int:
         """Delete all stored turns; returns the number of rows removed."""
         self._vectors = None

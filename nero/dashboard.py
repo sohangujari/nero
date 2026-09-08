@@ -9,8 +9,11 @@ must never reach the keyring.
 
 import logging
 
+from typing import get_args
+
 from nero.config.manager import ConfigError, ConfigManager
-from nero.config.schema import NeroConfig
+from nero.config.schema import LLMConfig, Mode, NeroConfig
+from nero.llm import providers
 from nero.core.audit_log import AuditLog, default_audit_path
 from nero.memory.history_store import HistoryStore, default_history_path
 
@@ -28,15 +31,19 @@ def load_config() -> NeroConfig:
         return NeroConfig()
 
 
+# Every section here is safe to show a browser and safe to edit from one.
+# `mcp` is the section that is not: MCPServerConfig.env holds literal
+# environment values, which are commonly API keys. It has its own page, which
+# reports env by key name only. `routines` has its own page too.
+CONFIG_SECTIONS = ("assistant", "mode", "llm", "skills", "memory", "security", "telegram", "voice")
+
+
 def config_payload(config: NeroConfig | None = None) -> dict:
-    """Only the whitelisted sections — never anything from the keyring."""
+    """The whitelisted sections — never anything from the keyring, and never
+    the one config section that stores secrets in plain text."""
     config = config or load_config()
-    return {
-        "mode": config.mode,
-        "llm": config.llm.model_dump(),
-        "skills": {"enabled": config.skills.enabled.model_dump()},
-        "voice": {"enabled": config.voice.enabled},
-    }
+    dumped = config.model_dump(mode="json")
+    return {section: dumped[section] for section in CONFIG_SECTIONS}
 
 
 def audit_payload(limit: int = AUDIT_LIMIT) -> list[dict]:
@@ -46,3 +53,229 @@ def audit_payload(limit: int = AUDIT_LIMIT) -> list[dict]:
 
 def history_payload() -> list[dict]:
     return HistoryStore(default_history_path(), session_id="dashboard").recent()
+
+
+def sessions_payload() -> list[dict]:
+    return HistoryStore(default_history_path(), session_id="dashboard").sessions()
+
+
+def models_payload(config: NeroConfig | None = None) -> dict:
+    """The routing picture: what answers now, and what answers if that fails."""
+    config = config or load_config()
+    llm = config.llm
+    return {
+        "provider": llm.provider,
+        "model": llm.model,
+        "base_url": llm.base_url,
+        "fallback_chain": llm.fallback_chain
+        or ([f"{llm.fallback_provider}/{llm.fallback_model}"] if llm.fallback_provider else []),
+        "route_by": llm.route_by,
+        "quality_rank": llm.quality_rank,
+        "health_check": llm.health_check,
+        "coding_model": llm.coding_model,
+        "whitelist": llm.model_whitelist,
+        "blacklist": llm.model_blacklist,
+        "mode": config.mode,
+        # Offered as the options in the dashboard's dropdowns, so the page
+        # cannot drift from the Literals the schema actually accepts.
+        "providers": list(providers.names()),
+        "modes": list(get_args(Mode)),
+        "route_by_options": list(get_args(LLMConfig.model_fields["route_by"].annotation)),
+    }
+
+
+def channels_payload(config: NeroConfig | None = None) -> dict:
+    """Every way a person can reach Nero, and whether that way is open.
+
+    The dashboard is one of them, so it says so — a reader looking at this
+    page should not have to wonder which door they came through.
+    """
+    config = config or load_config()
+    try:
+        from nero.routines import bridge_plist_path, default_agents_dir
+
+        bridge = bridge_plist_path(default_agents_dir()).exists()
+    except Exception:  # noqa: BLE001 — a missing launchd dir is not an error here
+        bridge = False
+    return {
+        "terminal": {"enabled": True, "detail": "nero chat / nero talk"},
+        "dashboard": {"enabled": True, "detail": "this page, on 127.0.0.1"},
+        "voice": {
+            "enabled": config.voice.enabled,
+            "detail": f"{config.voice.stt.engine} in, {config.voice.tts.engine} out"
+            f" ({config.voice.tts.voice_id})",
+        },
+        "telegram": {
+            "enabled": config.telegram.enabled,
+            "detail": f"{len(config.telegram.allowed_chat_ids)} paired chat(s)"
+            + (", runs at login" if bridge else ""),
+            "paired": len(config.telegram.allowed_chat_ids),
+            "chat_ids": list(config.telegram.allowed_chat_ids),
+            "bridge_installed": bridge,
+        },
+    }
+
+
+def routines_payload(config: NeroConfig | None = None) -> list[dict]:
+    """Scheduled prompts, with whether launchd actually has each one loaded.
+
+    Config and launchd can disagree — a routine added but never installed is
+    the most common surprise, so `installed` is reported separately from
+    `enabled` rather than merged into one status.
+    """
+    config = config or load_config()
+    try:
+        from nero.routines import default_agents_dir, is_installed
+
+        agents_dir = default_agents_dir()
+    except Exception:  # noqa: BLE001
+        agents_dir = is_installed = None
+    rows = []
+    for name, routine in config.routines.routines.items():
+        rows.append(
+            {
+                "name": name,
+                "schedule": routine.schedule,
+                "prompt": routine.prompt,
+                "enabled": routine.enabled,
+                "installed": bool(is_installed and is_installed(name, agents_dir)),
+            }
+        )
+    return sorted(rows, key=lambda r: r["name"])
+
+
+def skills_payload(registry=None) -> list[dict]:
+    """What the model may call, and why anything missing is missing.
+
+    Taken from the live registry rather than the config toggles, because
+    `enabled` and `available` are different answers: offline mode withdraws a
+    network skill that is still switched on.
+    """
+    if registry is None:
+        return []
+    rows = []
+    for name in sorted(registry.known_names()):
+        skill = registry.get(name)
+        if skill is None:
+            continue
+        rows.append(
+            {
+                "name": name,
+                "description": skill.meta.description,
+                "tier": skill.meta.permission_tier,
+                "requires_network": skill.meta.requires_network,
+                "enabled": registry.is_enabled(name),
+                "available": registry.is_available(name),
+            }
+        )
+    return rows
+
+
+def mcp_payload(config: NeroConfig | None = None) -> list[dict]:
+    """Configured MCP servers. `env` is deliberately reduced to its key names —
+    the values are commonly secrets."""
+    config = config or load_config()
+    return [
+        {
+            "name": name,
+            "command": server.command,
+            "args": server.args,
+            "env_keys": sorted(server.env),
+            "enabled": server.enabled,
+            "trusted": server.trusted,
+            "requires_network": server.requires_network,
+        }
+        for name, server in sorted(config.mcp.servers.items())
+    ]
+
+
+def memory_payload(config: NeroConfig | None = None) -> dict:
+    config = config or load_config()
+    try:
+        from nero.memory.facts import FactStore, default_facts_path
+
+        facts = [
+            {"key": f.key, "value": f.value, "source": f.source, "updated_at": f.updated_at}
+            for f in FactStore(default_facts_path()).all()
+        ]
+    except Exception:  # noqa: BLE001 — a stats line must never break the page
+        facts = []
+    memory = config.memory
+    return {
+        "enabled": memory.enabled,
+        "facts": len(facts),
+        "fact_list": facts,
+        "max_history_turns": memory.max_history_turns,
+        "compact_after_messages": memory.compact_after_messages,
+        "semantic_recall": memory.semantic_recall,
+        "notes_dir": memory.notes_dir,
+    }
+
+
+class EditError(Exception):
+    """An edit the dashboard asked for that Nero will not make."""
+
+
+def apply_edit(action: str, key: str, value: str | None = None) -> None:
+    """Perform one edit from the dashboard.
+
+    Four verbs, one door. `set` and `remove` go through ConfigManager — the
+    same validate-then-save path `nero config set` uses, so a value the CLI
+    would reject is rejected here too and a half-written config is never
+    persisted. The other two delete stored data rather than settings.
+
+    The audit log is deliberately not editable. It is the record of what Nero
+    actually did, and a record you can quietly edit from a browser is not one.
+    """
+    if not key:
+        raise EditError("Nothing to edit.")
+    logger.warning("dashboard edit: %s %s", action, key)
+    if action == "set":
+        try:
+            ConfigManager().set_value(key, "" if value is None else str(value))
+        except ConfigError as exc:
+            raise EditError(str(exc)) from exc
+    elif action == "remove":
+        try:
+            ConfigManager().remove_value(key)
+        except ConfigError as exc:
+            raise EditError(str(exc)) from exc
+    elif action == "forget_session":
+        HistoryStore(default_history_path(), session_id="dashboard").forget_session(key)
+    elif action == "forget_fact":
+        from nero.memory.facts import FactStore, default_facts_path
+
+        FactStore(default_facts_path()).forget(key)
+    else:
+        raise EditError(f"Unknown action: {action!r}")
+
+
+def state_payload(registry=None) -> dict:
+    """Everything the sidebar's pages read, in one round trip.
+
+    One endpoint rather than seven: the payload is small, the pages are read
+    together, and a single fetch keeps the whole view from showing a different
+    config on each page while the user clicks around.
+    """
+    config = load_config()
+    sessions = sessions_payload()
+    skills = skills_payload(registry)
+    return {
+        "assistant": config.assistant.name,
+        "mode": config.mode,
+        "channels": channels_payload(config),
+        "models": models_payload(config),
+        "skills": skills,
+        "routines": routines_payload(config),
+        "sessions": sessions,
+        "mcp": mcp_payload(config),
+        "memory": memory_payload(config),
+        "counts": {
+            "skills_available": sum(1 for s in skills if s["available"]),
+            "skills_total": len(skills),
+            "sessions": len(sessions),
+            "turns": sum(s["turns"] for s in sessions),
+            "routines": len(config.routines.routines),
+            "mcp": len(config.mcp.servers),
+        },
+    }

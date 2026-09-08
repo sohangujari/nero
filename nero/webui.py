@@ -1,14 +1,18 @@
-"""A browser chat window for Nero, on localhost.
+"""The dashboard: Nero in a browser, on localhost.
 
-Stdlib `http.server` only, like nero/dashboard.py — this is one page and two
-endpoints, not a reason to take on flask or fastapi. A turn here is the same
-turn as one in the terminal: `ChatLoop.ask` runs it, so the fallback chain, key
-rotation, memory recall and skills all behave identically.
+Stdlib `http.server` only — a handful of GET endpoints and one POST, not a
+reason to take on flask or fastapi. The page itself is the React/shadcn app in
+web/, built into webui_dist/ and served from here; nero/dashboard.py is the
+read side it asks for.
 
-## Why this needs auth and the dashboard does not
+A turn here is the same turn as one in the terminal: `ChatLoop.ask` runs it, so
+the fallback chain, key rotation, memory recall and skills all behave
+identically.
 
-The dashboard is GET-only and read-only. This accepts POST and can open apps
-and read files, which makes a localhost port a real trust boundary:
+## Why a local port still needs auth
+
+This accepts POST and can open apps and read files, which makes a localhost
+port a real trust boundary:
 
 - **Any website you have open can POST to 127.0.0.1.** A form or `fetch` with a
   simple content type is sent cross-origin without a preflight, and the reply
@@ -19,6 +23,18 @@ and read files, which makes a localhost port a real trust boundary:
   than trusted.
 - **Other accounts on the machine** can reach a loopback port; the token is
   what keeps this to whoever can read the terminal that started it.
+
+The pages behind the sidebar also *write*: settings go through the same
+validate-then-save path as `nero config set`, and a stored conversation or
+remembered fact can be deleted. So they sit behind the same token as chat —
+they used to be open on loopback, back when the dashboard was a separate
+GET-only server, but a page that can run a skill and rewrite the config has no
+business answering anything that asks.
+
+Two things stay out of reach on purpose: **API keys**, which live in the OS
+keyring and are neither read nor written here, and the **audit log**, which is
+the record of what Nero actually did. A record you can quietly edit from a
+browser is not a record.
 
 The token is in the URL you open, then held in the page and sent as a header.
 """
@@ -84,8 +100,13 @@ def _asset(path: str) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
-def make_handler(ask: Callable[[str], str | None], history, assistant_name: str, token: str):
-    """A request handler bound to one session. `ask` is `ChatLoop.ask`."""
+def make_handler(ask: Callable[[str], str | None], history, assistant_name: str, token: str,
+                 registry=None):
+    """A request handler bound to one session. `ask` is `ChatLoop.ask`.
+
+    `registry` is the live SkillRegistry, so the Skills page can say what the
+    model may actually call right now rather than re-deriving it from config.
+    """
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "nero"
@@ -156,18 +177,22 @@ def make_handler(ask: Callable[[str], str | None], history, assistant_name: str,
                 # in at build time — the page asks for it instead.
                 self._json(200, {"name": assistant_name})
                 return
-            if path in ("/api/audit", "/api/config"):
+            if path in ("/api/audit", "/api/config", "/api/state"):
                 if not self._authorized(self.headers.get(TOKEN_HEADER)):
                     self._json(403, {"error": "forbidden"})
                     return
                 from nero import dashboard
 
-                self._json(
-                    200,
-                    dashboard.audit_payload()
-                    if path == "/api/audit"
-                    else dashboard.config_payload(),
-                )
+                readers = {
+                    "/api/audit": dashboard.audit_payload,
+                    "/api/config": dashboard.config_payload,
+                    "/api/state": lambda: dashboard.state_payload(registry),
+                }
+                try:
+                    self._json(200, readers[path]())
+                except Exception as exc:  # noqa: BLE001 — a bad read is not a dead page
+                    logger.debug("%s failed", path, exc_info=True)
+                    self._json(500, {"error": str(exc)})
                 return
             if path == "/api/history":
                 if not self._authorized(self.headers.get(TOKEN_HEADER)):
@@ -177,31 +202,50 @@ def make_handler(ask: Callable[[str], str | None], history, assistant_name: str,
                 return
             self._json(404, {"error": "not found"})
 
+        def _body(self) -> dict | None:
+            """The JSON body of a POST, or None once an error has been sent.
+
+            A browser only sends application/json cross-origin after a preflight
+            this server never answers, so requiring it is a second lock on the
+            same door as the token.
+            """
+            if "application/json" not in (self.headers.get("Content-Type") or ""):
+                self._json(415, {"error": "expected application/json"})
+                return None
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                self._json(400, {"error": "bad length"})
+                return None
+            if length <= 0 or length > MAX_BODY_BYTES:
+                self._json(413, {"error": "message too large"})
+                return None
+            try:
+                payload = json.loads(self.rfile.read(length))
+            except ValueError:
+                self._json(400, {"error": "expected a JSON object"})
+                return None
+            if not isinstance(payload, dict):
+                self._json(400, {"error": "expected a JSON object"})
+                return None
+            return payload
+
         def do_POST(self) -> None:
-            if self.path != "/api/chat":
+            if self.path not in ("/api/chat", "/api/edit"):
                 self._json(404, {"error": "not found"})
                 return
             if not self._authorized(self.headers.get(TOKEN_HEADER)):
                 self._json(403, {"error": "forbidden"})
                 return
-            # A browser only sends application/json cross-origin after a
-            # preflight this server never answers, so requiring it is a second
-            # lock on the same door as the token.
-            if "application/json" not in (self.headers.get("Content-Type") or ""):
-                self._json(415, {"error": "expected application/json"})
+            payload = self._body()
+            if payload is None:
+                return
+            if self.path == "/api/edit":
+                self._edit(payload)
                 return
             try:
-                length = int(self.headers.get("Content-Length") or 0)
-            except ValueError:
-                self._json(400, {"error": "bad length"})
-                return
-            if length <= 0 or length > MAX_BODY_BYTES:
-                self._json(413, {"error": "message too large"})
-                return
-            try:
-                payload = json.loads(self.rfile.read(length))
                 text = str(payload["text"]).strip()
-            except (ValueError, KeyError, TypeError):
+            except (KeyError, TypeError):
                 self._json(400, {"error": "expected a JSON object with a text field"})
                 return
             if not text:
@@ -215,6 +259,30 @@ def make_handler(ask: Callable[[str], str | None], history, assistant_name: str,
                 return
             self._json(200, {"reply": reply or "(no reply)"})
 
+        def _edit(self, payload: dict) -> None:
+            """Apply one edit, then answer with the state it produced.
+
+            The reply is the whole new state rather than an acknowledgement, so
+            the page renders what Nero actually saved. An optimistic update
+            would show a value the validator may have coerced or refused.
+            """
+            from nero import dashboard
+
+            try:
+                dashboard.apply_edit(
+                    str(payload.get("action") or ""),
+                    str(payload.get("key") or ""),
+                    payload.get("value"),
+                )
+            except dashboard.EditError as exc:
+                self._json(400, {"error": str(exc)})
+                return
+            except Exception as exc:  # noqa: BLE001 — a failed edit is not a dead page
+                logger.debug("edit failed", exc_info=True)
+                self._json(500, {"error": str(exc)})
+                return
+            self._json(200, dashboard.state_payload(registry))
+
         def _not_allowed(self) -> None:
             self._json(405, {"error": "method not allowed"})
 
@@ -224,11 +292,12 @@ def make_handler(ask: Callable[[str], str | None], history, assistant_name: str,
 
 
 def serve(ask, history, assistant_name: str, port: int = DEFAULT_PORT,
-          token: str | None = None, on_ready: Callable[[str], None] = print):
-    """Serve the chat window on 127.0.0.1:port until interrupted."""
+          token: str | None = None, on_ready: Callable[[str], None] = print,
+          registry=None):
+    """Serve the dashboard on 127.0.0.1:port until interrupted."""
     token = token or new_token()
     server = ThreadingHTTPServer(
-        ("127.0.0.1", port), make_handler(ask, history, assistant_name, token)
+        ("127.0.0.1", port), make_handler(ask, history, assistant_name, token, registry)
     )
     try:
         host, bound = server.server_address

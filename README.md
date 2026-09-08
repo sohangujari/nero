@@ -428,9 +428,8 @@ Enable one with `nero config set skills.enabled.run_shell true`.
 
 ## Dashboard
 
-Nero in a browser: chat, recent activity, and current config. React + Tailwind
-with real [shadcn/ui](https://ui.shadcn.com) components, served by stdlib
-`http.server`.
+Nero in a browser. React + Tailwind with real [shadcn/ui](https://ui.shadcn.com)
+components behind a collapsible sidebar, served by stdlib `http.server`.
 
 ```sh
 nero dashboard        # prints a link; --port to move it
@@ -440,19 +439,50 @@ nero dashboard        # prints a link; --port to move it
 Nero is at http://127.0.0.1:8643/?token=jU69VwdSNaQci96f-j0wXC571Kf4IxNd
 ```
 
-Three tabs:
+The sidebar opens on **Dashboard** — model in use, skills available, channels
+open, conversations stored, routines scheduled, facts remembered. Every card is
+a link into the page behind it.
 
-- **Chat** — your history from earlier sessions loads in, and a turn here is the
-  same turn as one in the terminal. `ChatLoop.ask` runs it, so the fallback
-  chain, key rotation, memory recall and skills all behave identically.
-- **Activity** — the skill audit: what Nero actually did, and whether it worked.
-- **Config** — the current settings, flattened to the `a.b.c` keys you would
-  type at `nero config set`. Read-only, and API keys are never sent: they live
-  in the OS keyring and the payload is whitelisted server-side.
+| | |
+|---|---|
+| **Chat** | Your history from earlier sessions loads in, and a turn here is the same turn as one in the terminal — `ChatLoop.ask` runs it, so the fallback chain, key rotation, memory recall and skills all behave identically. |
+| **Channels** | Every way in — terminal, dashboard, voice, Telegram — and whether that way is open. |
+| **Sessions** | Every conversation in the transcript. All channels write to the same store, so what you said on the phone is remembered at the terminal. |
+| **Logs** | The skill audit: what Nero actually did, with the arguments it was called with. The ground truth when a model claims it did something it didn't. |
+| **Models** | Provider, model, fallback chain, routing, and the coding model. |
+| **Skills** | What the model may call. `available` is the answer that counts — a network skill is withdrawn in offline mode even while it's switched on. |
+| **Routines** | Scheduled prompts, with `installed` reported separately from `enabled`: a routine written to config but never installed will never fire. |
+| **MCP servers** | External tool servers, with their environment shown by key name only. |
+| **Memory** | The recall settings, plus how much is actually stored. |
+| **Config** | Everything else, flattened to the `a.b.c` keys you would type at `nero config set`. |
+
+### Changing things
+
+The dashboard writes, not just reads. Switches, dropdowns and text boxes save
+the moment you change them — through `ConfigManager`, the same validate-then-save
+path `nero config set` uses, so a value the CLI would reject is rejected here
+with the same message. Each control names the dotted key it writes, and the
+server answers an edit with the whole new state, so what you see is what Nero
+actually saved rather than what the page hoped it would.
+
+You can switch skills, channels, routines and MCP servers on and off; edit the
+model, routing and memory settings; delete a routine, an MCP server, a paired
+Telegram chat, a remembered fact, or a whole stored conversation (which clears
+it from keyword and semantic recall too, not just the transcript).
+
+Three things stay out of reach on purpose:
+
+- **API keys.** They live in the OS keyring and are neither shown nor settable
+  here — `nero config set-key` only.
+- **MCP server environments.** Those values are commonly secrets, so that
+  section is excluded from the config payload entirely; the MCP page reports
+  environment by key name.
+- **The audit log.** It is the record of what Nero actually did. A record you
+  can quietly edit from a browser is not a record.
 
 **The token is not decoration.** The old dashboard was GET-only and read-only;
-this one also accepts POST and can open apps and read files, which makes a
-loopback port a real trust boundary:
+this one accepts POST, can open apps and read files, and can rewrite the config
+that governs all of it — which makes a loopback port a real trust boundary:
 
 - any website you have open can POST to `127.0.0.1` — a cross-origin form post
   needs no preflight, and the attacker being unable to read the reply doesn't

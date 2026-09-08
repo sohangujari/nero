@@ -66,6 +66,33 @@ class ConfigManager:
         self.save(config)
         return config
 
+    def remove_value(self, key_path: str) -> NeroConfig:
+        """Delete a dotted key path and persist, validating first.
+
+        This is how a routine or an MCP server is deleted: they live as entries
+        in a dict (`routines.routines.<name>`), so removal is a pop rather than
+        a set. Aimed at a *named* key path — pointing it at a schema field
+        instead resets that field to its default, because validation fills the
+        gap back in. That is the honest outcome, not a special case worth
+        forbidding.
+        """
+        data = self.load().model_dump()
+        parts = key_path.split(".")
+        node = data
+        for part in parts[:-1]:
+            if not isinstance(node, dict) or part not in node:
+                raise ConfigError(f"Unknown config key: {key_path!r}")
+            node = node[part]
+        if not isinstance(node, dict) or parts[-1] not in node:
+            raise ConfigError(f"Unknown config key: {key_path!r}")
+        del node[parts[-1]]
+        try:
+            config = NeroConfig.model_validate(data)
+        except ValidationError as exc:
+            raise ConfigError(f"Cannot remove {key_path!r}: {exc}") from exc
+        self.save(config)
+        return config
+
     @staticmethod
     def _entry(provider: str) -> str | None:
         """The keyring entry for a provider, or None if it needs no key.

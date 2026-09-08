@@ -29,7 +29,9 @@ approve `rm -rf` from a phone keyboard.
 
 from __future__ import annotations
 
+import html as htmllib
 import logging
+import re
 import secrets
 import sqlite3
 import threading
@@ -53,8 +55,12 @@ KEYRING_ENTRY = "telegram_bot_token"
 POLL_SECONDS = 25
 HTTP_TIMEOUT = POLL_SECONDS + 10
 
-# Telegram rejects anything longer; replies are split rather than truncated.
-MAX_MESSAGE_CHARS = 4000
+# Telegram's hard ceiling, and the budget replies are split to. Splitting has
+# to happen on the markdown — a cut through rendered HTML would leave a tag
+# unclosed — so the budget sits under the ceiling to leave room for the tags,
+# and `_messages` shrinks it further if a reply still renders too long.
+TELEGRAM_LIMIT = 4096
+MAX_MESSAGE_CHARS = 3000
 
 # Backoff after a network failure, so a flapping connection doesn't spin.
 RETRY_SECONDS = 5
@@ -223,8 +229,16 @@ class TelegramBot:
         return self._call("getUpdates", **params)
 
     def send(self, chat_id: int, text: str) -> None:
-        for part in _split(text):
-            self._call("sendMessage", chat_id=chat_id, text=part)
+        for part in _messages(text):
+            try:
+                self._call("sendMessage", chat_id=chat_id, text=part, parse_mode="HTML")
+            except TelegramError:
+                # A reply Telegram will not parse must still arrive. Falling
+                # back to the tags-as-text version costs formatting, never the
+                # message.
+                logger.debug("HTML send rejected; retrying as plain text", exc_info=True)
+                self._call("sendMessage", chat_id=chat_id, text=htmllib.unescape(
+                    re.sub(r"<[^>]+>", "", part)))
 
     def typing(self, chat_id: int) -> None:
         """Show "typing…" while a turn runs — a reply can take 30 s, and a
@@ -238,21 +252,86 @@ class TelegramBot:
         self._client.close()
 
 
-def _split(text: str) -> list[str]:
+# Telegram renders a small, fixed set of HTML tags and rejects the message
+# outright ("can't parse entities") if anything else appears — so everything is
+# escaped first and only these tags are put back. Markdown is what the model
+# writes; without this, `**bold**` arrives on the phone as literal asterisks.
+_FENCE = re.compile(r"```[\w+-]*\n?([\s\S]*?)```")
+_SPAN = re.compile(r"`([^`\n]+)`")
+_LINK = re.compile(r"!?\[([^\]]*)\]\(\s*([^)\s]+)[^)]*\)")
+_HELD = re.compile(r"\x00(\d+)\x00")
+
+# Order matters: block markers first, then bold before italic (or `**` would be
+# eaten one asterisk at a time). Emphasis stays on one line, as in markdown.
+_INLINE = [
+    (re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$", re.M), r"<b>\1</b>"),   # heading
+    (re.compile(r"^(\s*)[-*+][ \t]+", re.M), "\\1\u2022 "),           # bullet
+    (re.compile(r"(\*\*|__)(?=\S)(.+?)(?<=\S)\1"), r"<b>\2</b>"),
+    (re.compile(r"~~(?=\S)(.+?)(?<=\S)~~"), r"<s>\1</s>"),
+    (re.compile(r"(?<![\w*])\*(?=\S)([^*\n]+?)(?<=\S)\*(?![\w*])"), r"<i>\1</i>"),
+]
+
+
+def _escape(text: str) -> str:
+    return htmllib.escape(text, quote=False)
+
+
+def to_html(text: str) -> str:
+    """`text` as Telegram-flavoured HTML, treating it as markdown.
+
+    Code and links are lifted out and rendered before the escape pass, so
+    markup inside a code block is shown rather than interpreted.
+    """
+    held: list[str] = []
+
+    def hold(rendered: str) -> str:
+        held.append(rendered)
+        return f"\x00{len(held) - 1}\x00"
+
+    text = _FENCE.sub(lambda m: hold(f"<pre>{_escape(m.group(1).strip())}</pre>"), text)
+    text = _SPAN.sub(lambda m: hold(f"<code>{_escape(m.group(1))}</code>"), text)
+    text = _LINK.sub(
+        lambda m: hold(
+            f'<a href="{htmllib.escape(m.group(2))}">{_escape(m.group(1)) or "link"}</a>'
+        ),
+        text,
+    )
+    text = _escape(text)
+    for pattern, replacement in _INLINE:
+        text = pattern.sub(replacement, text)
+    return _HELD.sub(lambda m: held[int(m.group(1))], text)
+
+
+def _split(text: str, limit: int = MAX_MESSAGE_CHARS) -> list[str]:
     """`text` in Telegram-sized pieces, broken at newlines where possible."""
     text = text.strip() or "(no reply)"
     parts = []
-    while len(text) > MAX_MESSAGE_CHARS:
-        window = text[:MAX_MESSAGE_CHARS]
+    while len(text) > limit:
+        window = text[:limit]
         cut = window.rfind("\n")
         if cut <= 0:
             cut = window.rfind(" ")
         if cut <= 0:
-            cut = MAX_MESSAGE_CHARS
+            cut = limit
         parts.append(text[:cut].rstrip())
         text = text[cut:].lstrip()
     parts.append(text)
     return parts
+
+
+def _messages(text: str) -> list[str]:
+    """`text` as rendered HTML pieces, each inside Telegram's ceiling.
+
+    Markup only ever grows the text, so a budget that overshoots is halved
+    rather than guessed at — the alternative is a 400 on a long formatted
+    reply, which the caller can only recover from by dropping the formatting.
+    """
+    limit = MAX_MESSAGE_CHARS
+    while True:
+        rendered = [to_html(part) for part in _split(text, limit)]
+        if limit <= 500 or all(len(part) <= TELEGRAM_LIMIT for part in rendered):
+            return rendered
+        limit //= 2
 
 
 def incoming(update: dict) -> tuple[int, str] | None:

@@ -20,6 +20,9 @@ from nero.telegram import (
     TelegramError,
     incoming,
     serve,
+    to_html,
+    TELEGRAM_LIMIT,
+    _messages,
     _split,
 )
 
@@ -667,3 +670,82 @@ class TestOneTurnAtATime:
         # started while another was mid-flight.
         assert overlaps == [1, 2, 3, 4], overlaps
         assert len(loop.messages) == 8
+
+
+class TestFormatting:
+    """Telegram shows markdown as literal asterisks, so replies go out as HTML.
+    Its parser accepts only a handful of tags and rejects the whole message if
+    it sees any other markup — so everything is escaped and only those go back."""
+
+    def test_bold_becomes_bold(self):
+        assert to_html("**Fortnite** is big") == "<b>Fortnite</b> is big"
+
+    def test_italic_headings_strikethrough_and_bullets(self):
+        assert to_html("## Games") == "<b>Games</b>"
+        assert to_html("an *aside*") == "an <i>aside</i>"
+        assert to_html("~~dropped~~") == "<s>dropped</s>"
+        assert to_html("- one\n* two") == "\u2022 one\n\u2022 two"
+
+    def test_html_in_the_reply_is_escaped_not_rendered(self):
+        assert to_html("a < b & <i>hi</i>") == "a &lt; b &amp; &lt;i&gt;hi&lt;/i&gt;"
+
+    def test_code_keeps_its_markup_as_text(self):
+        assert to_html("```\nx = a ** b\n```") == "<pre>x = a ** b</pre>"
+        assert to_html("run `nero <chat>`") == "run <code>nero &lt;chat&gt;</code>"
+
+    def test_links_carry_an_escaped_href(self):
+        assert to_html("[docs](https://x.dev/?a=1&b=2)") == (
+            '<a href="https://x.dev/?a=1&amp;b=2">docs</a>'
+        )
+
+    def test_arithmetic_and_identifiers_are_left_alone(self):
+        """The common false positive: a lone asterisk or underscore is not
+        emphasis, and turning `2 * 3 * 4` into italics mangles the answer."""
+        assert to_html("2 * 3 * 4 and snake_case_name") == "2 * 3 * 4 and snake_case_name"
+
+    def test_an_unclosed_marker_is_left_as_written(self):
+        assert to_html("**oops") == "**oops"
+
+    def test_replies_are_sent_with_the_html_parse_mode(self):
+        sent = []
+
+        def handler(request):
+            import json
+
+            sent.append(json.loads(request.content))
+            return httpx.Response(200, json={"ok": True, "result": {}})
+
+        TelegramBot("t", client=httpx.Client(transport=httpx.MockTransport(handler))).send(
+            42, "**hi**"
+        )
+        assert sent[0]["parse_mode"] == "HTML"
+        assert sent[0]["text"] == "<b>hi</b>"
+
+    def test_a_reply_telegram_will_not_parse_still_arrives(self):
+        """Formatting is worth losing; the message is not."""
+        import json
+
+        sent = []
+
+        def handler(request):
+            body = json.loads(request.content)
+            sent.append(body)
+            if "parse_mode" in body:
+                return httpx.Response(
+                    400, json={"ok": False, "description": "can't parse entities"}
+                )
+            return httpx.Response(200, json={"ok": True, "result": {}})
+
+        TelegramBot("t", client=httpx.Client(transport=httpx.MockTransport(handler))).send(
+            42, "**hi**"
+        )
+        assert [b["text"] for b in sent] == ["<b>hi</b>", "hi"]
+
+    def test_a_split_reply_never_exceeds_telegrams_own_limit(self):
+        """Splitting happens on the markdown; the HTML it renders into is
+        longer, and TELEGRAM_LIMIT is a hard ceiling."""
+        for marker in ("**a** ", "*a* "):
+            markdown = (marker * (MAX_MESSAGE_CHARS * 2 // len(marker))).strip()
+            parts = _messages(markdown)
+            assert all(len(part) <= TELEGRAM_LIMIT for part in parts)
+            assert "<b>a</b>" in parts[0] or "<i>a</i>" in parts[0]

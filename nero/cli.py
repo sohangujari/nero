@@ -762,7 +762,7 @@ def _await_pairing(bot: TelegramBot, pairings: PairingStore) -> int:
 def dashboard(
     port: int = typer.Option(webui.DEFAULT_PORT, "--port", help="Port to serve the dashboard on."),
 ) -> None:
-    """Nero Agent in a browser: chat, recent activity, and current config."""
+    """Nero Agent in a browser: chat, plus every channel, model, skill and log."""
     manager = ConfigManager()
     if not manager.exists():
         _first_time_setup(manager)
@@ -787,6 +787,7 @@ def dashboard(
             config.assistant.name,
             port=port,
             on_ready=ready,
+            registry=registry,
         )
     except OSError as exc:
         console.print(
