@@ -1,4 +1,4 @@
-"""Execution skills (nero/skills/execution/server.py): run_shell, git_command,
+"""Execution skills (nero/skills/execution/server.py): run_shell, run_git,
 run_python, run_javascript.
 
 Only trivially safe commands (echo/true/python -c) run for real, and only

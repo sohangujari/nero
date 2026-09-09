@@ -213,6 +213,7 @@ class SkillToggles(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     open_app: bool = True
+    close_app: bool = True
     open_website: bool = True
     get_weather: bool = True
     play_music: bool = True
@@ -222,14 +223,26 @@ class SkillToggles(BaseModel):
     delete_path: bool = False
     move_path: bool = False
     fetch_web_page: bool = True
+    web_search: bool = True
     run_shell: bool = False
-    git_command: bool = False
+    run_git: bool = False
     run_python: bool = False
     run_javascript: bool = False
     remember_fact: bool = True
     recall_facts: bool = True
     forget_fact: bool = False
     search_notes: bool = True
+
+    # v1.7: git_command -> run_git, so every executor reads run_*. Renaming a
+    # field of a model with extra="forbid" would otherwise refuse to load an
+    # existing config outright, so the old key is accepted and moved.
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_the_old_git_key(cls, data):
+        if isinstance(data, dict) and "git_command" in data:
+            data = dict(data)
+            data.setdefault("run_git", data.pop("git_command"))
+        return data
 
 
 class WeatherSkillConfig(BaseModel):
@@ -238,11 +251,29 @@ class WeatherSkillConfig(BaseModel):
     default_location: str | None = None
 
 
+class BrowserSkillConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Learned, not configured: set the first time the user names a browser.
+    # Empty means "use the OS default", which is the old behaviour.
+    preferred: str | None = None
+
+
+class MusicSkillConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Learned, not configured: set the first time the user says which player to
+    # use when more than one is installed. Empty means "ask once".
+    preferred_app: str | None = None
+
+
 class SkillsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: SkillToggles = SkillToggles()
     weather: WeatherSkillConfig = WeatherSkillConfig()
+    music: MusicSkillConfig = MusicSkillConfig()
+    browser: BrowserSkillConfig = BrowserSkillConfig()
 
 
 class SecurityConfig(BaseModel):

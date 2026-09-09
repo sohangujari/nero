@@ -30,7 +30,7 @@ class TestDefaults:
     def test_execution_skills_default_disabled(self):
         toggles = NeroConfig().skills.enabled
         assert toggles.run_shell is False
-        assert toggles.git_command is False
+        assert toggles.run_git is False
         assert toggles.run_python is False
         assert toggles.run_javascript is False
 

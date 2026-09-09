@@ -675,3 +675,92 @@ class TestVoiceContextWindow:
         # The live thread survives — trimming drops the front, never the tail.
         assert loop.messages[-1] == {"role": "assistant", "content": "ok."}
         assert loop.messages[-2]["content"].endswith("turn 99")
+
+
+class TestEnterInterrupt:
+    """Pressing Enter has to cut a long reply short on any audio setup — it is
+    the only interrupt available on built-in speakers, where the acoustic
+    monitor must stay off or Nero interrupts itself."""
+
+    def loop_with_key(self, monkeypatch, spoken="Here is the long answer.", turns=1):
+        FakePlayer.instances = []
+        fired: list = []
+
+        def fake_watch_for_enter(on_press, stop, stream=None):
+            fired.append(on_press)
+            on_press()  # the user pressed Enter mid-reply
+
+            class _DummyThread:
+                def join(self, timeout=None):
+                    pass
+
+                def is_alive(self):
+                    return False
+
+            return _DummyThread()
+
+        monkeypatch.setattr(voice_loop_module, "watch_for_enter", fake_watch_for_enter)
+
+        def make_player():
+            player = FakePlayer()
+            player._spoken = spoken
+            return player
+
+        history = FakeHistory()
+        inputs = iter([""] * 20)
+        loop = VoiceLoop(
+            client=FakeClient([spoken]),
+            stt=FakeSTT(["Tell me everything."] * turns + ["stop"]),
+            record=lambda prefix=None: speech(),
+            make_player=make_player,
+            console=Console(width=200),
+            assistant_name="Nero",
+            input_fn=lambda *_a: next(inputs),
+            history=history,
+        )
+        return loop, history, fired
+
+    def test_enter_stops_playback_mid_reply(self, monkeypatch):
+        loop, _, fired = self.loop_with_key(monkeypatch)
+        loop.run()
+        assert fired, "the watcher was never started"
+        assert FakePlayer.instances[0].stop_now_calls == 1
+
+    def test_what_was_already_said_is_kept_as_the_reply(self, monkeypatch):
+        """Discarding it would leave Nero with no memory of what it just told
+        the user, and the next turn would repeat itself."""
+        loop, history, _ = self.loop_with_key(monkeypatch, spoken="The first part.")
+        loop.run()
+        assert loop.messages[-1]["content"] == "The first part. [interrupted]"
+        assert history.appended[-1][1] == "The first part. [interrupted]"
+
+    def test_an_interrupt_before_anything_was_said_drops_the_turn(self, monkeypatch):
+        """A message with no content would leave a malformed exchange in
+        context."""
+        loop, history, _ = self.loop_with_key(monkeypatch, spoken="")
+        loop.run()
+        assert not any(m.get("content", "").endswith("[interrupted]") for m in loop.messages)
+        assert history.appended == []
+
+    def test_the_session_carries_on_listening_afterwards(self, monkeypatch):
+        """An interrupt is 'let me talk', not 'goodbye'."""
+        loop, _, _ = self.loop_with_key(monkeypatch, turns=2)
+        loop.run()
+        assert len(FakePlayer.instances) == 2
+
+    def test_the_watcher_runs_even_with_voice_barge_in_off(self, monkeypatch):
+        """This is the whole point: the machine where the acoustic monitor is
+        suppressed is the machine that most needs a way to interrupt."""
+        loop, _, fired = self.loop_with_key(monkeypatch)
+        assert loop.barge_in is False
+        loop.run()
+        assert fired
+
+    def test_a_keypress_interrupt_does_not_blame_the_speakers(self, monkeypatch):
+        """The voice hint explains microphones and speakers. After a deliberate
+        Enter it is just noise, and misleading noise at that."""
+        loop, _, _ = self.loop_with_key(monkeypatch)
+        out = io.StringIO()
+        loop.console = Console(file=out, width=200)
+        loop.run()
+        assert "barge_in false" not in out.getvalue()

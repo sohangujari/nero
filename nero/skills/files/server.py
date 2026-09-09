@@ -45,6 +45,7 @@ class ReadFileSkill(Skill):
         },
         requires_network=False,
         permission_tier="read_only",
+        category="Files",
         ingests_external_content=True,
     )
 
@@ -86,6 +87,7 @@ class WriteFileSkill(Skill):
         },
         requires_network=False,
         permission_tier="destructive",
+        category="Files",
     )
 
     async def execute(self, **kwargs) -> str:
@@ -121,6 +123,7 @@ class EditFileSkill(Skill):
         },
         requires_network=False,
         permission_tier="destructive",
+        category="Files",
     )
 
     async def execute(self, **kwargs) -> str:
@@ -166,6 +169,7 @@ class DeletePathSkill(Skill):
         },
         requires_network=False,
         permission_tier="destructive",
+        category="Files",
     )
 
     async def execute(self, **kwargs) -> str:
@@ -210,6 +214,7 @@ class MovePathSkill(Skill):
         },
         requires_network=False,
         permission_tier="destructive",
+        category="Files",
     )
 
     async def execute(self, **kwargs) -> str:

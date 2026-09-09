@@ -155,6 +155,7 @@ class FakeRegistry:
         tier = "destructive" if name == "run_shell" else "state_changing"
         meta = type(
             "Meta", (), {"description": f"{name} does a thing", "permission_tier": tier,
+                         "category": "Apps" if name == "open_app" else "Code",
                          "requires_network": name == "open_app"}
         )()
         return type("Skill", (), {"meta": meta})()
@@ -179,6 +180,7 @@ class TestState:
         assert rows["open_app"]["available"] is True
         assert rows["run_shell"]["enabled"] is False
         assert rows["run_shell"]["tier"] == "destructive"
+        assert rows["run_shell"]["category"] == "Code"
 
     def test_no_registry_means_no_skills_rather_than_a_crash(self, isolated):
         assert dashboard.skills_payload(None) == []

@@ -41,6 +41,7 @@ class MCPSkill(Skill):
             input_schema=tool.get("inputSchema") or {"type": "object", "properties": {}},
             requires_network=requires_network,
             permission_tier="state_changing" if trusted else "destructive",
+            category="MCP",
             ingests_external_content=True,
             offline_message=(
                 f"The {connection.name} MCP server needs an internet connection, "

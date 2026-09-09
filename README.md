@@ -114,21 +114,32 @@ Nero> It's 31°C and humid right now.
 With `voice.vad.enabled` set to `false` there is no endpointing, so that mode
 keeps its press-Enter-to-start, press-Enter-to-stop prompt and never sleeps.
 
-Barge-in needs headphones in practice: on built-in speakers, Nero Agent hears its
-own reply through the mic and interrupts itself almost every time, so Nero Agent
-auto-disables barge-in when the default output device looks like built-in
-speakers and prints one line explaining why. Headphones re-enable it
-automatically (no acoustic path from speaker to mic). If your speakers sit
-far enough from the mic that self-hearing genuinely isn't a problem, force it
-back on with `nero config set voice.force_barge_in true`. To turn barge-in
-off entirely instead, use `nero config set voice.barge_in false`.
+### Cutting a long answer short
+
+**Press Enter while Nero Agent is speaking.** It stops mid-sentence and starts
+listening immediately. Whatever it already said is kept as the reply, marked
+`[interrupted]`, so it remembers what it told you and doesn't start over.
+
+This works on any audio setup, because it never touches the microphone. That
+matters, because interrupting *by voice* often can't:
+
+On built-in speakers Nero Agent hears its own reply through the mic and
+interrupts itself almost every time — so voice barge-in auto-disables when the
+default output device looks like built-in speakers, and prints one line saying
+so. Headphones re-enable it automatically (no acoustic path from speaker to
+mic). If your speakers sit far enough away that self-hearing genuinely isn't a
+problem, force it back on with `nero config set voice.force_barge_in true`. To
+turn it off entirely instead, use `nero config set voice.barge_in false`.
+
+Enter is unaffected by any of that, and stays available even when voice
+barge-in has been suppressed, forced off, or has failed mid-session.
 
 Tuning (all optional):
 
 | Setting | Default | What it does |
 | --- | --- | --- |
 | `voice.vad.enabled` | `true` | Master switch. `false` restores press-Enter-to-stop. |
-| `voice.barge_in` | `true` | Interrupt Nero Agent by talking. Inert when `vad.enabled` is false. |
+| `voice.barge_in` | `true` | Interrupt Nero Agent by *talking*. Inert when `vad.enabled` is false. Pressing Enter always works regardless. |
 | `voice.force_barge_in` | `false` | Bypass the built-in-speaker auto-suppression above. |
 | `voice.vad.silence_ms` | `800` | Silence that ends your turn. Raise it if you're cut off mid-thought. |
 | `voice.vad.threshold` | `0.5` | Speech sensitivity. Raise it in a noisy room. |
@@ -407,24 +418,152 @@ nothing, an ISO timestamp with microseconds costs nearly double:
 ## Skills, and what asks permission
 
 Skills reach the model through one registry, so every call is audited and
-individually switchable. They sit in three tiers:
+individually switchable. Twenty ship built in, grouped by what they are for:
 
-- **read-only** (`get_weather`, `read_file`, `fetch_web_page`, `search_notes`,
-  `recall_facts`) — run silently.
-- **state-changing** (`open_app`, `open_website`, `play_music`,
+| | |
+|---|---|
+| **Web** | `web_search` `fetch_web_page` `get_weather` |
+| **Apps and media** | `open_app` `close_app` `open_website` `play_music` |
+| **Memory and notes** | `remember_fact` `recall_facts` `forget_fact` `search_notes` |
+| **Files** | `read_file` `write_file` `edit_file` `delete_path` `move_path` |
+| **Terminal and code** | `run_shell` `run_git` `run_python` `run_javascript` |
+
+Anything added through [MCP](#mcp-servers) joins the same registry and lands in
+its own group.
+
+Cutting across that is what each one is *allowed* to do — three tiers:
+
+- **read-only** (`web_search`, `get_weather`, `read_file`, `fetch_web_page`,
+  `search_notes`, `recall_facts`) — run silently.
+- **state-changing** (`open_app`, `close_app`, `open_website`, `play_music`,
   `remember_fact`) — run silently.
 - **destructive** (`write_file`, `edit_file`, `delete_path`, `move_path`,
-  `run_shell`, `git_command`, `run_python`, `run_javascript`, `forget_fact`)
+  `run_shell`, `run_git`, `run_python`, `run_javascript`, `forget_fact`)
   — **ship disabled**, and once enabled each call shows you the exact
   arguments and waits for a yes. A command matching `security.command_denylist`
   makes you type `yes` in full. With no way to ask (a pipe, a scheduled
   routine) a destructive call is refused, never assumed.
+
+The two groupings answer different questions. "How dangerous is this?" is the
+tier. "Where do I look for the thing that opens an app?" is the category — and
+that is the one you have when you are scanning a list of twenty.
+
+### Searching the web
+
+`fetch_web_page` can only read an address you already have, so without
+`web_search` there was no path at all from "what happened today" to an answer —
+the model could only guess from training data.
+
+```
+you   ▸ what's new in python 3.14
+Nero  ▸ [searches, reads the release notes, answers]
+```
+
+It uses DuckDuckGo's lite endpoint: **no API key, no account**. A search skill
+that only works once you have signed up for a search API is one most people
+never switch on. Search operators work inside the query — `site:x.com` to search
+one site, quotes for an exact phrase — so "search X" and "search this site" are
+the same tool, not three more.
+
+Results come back wrapped as untrusted data. A search result is attacker-authored
+text by definition: anyone can publish a page that says *ignore your previous
+instructions*.
+
+**Why there aren't forty skills.** Every tool's schema is re-sent on every
+single request, so the list is not free:
+
+| tools exposed | tokens per request |
+| --- | --- |
+| 11 (default config) | ~1,580 |
+| 20 (everything on) | ~2,700 |
+| 60 (a "does everything" assistant) | ~7,700 |
+
+That is the same prefill cost the memory window exists to control, and
+tool-selection accuracy falls as the list grows. So Nero ships the few that
+earn their place and reaches the rest through MCP, which you add per machine
+for what you actually use.
 
 Anything fetched from the web or read off disk comes back wrapped as
 untrusted data, and marks the turn — the confirmation prompt then says so,
 because an injected instruction could be behind the call that follows.
 
 Enable one with `nero config set skills.enabled.run_shell true`.
+
+### Skills that learn
+
+Two skills would otherwise ask you the same question forever, so they remember
+the answer instead — under a normal config key, which you can read and change
+like any other.
+
+**`play_music`** finds the players you actually have by looking for their app
+bundles (`Music`, `Spotify`, `TIDAL`, `iTunes`, `Swinsian`, `Doppler`, `VLC`),
+rather than asking each one in turn whether it happens to be running:
+
+```
+you   ▸ play some music
+Nero  ▸ You've got Apple Music and Spotify — which should I use?
+you   ▸ spotify
+Nero  ▸ Playing in Spotify.
+
+you   ▸ play some music          # next time, and every time after
+Nero  ▸ Playing in Spotify.
+```
+
+The answer lands in `skills.music.preferred_app`. Only a player you *named*
+becomes the preference, and only after it actually worked — a fallback pick is
+never frozen into config, and a player that just failed is never remembered.
+With one player installed it never asks at all; with two, it uses whichever is
+already playing before it resorts to asking.
+
+`play` also *starts* the player if it isn't running, and everything is one
+`osascript` call instead of one probe per app plus a command:
+
+| | osascript calls |
+| --- | --- |
+| before, two players installed | 3 |
+| **after, preference known** | **1** |
+
+**`get_weather`** does the same with the first city you ask about, saving it to
+`skills.weather.default_location` — though unlike music it never overwrites a
+default you set deliberately, so a one-off "weather in Tokyo?" doesn't move
+your home.
+
+**`open_website`** does it with browsers. `webbrowser.open` always uses the OS
+default, so "open YouTube in Chrome" opened Safari:
+
+```
+you   ▸ open youtube on chrome
+Nero  ▸ Opened https://www.youtube.com in Google Chrome.
+
+you   ▸ open twitter                # no browser named
+Nero  ▸ Opened https://twitter.com in Google Chrome.
+```
+
+Stored as `skills.browser.preferred`, same rules as music: only a browser you
+*named* becomes the preference, only after it opened. Name none and nothing
+changes — the OS default is still used, exactly as before. `chrome`, `edge`,
+`brave`, `zen` and the rest resolve to their real names, and asking for a
+browser you don't have says so instead of quietly opening a different one.
+
+**`open_app`** doesn't remember anything, but it stopped being a dead end: when
+a launch fails it scans your applications folders and suggests the closest
+name it finds (`'Musci'` → *Did you mean 'Music'?*). The scan only runs after a
+failure, so opening an app that exists costs nothing extra.
+
+**`close_app`** is the other half of `open_app`, and it was simply missing —
+Nero used to say it had no way to quit an app and that you'd have to do it
+yourself.
+
+It quits *gracefully*: on macOS the same thing as Cmd-Q, so an app with unsaved
+work still puts up its own save dialog. That is also why it's state-changing
+rather than destructive — shipping it disabled would mean "close Chrome" fails
+by default, which is the whole complaint.
+
+Two details it gets right. It never launches an app in order to close it (an
+unguarded AppleScript `quit` does exactly that — the check and the quit travel
+in one script). And unlike `open_app` it will not act on a fuzzy match: opening
+the wrong app is a harmless annoyance, quitting the wrong one can lose work, so
+`'Musci'` becomes a question rather than a closed Music.
 
 ## Dashboard
 

@@ -69,6 +69,7 @@ class FetchWebPageSkill(Skill):
         },
         requires_network=True,
         permission_tier="read_only",
+        category="Web",
         ingests_external_content=True,
         offline_message=(
             "Fetching web pages needs an internet connection, and you're in "

@@ -885,9 +885,10 @@ def talk(
     ):
         barge_in = False
         console.print(
-            "[dim]Barge-in is off: on built-in speakers Nero Agent would hear (and "
-            "interrupt) itself. Headphones re-enable it, or force it with "
-            "nero config set voice.force_barge_in true.[/dim]"
+            "[dim]Voice barge-in is off: on built-in speakers Nero Agent would hear "
+            "(and interrupt) itself. Press [bold]Enter[/bold] any time it's speaking "
+            "to cut it short and talk. Headphones re-enable interrupting by voice, "
+            "or force it with nero config set voice.force_barge_in true.[/dim]"
         )
 
     try:
@@ -970,13 +971,14 @@ def _build_registry(manager: ConfigManager, config: NeroConfig, extra_skills=Non
     """The one place skills get constructed — both `nero` and `nero talk` call
     this, so the text and voice paths can never drift apart."""
 
-    def remember_location(location: str) -> None:
+    def remember_setting(key: str, value: str) -> None:
         # Best-effort convenience only: a config-write failure (read-only
         # config dir, full disk -> OSError from save()'s write_text(), or a
         # bad value -> ConfigError) must never turn an already-successful
-        # weather report into an error the user sees.
+        # weather report — or a track that is already playing — into an error
+        # the user sees.
         with contextlib.suppress(ConfigError, OSError):
-            manager.set_value("skills.weather.default_location", location)
+            manager.set_value(key, value)
 
     # The confirm callback's signature is fixed at (name, tier, arguments) —
     # it can't also take the registry it gates. Bind it via a one-element box
@@ -990,7 +992,7 @@ def _build_registry(manager: ConfigManager, config: NeroConfig, extra_skills=Non
     registry = build_registry(
         config,
         audit=AuditLog(default_audit_path()),
-        on_location_resolved=remember_location,
+        remember_setting=remember_setting,
         confirm=confirm,
         extra_skills=extra_skills,
     )
@@ -1020,12 +1022,12 @@ def _confirm_skill(name: str, tier: str, arguments: dict, security, tainted: boo
         )
     matched = None
     for key, value in arguments.items():
-        # git_command's "args" is a list of strings (e.g. ["reset", "--hard"])
+        # run_git's "args" is a list of strings (e.g. ["reset", "--hard"])
         # rather than a single command string, and doesn't include the "git"
         # program name itself — reconstruct the same command string the skill
         # actually runs so it matches denylist entries like "git reset --hard".
         if (
-            name == "git_command"
+            name == "run_git"
             and key == "args"
             and isinstance(value, list)
             and all(isinstance(item, str) for item in value)

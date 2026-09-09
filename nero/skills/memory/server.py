@@ -27,6 +27,7 @@ class RememberFactSkill(Skill):
         },
         requires_network=False,
         permission_tier="state_changing",
+        category="Memory",
     )
 
     def __init__(self, store: FactStore):
@@ -55,6 +56,7 @@ class RecallFactsSkill(Skill):
         },
         requires_network=False,
         permission_tier="read_only",
+        category="Memory",
         # This is the user's own store, not external content — nothing here
         # should be treated as untrusted.
         ingests_external_content=False,
@@ -84,6 +86,7 @@ class ForgetFactSkill(Skill):
         },
         requires_network=False,
         permission_tier="destructive",
+        category="Memory",
     )
 
     def __init__(self, store: FactStore):

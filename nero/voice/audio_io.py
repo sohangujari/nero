@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import queue
+import sys
 import threading
 from collections import deque
 from collections.abc import Callable
@@ -20,19 +22,53 @@ RECORD_SAMPLE_RATE = 16000
 _BLOCK = 1600  # 0.1s blocks at 16 kHz
 VAD_FRAME = 512  # 32 ms at 16 kHz — the only size silero accepts at this rate
 
-_INDICATOR_FRAMES = 20  # ~20 VAD frames * 32ms = ~0.6s of rolling history shown
+_INDICATOR_FRAMES = 28  # ~28 VAD frames * 32ms = ~0.9s of rolling waveform
+
+# A level meter, newest sample on the right, the way a recorder app draws one.
+# Eight heights is what the block-drawing characters give without resorting to
+# colour ramps, and it is enough to see your own voice in the shape.
+_BARS = "▁▂▃▄▅▆▇█"
+# RMS at which a bar is full. Speech peaks around 0.2-0.3 in float32; a ceiling
+# up at 1.0 would leave ordinary talking pinned to the bottom two bars.
+_FULL_SCALE = 0.25
 
 
-def _indicator_text(window: "deque[bool]"):
+def _level(rms: float) -> int:
+    """Frame loudness -> bar height.
+
+    Square-rooted, not linear: hearing is roughly logarithmic, and a linear map
+    bunches everything you actually say into the bottom of the strip while the
+    top half only moves when you shout.
+    """
+    if rms <= 0:
+        return 0
+    scaled = math.sqrt(min(rms, _FULL_SCALE) / _FULL_SCALE)
+    return min(len(_BARS) - 1, int(scaled * len(_BARS)))
+
+
+def _frame_level(frame) -> int:
+    """The bar height for one VAD frame, or 0 if it cannot be measured."""
+    try:
+        import numpy as np
+
+        return _level(float(np.sqrt(np.mean(np.square(np.asarray(frame, dtype=np.float32))))))
+    except Exception:  # noqa: BLE001 — cosmetic only, must never break recording
+        return 0
+
+
+def _indicator_text(window: "deque[tuple[int, bool]]"):
     from rich.text import Text
 
+    # Height is how loud it is; colour is whether the VAD counted it as speech.
+    # Two different questions, and both are worth being able to see at once --
+    # a loud dim strip means it is hearing the room, not you.
     text = Text("  ")
-    for speech in window:
-        text.append("●" if speech else "·", style="bold red" if speech else "dim")
+    for level, speech in window:
+        text.append(_BARS[level], style="bold red" if speech else "dim")
     return text
 
 
-def _start_indicator(console, window: "deque[bool]"):
+def _start_indicator(console, window: "deque[tuple[int, bool]]"):
     """Best-effort live speech-activity strip; None if not a real terminal.
 
     Purely cosmetic — every call site guards against this raising, because a
@@ -52,10 +88,10 @@ def _start_indicator(console, window: "deque[bool]"):
         return None
 
 
-def _update_indicator(live, window: "deque[bool]", speech: bool) -> None:
+def _update_indicator(live, window: "deque[tuple[int, bool]]", speech: bool, frame=None) -> None:
     if live is None:
         return
-    window.append(speech)
+    window.append((_frame_level(frame) if frame is not None else 0, speech))
     try:
         live.update(_indicator_text(window))
     except Exception:  # noqa: BLE001 — cosmetic only, must never break recording
@@ -145,6 +181,92 @@ class AudioSource:
             stream.close()
         except Exception:  # noqa: BLE001 — releasing the mic must never raise
             logger.debug("input stream close failed", exc_info=True)
+
+
+# How often the keypress watcher checks both stdin and its stop flag. Small
+# enough that Enter feels instant, large enough to cost nothing.
+_KEY_POLL_SECONDS = 0.05
+
+
+def _drain(stream) -> None:
+    """Throw away input typed before this watch began.
+
+    Enter is only an interrupt while Nero is *speaking*. Pressed at any other
+    moment — while it was listening, or during the previous reply — it sits in
+    the terminal buffer, and without this it is read the instant the next watch
+    opens and kills that reply before a word of it is spoken. The user sees
+    "Interrupted." instead of an answer, presses Enter again to retry, and
+    stocks the buffer for the turn after that. It never recovers on its own.
+
+    Read straight off the file descriptor: the text layer would happily block
+    waiting to complete a line that was never finished.
+    """
+    import os
+    import select
+
+    try:
+        fd = stream.fileno()
+    except Exception:  # noqa: BLE001 — an exotic stream simply has nothing to drain
+        return
+    try:
+        while select.select([fd], [], [], 0)[0]:
+            if not os.read(fd, 4096):
+                return
+    except (OSError, ValueError):
+        return
+
+
+def watch_for_enter(on_press: Callable[[], None], stop: "threading.Event", stream=None):
+    """Call `on_press()` if Enter is pressed before `stop` is set.
+
+    The acoustic barge-in monitor cannot run on built-in speakers — Nero's own
+    voice goes back into the microphone and it interrupts itself. This is the
+    trigger that works regardless of what you are listening on, because it never
+    touches the microphone at all.
+
+    Polled through `select` rather than blocking on `readline`: a thread parked
+    in a blocking read cannot be cancelled, so when a reply ends normally that
+    thread would still be sitting there and would swallow the Enter that starts
+    the *next* turn.
+
+    Returns None (and starts nothing) when stdin is not a terminal, so piped
+    input and test runs are untouched.
+    """
+    import select
+
+    if stream is None:
+        stream = sys.stdin
+    try:
+        if not stream.isatty():
+            return None
+    except Exception:  # noqa: BLE001 — a closed or exotic stream is simply not a tty
+        return None
+
+    _drain(stream)
+
+    def watch() -> None:
+        while not stop.is_set():
+            try:
+                ready, _, _ = select.select([stream], [], [], _KEY_POLL_SECONDS)
+            except (OSError, ValueError):
+                return  # stdin closed under us; nothing to interrupt with
+            if not ready:
+                continue
+            try:
+                stream.readline()
+            except Exception:  # noqa: BLE001 — cosmetic path, never break a reply
+                return
+            if stop.is_set():
+                return
+            try:
+                on_press()
+            except Exception:  # noqa: BLE001 — an interrupt must not crash the turn
+                logger.debug("keypress interrupt handler failed", exc_info=True)
+            return
+
+    thread = threading.Thread(target=watch, daemon=True, name="nero-keypress")
+    thread.start()
+    return thread
 
 
 def record_until_enter(console, input_fn: Callable[[], str]):
@@ -242,7 +364,7 @@ def record_until_silence(
         for index in range(max_frames):
             frame = source.read_frame()
             speech = vad.is_speech(frame)
-            _update_indicator(live, window, speech)
+            _update_indicator(live, window, speech, frame)
             if speech:
                 if not started:
                     # The frame that tripped the VAD is rarely the first frame

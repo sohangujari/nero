@@ -29,7 +29,8 @@ class TestOfflineAndDisabledGating:
         # play_music, read_file, and the local memory skills
         # (remember_fact/recall_facts/search_notes enabled by default,
         # forget_fact disabled by default) are local -> what's left standing.
-        assert names == {"play_music", "read_file", "remember_fact", "recall_facts", "search_notes"}
+        assert names == {"close_app", "play_music", "read_file", "remember_fact",
+                         "recall_facts", "search_notes"}
 
     def test_known_names_lists_every_registered_skill(self):
         from nero.skills.registry import build_registry
@@ -38,6 +39,7 @@ class TestOfflineAndDisabledGating:
         registry = build_registry(config)
         assert registry.known_names() == {
             "open_app",
+            "close_app",
             "open_website",
             "get_weather",
             "play_music",
@@ -47,8 +49,9 @@ class TestOfflineAndDisabledGating:
             "delete_path",
             "move_path",
             "fetch_web_page",
+            "web_search",
             "run_shell",
-            "git_command",
+            "run_git",
             "run_python",
             "run_javascript",
             "remember_fact",
@@ -126,24 +129,24 @@ class TestExecutionWiring:
         from nero.skills.registry import build_registry
 
         registry = build_registry(make_config())
-        for name in ("run_shell", "git_command", "run_python", "run_javascript"):
+        for name in ("run_shell", "run_git", "run_python", "run_javascript"):
             assert registry.get(name) is not None
 
     def test_all_four_default_disabled(self):
         from nero.skills.registry import build_registry
 
         registry = build_registry(make_config())
-        for name in ("run_shell", "git_command", "run_python", "run_javascript"):
+        for name in ("run_shell", "run_git", "run_python", "run_javascript"):
             assert registry.is_enabled(name) is False
 
-    def test_run_shell_and_git_command_receive_the_security_config(self):
+    def test_run_shell_and_run_git_receive_the_security_config(self):
         from nero.skills.registry import build_registry
 
         config = make_config()
         config.security.command_allowlist = ["echo hi"]
         registry = build_registry(config)
         assert registry.get("run_shell")._security is config.security
-        assert registry.get("git_command")._security is config.security
+        assert registry.get("run_git")._security is config.security
 
     def test_destructive_execution_skill_refused_with_no_confirm_callback(self):
         import asyncio
@@ -166,12 +169,34 @@ class TestWeatherWiring:
         weather = registry.get("get_weather")
         assert weather._default_location == "Oslo"
 
-    def test_weather_skill_receives_the_on_location_resolved_callback(self):
+    def test_a_learned_weather_location_is_persisted_under_its_own_key(self):
+        """Skills take a one-argument callback because they know their value,
+        not where it lives. build_registry is what pairs the two."""
+        from nero.skills.registry import build_registry
+
+        seen = []
+        registry = build_registry(make_config(), remember_setting=lambda k, v: seen.append((k, v)))
+        registry.get("get_weather")._on_location_resolved("Oslo")
+        assert seen == [("skills.weather.default_location", "Oslo")]
+
+    def test_a_chosen_music_player_is_persisted_under_its_own_key(self):
+        from nero.skills.registry import build_registry
+
+        seen = []
+        registry = build_registry(make_config(), remember_setting=lambda k, v: seen.append((k, v)))
+        registry.get("play_music")._on_app_chosen("Spotify")
+        assert seen == [("skills.music.preferred_app", "Spotify")]
+
+    def test_no_remember_seam_means_no_callback_rather_than_a_crash(self):
+        from nero.skills.registry import build_registry
+
+        registry = build_registry(make_config())
+        assert registry.get("play_music")._on_app_chosen is None
+        assert registry.get("get_weather")._on_location_resolved is None
+
+    def test_the_saved_music_preference_reaches_the_skill(self):
         from nero.skills.registry import build_registry
 
         config = make_config()
-        seen = []
-        registry = build_registry(config, on_location_resolved=seen.append)
-        weather = registry.get("get_weather")
-        # Bound methods compare equal (not `is`, a fresh wrapper each access).
-        assert weather._on_location_resolved == seen.append
+        config.skills.music.preferred_app = "Spotify"
+        assert build_registry(config).get("play_music")._preferred_app == "Spotify"

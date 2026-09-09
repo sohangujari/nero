@@ -147,13 +147,25 @@ class SkillRegistry:
             logger.warning("Could not record audit entry for %r: %s", name, exc)
 
 
+def _remember(remember_setting, key: str):
+    """Bind a `remember_setting(key, value)` seam to one config key, or None.
+
+    Skills take a one-argument callback because they know their own value, not
+    where it lives. This is the only place that pairs the two.
+    """
+    if remember_setting is None:
+        return None
+    return lambda value: remember_setting(key, value)
+
+
 def build_registry(
-    config, audit=None, on_location_resolved=None, confirm=None, extra_skills=None
+    config, audit=None, remember_setting=None, confirm=None, extra_skills=None
 ) -> SkillRegistry:
     """Construct the registry from a NeroConfig.
 
-    `on_location_resolved` lets the weather skill persist a newly learned
-    default location without importing ConfigManager (added in Task 8).
+    `remember_setting(key, value)` lets a skill persist something it learned —
+    a default weather location, the music player the user picked — without
+    importing ConfigManager. One seam rather than one callback per skill.
     `confirm` gates destructive skills — see SkillRegistry.__init__.
     `extra_skills` appends dynamically discovered skills (MCP tools), whose
     process lifetime the caller owns.
@@ -175,10 +187,11 @@ def build_registry(
     )
     from nero.skills.memory.server import ForgetFactSkill, RecallFactsSkill, RememberFactSkill
     from nero.skills.notes.server import SearchNotesSkill
-    from nero.skills.open_app.server import OpenAppSkill
+    from nero.skills.open_app.server import CloseAppSkill, OpenAppSkill
     from nero.skills.open_website.server import OpenWebsiteSkill
     from nero.skills.play_music.server import PlayMusicSkill
     from nero.skills.weather.server import WeatherSkill
+    from nero.skills.search.server import WebSearchSkill
     from nero.skills.web.server import FetchWebPageSkill
 
     fact_store = FactStore(default_facts_path())
@@ -190,18 +203,26 @@ def build_registry(
 
     skills: list[Skill] = [
         OpenAppSkill(),
-        OpenWebsiteSkill(),
+        CloseAppSkill(),
+        OpenWebsiteSkill(
+            preferred_browser=config.skills.browser.preferred,
+            on_browser_chosen=_remember(remember_setting, "skills.browser.preferred"),
+        ),
         WeatherSkill(
             default_location=config.skills.weather.default_location,
-            on_location_resolved=on_location_resolved,
+            on_location_resolved=_remember(remember_setting, "skills.weather.default_location"),
         ),
-        PlayMusicSkill(),
+        PlayMusicSkill(
+            preferred_app=config.skills.music.preferred_app,
+            on_app_chosen=_remember(remember_setting, "skills.music.preferred_app"),
+        ),
         ReadFileSkill(),
         WriteFileSkill(),
         EditFileSkill(),
         DeletePathSkill(),
         MovePathSkill(),
         FetchWebPageSkill(),
+        WebSearchSkill(),
         RunShellSkill(security=config.security),
         GitCommandSkill(security=config.security),
         RunPythonSkill(),

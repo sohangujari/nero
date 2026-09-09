@@ -428,6 +428,45 @@ class TestRecordUntilSilence:
         # No cursor-control / ANSI escapes -- proof no Live region ever opened.
         assert "\x1b[" not in output
 
+    def test_the_meter_shows_how_loud_the_frame_was(self, monkeypatch):
+        """A recorder's strip is driven by the microphone, not by a canned
+        animation — the point is seeing your own voice in it."""
+        quiet = np.zeros(audio_io.VAD_FRAME, dtype=np.float32)
+        loud = np.full(audio_io.VAD_FRAME, 0.25, dtype=np.float32)
+        assert audio_io._frame_level(quiet) == 0
+        assert audio_io._frame_level(loud) == len(audio_io._BARS) - 1
+
+    def test_ordinary_speech_uses_the_middle_of_the_range(self, monkeypatch):
+        """A linear map pins everything you actually say to the bottom two bars
+        and only moves the top half when you shout."""
+        levels = [audio_io._level(rms) for rms in (0.01, 0.03, 0.06, 0.10, 0.16)]
+        assert levels == sorted(levels)
+        assert 1 <= levels[0] and levels[-1] >= 5
+
+    def test_a_frame_that_cannot_be_measured_is_a_flat_bar_not_a_crash(self):
+        """Cosmetic code may never cost a turn."""
+        assert audio_io._frame_level("not audio") == 0
+        assert audio_io._frame_level(None) == 0
+
+    def test_the_strip_is_one_bar_per_frame_newest_last(self):
+        from collections import deque
+
+        window = deque([(0, False), (7, True), (3, True)], maxlen=8)
+        assert audio_io._indicator_text(window).plain == "  " + "▁█▄"
+
+    def test_loudness_and_speech_are_shown_separately(self):
+        """Height is how loud; colour is whether the VAD counted it. A loud but
+        dim strip means it is hearing the room, not you."""
+        from collections import deque
+
+        text = audio_io._indicator_text(deque([(7, False), (7, True)]))
+        styles = [str(span.style) for span in text.spans]
+        assert styles == ["dim", "bold red"]
+
+    def test_a_level_never_indexes_past_the_bars(self):
+        for rms in (0.0, 0.25, 1.0, 99.0, -1.0):
+            assert 0 <= audio_io._level(rms) < len(audio_io._BARS)
+
     def test_indicator_on_a_terminal_does_not_change_returned_audio(self, monkeypatch):
         fake = make_fake_sd(frames=vad_frames(1))
         monkeypatch.setitem(sys.modules, "sounddevice", fake)
@@ -944,3 +983,134 @@ class TestPreroll:
             Console(file=io.StringIO()), vad, silence_ms=800, wait_for_speech_seconds=30
         )
         assert audio.size // 512 == 26 + audio_io.PREROLL_FRAMES
+
+
+class TestEnterInterrupt:
+    """The keyboard is the interrupt that works on built-in speakers, where the
+    acoustic monitor has to stay off or Nero interrupts itself."""
+
+    def watcher(self):
+        """A fake tty backed by an os.pipe, so select() sees it for real."""
+        import os
+
+        read_fd, write_fd = os.pipe()
+        stream = os.fdopen(read_fd, "r")
+        stream.isatty = lambda: True
+        return stream, write_fd
+
+    def test_enter_fires_the_callback(self):
+        import os
+
+        stream, write_fd = self.watcher()
+        fired = threading.Event()
+        stop = threading.Event()
+        thread = audio_io.watch_for_enter(fired.set, stop, stream=stream)
+        os.write(write_fd, b"\n")
+        assert fired.wait(2), "Enter did not reach the callback"
+        stop.set()
+        thread.join(timeout=2)
+        os.close(write_fd)
+
+    def test_nothing_fires_without_a_keypress(self):
+        import os
+
+        stream, write_fd = self.watcher()
+        fired = threading.Event()
+        stop = threading.Event()
+        thread = audio_io.watch_for_enter(fired.set, stop, stream=stream)
+        time.sleep(0.2)
+        assert not fired.is_set()
+        stop.set()
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+        os.close(write_fd)
+
+    def test_the_watcher_stops_when_the_reply_ends(self):
+        """A thread parked in a blocking read cannot be cancelled — it would
+        still be sitting there and would swallow the Enter that starts the
+        *next* turn. This polls, so the stop flag always lands."""
+        import os
+
+        stream, write_fd = self.watcher()
+        stop = threading.Event()
+        thread = audio_io.watch_for_enter(lambda: None, stop, stream=stream)
+        stop.set()
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+        os.close(write_fd)
+
+    def test_a_keypress_after_the_stop_flag_is_ignored(self):
+        """The reply finished on its own; that Enter belongs to the next turn."""
+        import os
+
+        stream, write_fd = self.watcher()
+        fired = []
+        stop = threading.Event()
+        thread = audio_io.watch_for_enter(lambda: fired.append(1), stop, stream=stream)
+        stop.set()
+        os.write(write_fd, b"\n")
+        thread.join(timeout=2)
+        assert fired == []
+        os.close(write_fd)
+
+    def test_input_typed_before_the_watch_is_discarded(self):
+        """The bug this exists to stop: Enter pressed while Nero was *listening*
+        sits in the terminal buffer, gets read the instant the next reply
+        starts, and kills that reply before a word of it is spoken. The user
+        presses Enter again to retry, which stocks the buffer for the turn after
+        that — it never recovers on its own."""
+        import os
+
+        stream, write_fd = self.watcher()
+        os.write(write_fd, b"\n")
+        time.sleep(0.1)
+
+        fired = threading.Event()
+        stop = threading.Event()
+        thread = audio_io.watch_for_enter(fired.set, stop, stream=stream)
+        assert not fired.wait(0.3), "a stale keypress interrupted the reply"
+
+        # A real one, pressed while Nero is speaking, still works.
+        os.write(write_fd, b"\n")
+        assert fired.wait(2)
+        stop.set()
+        thread.join(timeout=2)
+        os.close(write_fd)
+
+    def test_several_stale_keypresses_are_all_discarded(self):
+        """Someone who pressed Enter three times waiting for it to work must not
+        have three interrupts queued up."""
+        import os
+
+        stream, write_fd = self.watcher()
+        os.write(write_fd, b"\n\n\n")
+        time.sleep(0.1)
+        fired = threading.Event()
+        stop = threading.Event()
+        thread = audio_io.watch_for_enter(fired.set, stop, stream=stream)
+        assert not fired.wait(0.3)
+        stop.set()
+        thread.join(timeout=2)
+        os.close(write_fd)
+
+    def test_draining_a_stream_with_no_descriptor_is_harmless(self):
+        assert audio_io.watch_for_enter(lambda: None, threading.Event(), stream=io.StringIO()) is None
+
+    def test_a_non_terminal_stdin_starts_nothing(self):
+        """Piped input and test runs must be untouched."""
+        assert audio_io.watch_for_enter(lambda: None, threading.Event(), stream=io.StringIO()) is None
+
+    def test_a_handler_that_raises_does_not_kill_the_thread_uncaught(self):
+        """An interrupt must never crash the turn it is interrupting."""
+        import os
+
+        stream, write_fd = self.watcher()
+        stop = threading.Event()
+        def boom():
+            raise RuntimeError("nope")
+        thread = audio_io.watch_for_enter(boom, stop, stream=stream)
+        os.write(write_fd, b"\n")
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+        stop.set()
+        os.close(write_fd)

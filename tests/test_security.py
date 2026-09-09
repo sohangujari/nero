@@ -109,7 +109,17 @@ class TestConfirmGate:
 
         registry = build_registry(NeroConfig())
         play_music = registry.get("play_music")
-        play_music._controller = type("Stub", (), {"control": lambda self, action: "ok"})()
+        from nero.skills.play_music.server import Outcome
+
+        play_music._controller = type(
+            "Stub",
+            (),
+            {
+                "available": lambda self: ["Music"],
+                "running": lambda self: [],
+                "control": lambda self, action, player: Outcome(True, "ok"),
+            },
+        )()
         assert run(registry.execute("play_music", {"action": "play"})) == "ok"
 
 
@@ -320,7 +330,7 @@ class TestConfirmSkillCLI:
         assert result is False
 
     def test_list_valued_argument_matching_denylist_escalates_to_typed_yes(self, monkeypatch):
-        # git_command's "args" is a list of strings (["reset", "--hard"]), not
+        # run_git's "args" is a list of strings (["reset", "--hard"]), not
         # a single command string — the denylist scan must join it before
         # matching, or a denylisted git call would only ever get a plain y/N.
         original_console = cli.console
@@ -328,7 +338,7 @@ class TestConfirmSkillCLI:
         try:
             monkeypatch.setattr(cli.Prompt, "ask", lambda *a, **k: "yes")
             result = cli._confirm_skill(
-                "git_command",
+                "run_git",
                 "destructive",
                 {"args": ["reset", "--hard"]},
                 SecurityConfig(),
@@ -347,7 +357,7 @@ class TestConfirmSkillCLI:
             ))
             monkeypatch.setattr(cli.Confirm, "ask", lambda *a, **k: True)
             result = cli._confirm_skill(
-                "git_command",
+                "run_git",
                 "destructive",
                 {"args": ["status"]},
                 SecurityConfig(),

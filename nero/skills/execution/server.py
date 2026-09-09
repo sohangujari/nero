@@ -1,11 +1,11 @@
-"""Execution skills: run_shell, git_command, run_python, run_javascript.
+"""Execution skills: run_shell, run_git, run_python, run_javascript.
 
 All four are permission_tier="destructive" — the registry's confirm gate
 (SkillRegistry._dispatch) fires before execute() runs; with no confirm
 callback they are refused (fail closed). That gate is not re-implemented
 here.
 
-run_shell and git_command additionally enforce the allowlist themselves,
+run_shell and run_git additionally enforce the allowlist themselves,
 per the design spec: `allowed(command, config.command_allowlist)` False
 means the skill refuses ITSELF, before any prompting (an empty allowlist
 permits everything, so this is inert until a user opts in). A denylist
@@ -95,6 +95,7 @@ class RunShellSkill(Skill):
         },
         requires_network=False,
         permission_tier="destructive",
+        category="Code",
     )
 
     def __init__(self, security: SecurityConfig | None = None):
@@ -112,7 +113,7 @@ class RunShellSkill(Skill):
 
 class GitCommandSkill(Skill):
     meta = SkillMeta(
-        name="git_command",
+        name="run_git",
         description=(
             'Run a git command in the user\'s current working directory. Pass '
             '`args` as a list of strings, e.g. ["status"] or '
@@ -136,6 +137,7 @@ class GitCommandSkill(Skill):
         },
         requires_network=False,
         permission_tier="destructive",
+        category="Code",
     )
 
     def __init__(self, security: SecurityConfig | None = None):
@@ -179,6 +181,7 @@ class RunPythonSkill(Skill):
         },
         requires_network=False,
         permission_tier="destructive",
+        category="Code",
     )
 
     async def execute(self, **kwargs) -> str:
@@ -217,6 +220,7 @@ class RunJavascriptSkill(Skill):
         },
         requires_network=False,
         permission_tier="destructive",
+        category="Code",
     )
 
     async def execute(self, **kwargs) -> str:

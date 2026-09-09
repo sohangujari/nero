@@ -16,6 +16,12 @@ _JSON_TYPES: dict[str, type | tuple[type, ...]] = {
 
 PermissionTier = Literal["read_only", "state_changing", "destructive"]
 
+# What a skill is *for*, as opposed to what it is allowed to do. Grouping by
+# permission tier answers "how dangerous is this"; grouping by category answers
+# "where do I look for the thing that opens an app", which is the question
+# someone reading a list of twenty skills actually has.
+Category = Literal["Files", "Code", "Web", "Apps", "Memory", "MCP", "Other"]
+
 
 def validate_arguments(input_schema: dict, arguments) -> bool:
     """Generic validation of tool-call arguments against a Skill's input schema.
@@ -64,6 +70,7 @@ class SkillMeta(BaseModel):
     input_schema: dict
     requires_network: bool
     permission_tier: PermissionTier
+    category: Category = "Other"
     # Shown verbatim when the skill is blocked by offline mode. Optional so
     # non-network skills don't carry a message they can never emit.
     offline_message: str | None = None

@@ -48,6 +48,7 @@ export type Channel = {
 export type Skill = {
   name: string
   description: string
+  category: string
   tier: "read_only" | "state_changing" | "destructive"
   requires_network: boolean
   enabled: boolean

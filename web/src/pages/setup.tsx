@@ -177,6 +177,22 @@ export function Models({ state, edit }: PageProps) {
 
 // --- Skills -----------------------------------------------------------------
 
+// Everyday things first, sharp things last — the same instinct as putting the
+// knives at the back of the drawer.
+const CATEGORY_ORDER = ["Web", "Apps", "Memory", "Files", "Code", "MCP", "Other"]
+const ORDER = (category: string) => {
+  const at = CATEGORY_ORDER.indexOf(category)
+  return at === -1 ? CATEGORY_ORDER.length : at
+}
+const CATEGORY_LABEL: Record<string, string> = {
+  Web: "Web",
+  Apps: "Apps and media",
+  Memory: "Memory and notes",
+  Files: "Files",
+  Code: "Terminal and code",
+  MCP: "MCP servers",
+}
+
 const TIER: Record<string, "secondary" | "outline" | "destructive"> = {
   read_only: "outline",
   state_changing: "secondary",
@@ -191,55 +207,74 @@ export function Skills({ state, edit }: PageProps) {
       </Page>
     )
   }
+
+  // Grouped by what a skill is *for*. Permission tier answers "how dangerous
+  // is this"; the category answers "where do I look for the thing that opens
+  // an app", which is the question someone scanning twenty rows actually has.
+  const groups = new Map<string, typeof state.skills>()
+  for (const skill of state.skills) {
+    const existing = groups.get(skill.category)
+    if (existing) existing.push(skill)
+    else groups.set(skill.category, [skill])
+  }
+  const ordered = [...groups.entries()].sort((a, b) => ORDER(a[0]) - ORDER(b[0]))
+  const on = state.skills.filter((s) => s.available).length
+
   return (
     <Page
       title="Skills"
-      lede="What the model may call on this machine. The switch is the setting; `available` is the outcome — a network skill stays withdrawn in offline mode however you switch it."
+      lede={`${on} of ${state.skills.length} available. The switch is the setting; "available" is the outcome — a network skill stays withdrawn in offline mode however you switch it.`}
     >
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Skill</TableHead>
-            <TableHead>Permission</TableHead>
-            <TableHead>Status</TableHead>
-            <TableHead className="text-right">Enabled</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {state.skills.map((skill) => (
-            <TableRow key={skill.name}>
-              <TableCell className={skill.available ? "" : "opacity-60"}>
-                <span className="font-mono text-xs font-medium">{skill.name}</span>
-                <p className="text-muted-foreground mt-0.5 text-xs">{skill.description}</p>
-              </TableCell>
-              <TableCell className="align-top">
-                <Badge variant={TIER[skill.tier] ?? "outline"}>{skill.tier.replace("_", " ")}</Badge>
-                {skill.requires_network && (
-                  <Badge variant="outline" className="ml-1">
-                    network
-                  </Badge>
-                )}
-              </TableCell>
-              <TableCell className="align-top">
-                {skill.available ? (
-                  <Badge variant="secondary">available</Badge>
-                ) : (
-                  <Badge variant="outline">{skill.enabled ? "blocked by mode" : "off"}</Badge>
-                )}
-              </TableCell>
-              <TableCell className="text-right align-top">
-                <Toggle
-                  field={`skills.enabled.${skill.name}`}
-                  on={skill.enabled}
-                  edit={edit}
-                  label={skill.name}
-                />
-              </TableCell>
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
-      <p className="text-muted-foreground mt-4 text-xs">
+      {ordered.map(([category, skills]) => (
+        <section key={category} className="mb-8 last:mb-0">
+          <div className="mb-2 flex items-baseline gap-2">
+            <h3 className="text-sm font-semibold">{CATEGORY_LABEL[category] ?? category}</h3>
+            <span className="text-muted-foreground text-xs">
+              {skills.filter((s) => s.available).length}/{skills.length} on
+            </span>
+          </div>
+          <Table>
+            <TableBody>
+              {skills.map((skill) => (
+                <TableRow key={skill.name}>
+                  <TableCell className={skill.available ? "" : "opacity-60"}>
+                    <span className="font-mono text-xs font-medium">{skill.name}</span>
+                    <p className="text-muted-foreground mt-0.5 text-xs">{skill.description}</p>
+                  </TableCell>
+                  <TableCell className="w-44 align-top">
+                    <Badge variant={TIER[skill.tier] ?? "outline"}>
+                      {skill.tier.replace("_", " ")}
+                    </Badge>
+                    {skill.requires_network && (
+                      <Badge variant="outline" className="ml-1">
+                        network
+                      </Badge>
+                    )}
+                  </TableCell>
+                  <TableCell className="w-36 align-top">
+                    {skill.available ? (
+                      <Badge variant="secondary">available</Badge>
+                    ) : (
+                      <Badge variant="outline">
+                        {skill.enabled ? "blocked by mode" : "off"}
+                      </Badge>
+                    )}
+                  </TableCell>
+                  <TableCell className="w-16 text-right align-top">
+                    <Toggle
+                      field={`skills.enabled.${skill.name}`}
+                      on={skill.enabled}
+                      edit={edit}
+                      label={skill.name}
+                    />
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </section>
+      ))}
+      <p className="text-muted-foreground text-xs">
         Destructive skills stay gated behind a confirmation at the point of use, however they are
         switched here.
       </p>

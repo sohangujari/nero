@@ -66,6 +66,7 @@ class WeatherSkill(Skill):
         },
         requires_network=True,
         permission_tier="read_only",
+        category="Web",
         offline_message=(
             "Weather needs an internet connection, and you're in offline mode right now."
         ),

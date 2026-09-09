@@ -14,7 +14,7 @@ from rich.markup import escape
 
 from nero.llm.ollama_adapter import OllamaModelError
 from nero.memory.recall import recall_block, trim_to_window
-from nero.voice.audio_io import RECORD_SAMPLE_RATE, listen_for_barge_in
+from nero.voice.audio_io import RECORD_SAMPLE_RATE, listen_for_barge_in, watch_for_enter
 from nero.voice.errors import (
     BargeIn,
     MicPermissionError,
@@ -104,6 +104,7 @@ class VoiceLoop:
         history=None,
         vad=None,
         barge_in: bool = False,
+        key_stream=None,
         source=None,
         context_window: int = 0,
     ):
@@ -130,6 +131,11 @@ class VoiceLoop:
         self.source = source
         self._pending_prefix = None
         self._barge_in_broken = False
+        # Set by the Enter watcher so the barge-in hint (which talks about
+        # speakers and microphones) is not shown for a deliberate keypress.
+        self._interrupted_by_key = False
+        # Overridable for tests; production always reads the real stdin.
+        self._key_stream = key_stream
         self._hinted = False
         # Hands-free needs somewhere to stand still. Awake means the mic is
         # open and every reply flows straight back into listening; asleep means
@@ -145,6 +151,7 @@ class VoiceLoop:
     def run(self) -> None:
         self.console.print(
             f"[bold]{self.assistant_name}[/bold] is listening. "
+            "Press [dim]Enter[/dim] while it's speaking to interrupt. "
             "Say [dim]stop[/dim] or press Ctrl+C to leave.\n"
         )
         while True:
@@ -222,6 +229,7 @@ class VoiceLoop:
         # Initialised before the try so the finally block can always reference
         # it safely, even if the monitor setup below raises.
         monitor = None
+        keys = None
         prefix_holder: list = []
 
         spoken_count = [0]
@@ -256,9 +264,20 @@ class VoiceLoop:
                 if not self._barge_in_broken:
                     self._barge_in_broken = True
                     self.console.print(
-                        "\n[dim]Barge-in stopped working this session "
-                        "(microphone unavailable). Press Ctrl+C to interrupt.[/dim]"
+                        "\n[dim]Voice barge-in stopped working this session "
+                        "(microphone unavailable). Press Enter to interrupt.[/dim]"
                     )
+
+            # Always available, whatever the audio setup: the acoustic monitor
+            # is off on built-in speakers (Nero would hear itself), and that is
+            # exactly the machine where you most need a way to cut a long reply
+            # short. Costs nothing when stdin is not a terminal.
+            def on_key():
+                self._interrupted_by_key = True
+                barge_event.set()
+                player.stop_now()
+
+            keys = watch_for_enter(on_key, stop_monitor, stream=self._key_stream)
 
             if self.barge_in and self.vad is not None and not self._barge_in_broken:
                 monitor = listen_for_barge_in(
@@ -299,7 +318,10 @@ class VoiceLoop:
             # output here the user would see the prompt cut off mid-word with no
             # sign anything happened and no hint that barge-in is a setting.
             self.console.print()
-            self._hint_once()
+            if self._interrupted_by_key:
+                self._interrupted_by_key = False
+            else:
+                self._hint_once()
             if not spoken:
                 # Nothing reached the speaker: drop the whole turn, exactly like
                 # the Ctrl+C path. Persisting an assistant message with no
@@ -381,6 +403,11 @@ class VoiceLoop:
         finally:
             spinner.stop()
             stop_monitor.set()
+            self._interrupted_by_key = False
+            if keys is not None:
+                # Poll-based, so it always notices the flag; joined so a
+                # stray Enter cannot leak into the next turn's prompt.
+                keys.join(timeout=1)
             if monitor is not None:
                 monitor.join(timeout=2)
                 if monitor.is_alive():

@@ -30,6 +30,7 @@ class SearchNotesSkill(Skill):
         },
         requires_network=False,
         permission_tier="read_only",
+        category="Memory",
         # Note files are the user's own content, but still external text the
         # model shouldn't treat as instructions.
         ingests_external_content=True,

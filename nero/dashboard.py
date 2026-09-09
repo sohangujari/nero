@@ -162,6 +162,7 @@ def skills_payload(registry=None) -> list[dict]:
             {
                 "name": name,
                 "description": skill.meta.description,
+                "category": skill.meta.category,
                 "tier": skill.meta.permission_tier,
                 "requires_network": skill.meta.requires_network,
                 "enabled": registry.is_enabled(name),
