@@ -1126,6 +1126,9 @@ def _build_chat_loop(manager, config, api_key, registry, mcp_connections):
     fallback_clients = _build_fallback_clients(manager, config, registry)
     coding_client = _resolve_coding_client(manager, config, registry)
     facts = [(fact.key, fact.value) for fact in FactStore(default_facts_path()).all()]
+    # Also said here, not only when the model is chosen: a model set weeks ago
+    # is exactly the one whose misbehaviour never gets explained.
+    _warn_if_no_tool_support(manager)
 
     client = LLMClient(
         config=config.llm,
@@ -1529,6 +1532,17 @@ def _warn_if_no_tool_support(manager: ConfigManager) -> None:
     """
     config = manager.load()
     if config.llm.provider != "ollama":
+        return
+    if ollama.misfires_tools(config.llm.model):
+        console.print(
+            f"[yellow]Heads up:[/yellow] [bold]{config.llm.model}[/bold] calls a "
+            "skill on almost every message, including plain chat — it answers "
+            '"hi" by running a tool instead of saying hello, which makes replies '
+            "both wrong and several seconds slower. Ollama reports it as "
+            "tool-capable; measurement says otherwise. [bold]phi4-mini[/bold] or "
+            "[bold]qwen3[/bold] handle skills properly, or point Nero at a cloud "
+            "provider with [bold]nero config set llm.provider[/bold]."
+        )
         return
     if ollama.supports_tools(config.llm.model) is False:
         console.print(

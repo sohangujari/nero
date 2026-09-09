@@ -784,7 +784,9 @@ class TestCurrentTime:
         now = datetime.now().astimezone()
         assert f"{now:%A}" in sent
         assert str(now.year) in sent
-        assert f"{now:%H:%M}" in sent
+        # The clock is rounded down to ten minutes (see current_time_line), so
+        # the wall clock only matches it for one minute in ten.
+        assert f"{now.replace(minute=now.minute // 10 * 10):%H:%M}" in sent
 
     def test_the_core_prompt_itself_stays_fixed(self):
         # system_prompt is the stable, testable half; only system_message varies.

@@ -55,6 +55,33 @@ def supports_tools(name: str, base_url: str = BASE_URL) -> bool | None:
     return "tools" in (response.json().get("capabilities") or [])
 
 
+# Models Ollama reports as tool-capable that cannot decide when *not* to call
+# a tool. This is a different question from the one /api/show answers, and
+# Ollama has no field for it: llama3.2 lists "tools" in its capabilities and
+# genuinely emits well-formed, schema-valid tool calls — for every message,
+# including "hi" and "what is 2+2". Those calls pass validation and execute, so
+# no amount of downstream guarding recovers the answer.
+#
+# Measured on llama3.2:latest (3.2B), temperature 0 and 0.7, offering 12 tools,
+# 3 tools and 1 tool: a tool fired on 7 of 7 ordinary messages at every tool
+# count ("what is 2+2" -> fetch_web_page; with one tool offered, open_app).
+# With no tools offered the same model answers all 7 correctly in ~0.4 s.
+#
+# Entries are measured, never guessed — a wrong entry silently disables every
+# skill for someone whose model works fine. Keyed on the family, before the
+# tag, because the behaviour is the model's, not the quantisation's.
+MISFIRES_TOOLS = frozenset({"llama3.2"})
+
+
+def misfires_tools(name: str) -> bool:
+    """Whether `name` is a model measured to call tools on ordinary chat.
+
+    Purely a table lookup, so it stays true with the server down — unlike
+    `supports_tools`, there is nothing to probe.
+    """
+    return name.split(":")[0] in MISFIRES_TOOLS
+
+
 def pull_model(name: str) -> bool:
     """Run `ollama pull`, inheriting stdio so its progress bars render."""
     try:

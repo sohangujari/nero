@@ -89,3 +89,56 @@ class TestWarning:
         monkeypatch.setattr("nero.llm.ollama.supports_tools", lambda m: None)
         result = runner.invoke(cli.app, ["config", "set", "llm.model", "gemma3"])
         assert "no tool-calling support" not in result.stdout
+
+
+class TestMisfiringModels:
+    """Ollama's capability list answers "can it call tools", not "does it know
+    when not to". llama3.2 passes the first and fails the second."""
+
+    def test_a_measured_misfiring_model_is_flagged(self):
+        from nero.llm import ollama
+        assert ollama.misfires_tools("llama3.2") is True
+
+    def test_the_tag_does_not_matter(self):
+        from nero.llm import ollama
+        assert ollama.misfires_tools("llama3.2:latest") is True
+        assert ollama.misfires_tools("llama3.2:1b") is True
+
+    def test_an_unmeasured_model_is_left_alone(self):
+        from nero.llm import ollama
+        assert ollama.misfires_tools("phi4-mini") is False
+        assert ollama.misfires_tools("qwen3:8b") is False
+
+    def test_it_needs_no_server(self, monkeypatch):
+        """Unlike supports_tools, there is nothing to probe — so the answer
+        survives Ollama being down, which is when it is least expected."""
+        import httpx
+        from nero.llm import ollama
+
+        def boom(*a, **k):
+            raise httpx.ConnectError("down")
+
+        monkeypatch.setattr("httpx.post", boom)
+        monkeypatch.setattr("httpx.get", boom)
+        assert ollama.misfires_tools("llama3.2") is True
+
+    def test_the_warning_says_skills_fire_on_plain_chat(self, monkeypatch, tmp_path):
+        manager = _manager(tmp_path, "ollama", "llama3.2")
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        result = runner.invoke(cli.app, ["config", "set", "llm.model", "llama3.2"])
+        assert "almost every message" in result.stdout
+        # The other warning's wording would be actively misleading here: the
+        # model does support tool calling, which is the whole problem.
+        assert "no tool-calling support" not in result.stdout
+
+    def test_a_misfiring_model_is_never_probed_for_capabilities(
+        self, monkeypatch, tmp_path
+    ):
+        manager = _manager(tmp_path, "ollama", "llama3.2")
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        monkeypatch.setattr(
+            "nero.llm.ollama.supports_tools",
+            lambda m: (_ for _ in ()).throw(AssertionError("probed needlessly")),
+        )
+        result = runner.invoke(cli.app, ["config", "set", "llm.model", "llama3.2"])
+        assert result.exit_code == 0
