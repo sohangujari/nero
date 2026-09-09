@@ -826,10 +826,13 @@ def talk(
 
     api_key = _provider_preflight(manager, config)
 
+    # One registry, shared by the primary and every fallback: a turn that fails
+    # over must still see the same skills, taint state and audit log.
+    registry = _build_registry(manager, config)
     client = LLMClient(
         config=config.llm,
         assistant_name=config.assistant.name,
-        registry=_build_registry(manager, config),
+        registry=registry,
         api_key=api_key,
     )
 
@@ -906,6 +909,7 @@ def talk(
             barge_in=barge_in,
             source=source,
             context_window=config.memory.compact_after_messages,
+            fallback_clients=_build_fallback_clients(manager, config, registry),
         ).run()
     finally:
         if source is not None:
@@ -993,6 +997,7 @@ def _build_registry(manager: ConfigManager, config: NeroConfig, extra_skills=Non
         config,
         audit=AuditLog(default_audit_path()),
         remember_setting=remember_setting,
+        spotify_auth=manager.get_spotify_credentials,
         confirm=confirm,
         extra_skills=extra_skills,
     )
@@ -1222,6 +1227,15 @@ def _resolve_fallback_client(
     """
     if provider == "ollama":
         api_key = None
+        # A chain entry naming a model that was never pulled is worse than no
+        # entry at all: it looks like a safety net right up to the moment the
+        # primary fails and it turns out `ollama/llama3.2` was only ever
+        # `llama3.2:1b`. Checked here so it is said at startup, not discovered
+        # mid-turn. Silent when Ollama is down — that is a separate problem,
+        # and the entry may work fine once it is running.
+        if ollama.reachable() and not ollama.has_model(model):
+            available = ", ".join(ollama.list_models()) or "none"
+            return None, f"Ollama has no model {model!r} (pulled: {available})"
     elif provider == "bedrock":
         region = (
             config.llm.aws_region
@@ -1450,6 +1464,39 @@ def config_set(key: str, value: str) -> None:
         _warn_if_fallback_issue(manager)
     if key in ("llm.model", "llm.fallback_chain", "llm.model_blacklist", "llm.model_whitelist"):
         _warn_if_model_listed(manager)
+
+
+@config_app.command("spotify")
+def config_spotify(
+    client_id: str = typer.Option(None, "--client-id", help="Spotify app client ID."),
+    client_secret: str = typer.Option(None, "--client-secret", help="Spotify app client secret."),
+) -> None:
+    """Store Spotify API credentials, so Nero can start a named song there.
+
+    Play, pause and skip never needed this — only "play God's Plan by Drake",
+    because Spotify's AppleScript takes a track URI and there is no way to look
+    one up anonymously.
+    """
+    manager = ConfigManager()
+    if not client_id or not client_secret:
+        console.print(
+            "Create an app at [bold]https://developer.spotify.com/dashboard[/bold] "
+            "(any name, any redirect URI — Nero never opens one), then paste its "
+            "two values here.\n"
+        )
+    client_id = client_id or typer.prompt("Client ID").strip()
+    client_secret = client_secret or typer.prompt("Client secret", hide_input=True).strip()
+    if not client_id or not client_secret:
+        console.print("[red]Both values are needed.[/red]")
+        raise typer.Exit(1)
+    try:
+        manager.set_spotify_credentials(client_id, client_secret)
+    except Exception as exc:  # noqa: BLE001 — keyring backends fail in many ways
+        console.print(f"[red]Could not save to the keyring:[/red] {escape(str(exc))}")
+        raise typer.Exit(1) from exc
+    # Never echoed back, masked or otherwise — they go to the keyring and stay
+    # there, like every other credential Nero holds.
+    console.print("[green]Saved.[/green] Try [bold]nero talk[/bold] and ask for a song.")
 
 
 @config_app.command("set-key")

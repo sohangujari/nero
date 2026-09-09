@@ -23,11 +23,20 @@ def list_models(base_url: str = BASE_URL) -> list[str]:
 
 
 def has_model(name: str, base_url: str = BASE_URL) -> bool:
+    """Whether Ollama would actually serve `name`, the way Ollama resolves it.
+
+    A bare name means the `:latest` tag — it is not a wildcard over whatever
+    happens to be pulled. Matching it as a prefix said yes to `llama3.2` on a
+    machine holding only `llama3.2:1b`, while Ollama itself answered
+    `model 'llama3.2' not found`; a fallback chain built on that answer looks
+    like a safety net until the moment it is needed.
+    """
     try:
         tags = list_models(base_url)
     except httpx.HTTPError:
         return False
-    return any(tag == name or tag.startswith(f"{name}:") for tag in tags)
+    wanted = name if ":" in name else f"{name}:latest"
+    return any(tag == name or tag == wanted for tag in tags)
 
 
 def supports_tools(name: str, base_url: str = BASE_URL) -> bool | None:

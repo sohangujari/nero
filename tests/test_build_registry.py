@@ -1,3 +1,5 @@
+import pytest
+import asyncio
 """`build_registry` (nero/skills/registry.py) wired end to end.
 
 No test here calls WeatherSkill.execute() without replacing `_fetch` first
@@ -29,8 +31,8 @@ class TestOfflineAndDisabledGating:
         # play_music, read_file, and the local memory skills
         # (remember_fact/recall_facts/search_notes enabled by default,
         # forget_fact disabled by default) are local -> what's left standing.
-        assert names == {"close_app", "play_music", "read_file", "remember_fact",
-                         "recall_facts", "search_notes"}
+        assert names == {"close_app", "play_music", "set_volume", "read_file",
+                         "remember_fact", "recall_facts", "search_notes"}
 
     def test_known_names_lists_every_registered_skill(self):
         from nero.skills.registry import build_registry
@@ -43,6 +45,7 @@ class TestOfflineAndDisabledGating:
             "open_website",
             "get_weather",
             "play_music",
+            "set_volume",
             "read_file",
             "write_file",
             "edit_file",
@@ -200,3 +203,62 @@ class TestWeatherWiring:
         config = make_config()
         config.skills.music.preferred_app = "Spotify"
         assert build_registry(config).get("play_music")._preferred_app == "Spotify"
+
+
+class TestPlaceholderArguments:
+    """Models send the literal string "null" when they have nothing for an
+    optional field. Seen in the wild as `get_weather {"location": "null"}`,
+    which was geocoded as a place called "null", failed, and cost another
+    provider round trip to recover from — at 20-35s each."""
+
+    def schema(self, required=()):
+        return {"properties": {"location": {}, "units": {}}, "required": list(required)}
+
+    @pytest.mark.parametrize("value", ["null", "None", "UNDEFINED", "nil", "n/a", "  ", ""])
+    def test_a_placeholder_optional_argument_is_dropped(self, value):
+        from nero.skills.registry import _drop_placeholders
+
+        assert _drop_placeholders(self.schema(), {"location": value}) == {}
+
+    def test_a_real_value_is_kept(self):
+        from nero.skills.registry import _drop_placeholders
+
+        assert _drop_placeholders(self.schema(), {"location": "Mumbai"}) == {"location": "Mumbai"}
+
+    def test_a_required_argument_is_never_touched(self):
+        """A skill that legitimately receives the four characters "null" as
+        content must still receive them."""
+        from nero.skills.registry import _drop_placeholders
+
+        schema = self.schema(required=["location"])
+        assert _drop_placeholders(schema, {"location": "null"}) == {"location": "null"}
+
+    def test_non_strings_are_left_alone(self):
+        from nero.skills.registry import _drop_placeholders
+
+        assert _drop_placeholders(self.schema(), {"units": 0}) == {"units": 0}
+
+    def test_it_reaches_the_skill_through_the_registry(self):
+        from nero.skills.registry import build_registry
+
+        seen = {}
+
+        class Recording:
+            meta = type(
+                "M", (), {
+                    "name": "get_weather", "permission_tier": "read_only",
+                    "requires_network": False, "ingests_external_content": False,
+                    "offline_message": None,
+                    "input_schema": {"properties": {"location": {}}, "required": []},
+                },
+            )()
+
+            async def execute(self, **kwargs):
+                seen.update(kwargs)
+                return "ok"
+
+        from nero.skills.registry import SkillRegistry
+
+        registry = SkillRegistry([Recording()])
+        asyncio.run(registry.execute("get_weather", {"location": "null"}))
+        assert seen == {}

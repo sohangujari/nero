@@ -819,13 +819,79 @@ class TestCurrentTime:
         source = inspect.getsource(current_time_line)
         assert "%-" not in source
 
-    def test_both_provider_paths_send_it(self):
-        import inspect
+    def test_the_clock_only_changes_six_times_an_hour(self):
+        """It sits at the front of the prompt, so every change invalidates all
+        twelve tool schemas behind it — a 2,000-token re-evaluation measured at
+        ~10 s on llama3.2. Minute precision bought that stall on the first turn
+        of every new minute."""
+        from datetime import datetime
+        from unittest.mock import patch
 
-        from nero.llm.client import LLMClient
+        from nero.llm.client import current_time_line
 
-        for method in (LLMClient._litellm_chat, LLMClient._ollama_chat):
-            assert "system_message()" in inspect.getsource(method)
+        seen = set()
+        for minute in range(60):
+            stamp = datetime(2026, 9, 10, 1, minute).astimezone()
+            with patch("nero.llm.client.datetime") as clock:
+                clock.now.return_value = stamp
+                seen.add(current_time_line())
+        assert len(seen) == 6, f"clock changed {len(seen)} times in an hour"
+
+    def test_the_prefix_is_identical_while_the_clock_holds(self):
+        """What makes the cache hold: back-to-back turns send byte-identical
+        prompt prefixes."""
+        client = make_client()
+        first = client.outgoing([{"role": "user", "content": "one"}])
+        second = client.outgoing([{"role": "user", "content": "two"}])
+        assert first[0] == second[0]
+
+    def test_the_clock_is_never_sent_after_the_user_turn(self):
+        """Both alternatives to the front were tried and are worse: as a
+        trailing system message llama3.2 answers with a literal "assistant"
+        header, and appended to the user's message the model treats the time as
+        the subject and answers "hi" with the date."""
+        client = make_client()
+        sent = client.outgoing([{"role": "user", "content": "hi"}])
+        assert "Right now it is" in sent[0]["content"]
+        assert sent[-1] == {"role": "user", "content": "hi"}
+
+    def test_both_provider_paths_send_the_clock(self, monkeypatch):
+        import asyncio
+
+        from nero.llm import client as client_module
+
+        seen = {}
+
+        async def fake_ollama(base_url, model, messages, tools):
+            seen["ollama"] = messages
+            return
+            yield  # pragma: no cover — makes this an async generator
+
+        monkeypatch.setattr(client_module, "ollama_chat", fake_ollama)
+        ollama_client = make_client(provider="ollama", model="llama3.2", api_key=None)
+
+        async def drain(client):
+            async for _ in client.stream_chat([{"role": "user", "content": "hi"}], []):
+                pass
+
+        asyncio.run(drain(ollama_client))
+        assert "Right now it is" in seen["ollama"][0]["content"]
+
+        async def fake_completion(**kwargs):
+            seen["litellm"] = kwargs["messages"]
+
+            class Empty:
+                def __aiter__(self):
+                    return self
+
+                async def __anext__(self):
+                    raise StopAsyncIteration
+
+            return Empty()
+
+        monkeypatch.setattr(client_module.litellm, "acompletion", fake_completion)
+        asyncio.run(drain(make_client(provider="claude", model="claude-sonnet-5")))
+        assert "Right now it is" in seen["litellm"][0]["content"]
 
 
 class TestSystemPromptFraming:
@@ -1004,8 +1070,29 @@ class TestOllamaFullJsonReplyIsNoise:
             api_key=None,
         )
 
-    def _run(self, client, content):
-        fake_turns(client, [([content], RoundResult(content=content, tool_calls=[]))])
+    def _run(self, client, content, retry=None):
+        """`retry` is what the model says on the bare (no-tools) retry.
+
+        A model that only ever emits protocol noise gets one more round with no
+        tools offered — the only state it can actually converse in. None means
+        the retry produces nothing either, which lands on the apology.
+        """
+        turns = [([content], RoundResult(content=content, tool_calls=[]))]
+        turns.append(
+            ([retry], RoundResult(content=retry, tool_calls=[]))
+            if retry
+            else ([], RoundResult(content=None, tool_calls=[]))
+        )
+        fake_turns(client, turns)
+        self.tools_per_round = []
+        original = client.stream_chat
+
+        async def spy(messages, tools):
+            self.tools_per_round.append(len(tools or []))
+            async for chunk in original(messages, tools):
+                yield chunk
+
+        client.stream_chat = spy
         shown, messages = [], [{"role": "user", "content": "open youtube"}]
         client.send(messages, on_text=shown.append)
         return "".join(shown), messages
@@ -1024,13 +1111,32 @@ class TestOllamaFullJsonReplyIsNoise:
             self._ollama_client(),
             '{"status": "success", "message": "Opening YouTube"}',
         )
-        assert shown == APOLOGY
+        assert "status" not in shown and shown == APOLOGY
 
     def test_json_with_leading_junk_is_not_shown(self):
         shown, _ = self._run(
             self._ollama_client(), '{}\n\n\n[{"status": "success"}]'
         )
         assert shown == APOLOGY
+
+    def test_the_turn_is_retried_with_no_tools_offered(self):
+        """A model too small to work the protocol answers everything with
+        tool-call JSON. Apologising every turn is not an answer; the only state
+        it can converse in is one where no tools are offered at all."""
+        shown, messages = self._run(
+            self._ollama_client(),
+            '{"status": "success"}',
+            retry="Hello! How can I help?",
+        )
+        assert shown == "Hello! How can I help?"
+        assert messages[-1]["content"] == "Hello! How can I help?"
+        assert self.tools_per_round == [1, 0], "the retry still offered tools"
+
+    def test_the_retry_happens_only_once(self):
+        """Two rounds, then the apology — never a loop."""
+        shown, _ = self._run(self._ollama_client(), '{"status": "success"}')
+        assert shown == APOLOGY
+        assert self.tools_per_round == [1, 0]
 
     def test_genuine_prose_answer_still_shows(self):
         shown, _ = self._run(self._ollama_client(), "Tokyo is the capital of Japan.")

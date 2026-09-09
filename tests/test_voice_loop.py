@@ -764,3 +764,108 @@ class TestEnterInterrupt:
         loop.console = Console(file=out, width=200)
         loop.run()
         assert "barge_in false" not in out.getvalue()
+
+
+class TestVoiceFallback:
+    """`nero chat` had a fallback chain from the start; `nero talk` had none.
+    A throttled provider therefore made a voice turn wait out the full request
+    timeout and then fail, with no second attempt — which is exactly what
+    "talking to it is so slow" looks like from outside."""
+
+    def loop(self, primary, fallbacks, spoken=""):
+        FakePlayer.instances = []
+
+        def make_player():
+            player = FakePlayer()
+            player._spoken = spoken
+            return player
+
+        inputs = iter([""] * 20)
+        return VoiceLoop(
+            client=primary,
+            stt=FakeSTT(["What's the weather?", "stop"]),
+            record=lambda prefix=None: speech(),
+            make_player=make_player,
+            console=Console(width=200),
+            assistant_name="Nero",
+            input_fn=lambda *_a: next(inputs),
+            history=FakeHistory(),
+            fallback_clients=fallbacks,
+        )
+
+    def failing(self, exc):
+        class Failing:
+            provider, model = "glm", "glm-4.7-flash"
+
+            def send(self, messages, on_text=None):
+                raise exc
+
+        return Failing()
+
+    def test_a_throttled_primary_falls_back_instead_of_giving_up(self):
+        import litellm
+
+        good = FakeClient(["Warm and humid."])
+        good.provider, good.model = "gemini", "gemini-3.5-flash-lite"
+        loop = self.loop(
+            self.failing(litellm.exceptions.RateLimitError("rate limited", "glm", "glm")),
+            [good],
+        )
+        loop.run()
+        # The fake client streams but does not append (the real one does), so
+        # the proof is what actually reached the speaker.
+        assert FakePlayer.instances[-1].sentences == ["Warm and humid."]
+        assert good.seen_messages is not None
+
+    def test_the_switch_is_announced(self):
+        import io as _io
+        import litellm
+
+        good = FakeClient(["Warm."])
+        good.provider, good.model = "gemini", "gemini-3.5-flash-lite"
+        loop = self.loop(
+            self.failing(litellm.exceptions.RateLimitError("rate limited", "glm", "glm")), [good]
+        )
+        out = _io.StringIO()
+        loop.console = Console(file=out, width=200)
+        loop.run()
+        assert "unreachable" in out.getvalue()
+        assert "gemini-3.5-flash-lite" in out.getvalue()
+
+    def test_with_no_chain_the_error_still_surfaces(self):
+        """Nothing to fall back to must not become a silent hang."""
+        import litellm
+
+        loop = self.loop(
+            self.failing(litellm.exceptions.RateLimitError("rate limited", "glm", "glm")), []
+        )
+        loop.run()  # handled by the loop's own error branch, not raised
+        assert not any(m.get("role") == "assistant" for m in loop.messages)
+
+    def test_it_does_not_start_a_second_answer_over_a_spoken_one(self):
+        """Once Nero has begun talking, playing a different model's answer over
+        the top of it is worse than surfacing the error."""
+        import litellm
+
+        class HalfWay:
+            provider, model = "glm", "glm-4.7-flash"
+
+            def send(self, messages, on_text=None):
+                on_text("Well, the ")
+                raise litellm.exceptions.RateLimitError("cut off", "glm", "glm")
+
+        second = FakeClient(["A completely different answer."])
+        second.provider, second.model = "gemini", "g"
+        loop = self.loop(HalfWay(), [second], spoken="Well, the")
+        loop.run()
+        assert "completely different" not in str(loop.messages)
+
+    def test_every_entry_is_tried_before_giving_up(self):
+        import litellm
+
+        error = litellm.exceptions.RateLimitError("nope", "x", "x")
+        last = FakeClient(["Third time lucky."])
+        last.provider, last.model = "ollama", "llama3.2"
+        loop = self.loop(self.failing(error), [self.failing(error), last])
+        loop.run()
+        assert FakePlayer.instances[-1].sentences == ["Third time lucky."]

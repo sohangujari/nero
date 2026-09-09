@@ -172,6 +172,24 @@ class ConfigManager:
 
         keyring.set_password(KEYRING_SERVICE, KEYRING_ENTRY, value)
 
+    def get_spotify_credentials(self) -> tuple[str, str] | None:
+        """(client_id, client_secret), or None if either is missing.
+
+        Both or nothing: a half-configured app registration fails at the token
+        endpoint with a message nobody can act on.
+        """
+        from nero.skills.play_music.server import KEYRING_CLIENT_ID, KEYRING_CLIENT_SECRET
+
+        client_id = self._read_key(KEYRING_CLIENT_ID)
+        secret = self._read_key(KEYRING_CLIENT_SECRET)
+        return (client_id, secret) if client_id and secret else None
+
+    def set_spotify_credentials(self, client_id: str, client_secret: str) -> None:
+        from nero.skills.play_music.server import KEYRING_CLIENT_ID, KEYRING_CLIENT_SECRET
+
+        keyring.set_password(KEYRING_SERVICE, KEYRING_CLIENT_ID, client_id)
+        keyring.set_password(KEYRING_SERVICE, KEYRING_CLIENT_SECRET, client_secret)
+
     @staticmethod
     def mask_api_key(key: str) -> str:
         if len(key) < 8:

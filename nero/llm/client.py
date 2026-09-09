@@ -46,21 +46,39 @@ def current_time_line() -> str:
     launchd-installed session can run for days, and a date captured at boot
     goes stale exactly as badly as no date at all.
 
-    Truncated to the minute on purpose. The string then stays identical across
-    a quick back-and-forth, so the prompt prefix a provider (or ollama's KV
-    cache) has already processed still matches. Measured on llama3.2: minute
-    precision costs nothing against no timestamp at all (0.20 s to first token
-    either way), where an ISO timestamp with microseconds cost 0.37 s by
-    invalidating the cache on every single turn.
+    Rounded down to ten minutes on purpose, and that number was raised from one
+    minute after measuring the real cost. The line sits in the system prompt,
+    which is the *front* of the prompt, so changing it invalidates every token
+    after it — including all twelve tool schemas. On llama3.2 that is a 2,000
+    token re-evaluation:
+
+        stable prefix    10,125 ms cold, then 265 ms, 287 ms
+        clock ticking       312 ms, then 11,808 ms, 9,867 ms
+
+    Minute precision therefore bought a ~10 s stall on the first turn of every
+    new minute — the same prompt, the same tools, the same answer, ten seconds
+    slower, for no reason a user could guess. Ten minutes cuts that to six
+    possible stalls an hour instead of sixty.
+
+    An earlier note here recorded minute precision as free (0.20 s either way).
+    That was measured against a cloud provider before the tool payload reached
+    1,740 tokens; it was true then and is not now.
+
+    The obvious alternative — moving the clock to the end of the prompt, where
+    it would not invalidate anything — was tried and does not work. As a
+    trailing system message llama3.2's chat template answers it with a literal
+    "assistant\n\n" header that lands in the reply; appended to the user's
+    message the model treats it as the subject and answers "hi" with the time.
     """
     now = datetime.now().astimezone()
+    now = now.replace(minute=now.minute // 10 * 10, second=0, microsecond=0)
     zone = now.strftime("%Z") or now.strftime("%z")
     # Day and year are interpolated rather than formatted: the dash-prefixed
     # strftime codes that strip leading zeros are a glibc extension, and Nero
     # ships a Windows binary where they raise.
     return (
         f"\n\nRight now it is {now:%A}, {now.day} {now:%B} {now.year}, "
-        f"{now:%H:%M} {zone}."
+        f"around {now:%H:%M} {zone}."
     )
 
 litellm.suppress_debug_info = True
@@ -259,8 +277,22 @@ class LLMClient:
     def system_message(self) -> str:
         """The system prompt as sent right now — the stable core plus today's
         date. Separate from `self.system_prompt` so the core stays a fixed,
-        testable string and only this varies."""
+        testable string and only this varies.
+
+        Kept for callers that want the whole thing as one string; the wire
+        format splits the two (see `outgoing`).
+        """
         return self.system_prompt + current_time_line()
+
+    def outgoing(self, messages: list[dict]) -> list[dict]:
+        """The single place the outgoing message list is assembled.
+
+        The clock has to live here, at the front, even though that is the worst
+        place for caching — every alternative was worse (see
+        `current_time_line`). What makes it affordable is its granularity: it
+        only changes six times an hour, so the prefix survives in between.
+        """
+        return [{"role": "system", "content": self.system_message()}, *messages]
 
     async def stream_chat(self, messages: list, tools: list) -> AsyncIterator[str]:
         """One completion round: yields display-text deltas as they arrive.
@@ -285,7 +317,7 @@ class LLMClient:
             kwargs["aws_region_name"] = self.aws_region
         response = await litellm.acompletion(
             model=self.litellm_model,
-            messages=[{"role": "system", "content": self.system_message()}, *messages],
+            messages=self.outgoing(messages),
             tools=tools or None,
             max_tokens=MAX_TOKENS,
             stream=True,
@@ -342,8 +374,10 @@ class LLMClient:
 
     async def _ollama_chat(self, messages: list, tools: list) -> AsyncIterator[str]:
         """Native Ollama path: /api/chat directly, no LiteLLM translation."""
-        request_messages = [{"role": "system", "content": self.system_message()}]
-        request_messages += [self._to_ollama_message(m) for m in messages]
+        outgoing = self.outgoing(messages)
+        request_messages = [outgoing[0]]
+        request_messages += [self._to_ollama_message(m) for m in outgoing[1:-1]]
+        request_messages.append(outgoing[-1])
         model = self.config.model.removeprefix("ollama/")
         parts: list[str] = []
         calls = []
@@ -403,6 +437,12 @@ class LLMClient:
         # disabled skill must classify as a tool call so the registry can refuse
         # and audit it, rather than being discarded as MALFORMED.
         tool_names = self.registry.known_names()
+        # A model too small to work the tool protocol answers *everything* with
+        # tool-call JSON — llama3.2:1b replies to "hi" by reciting a schema back.
+        # Suppressing that leaves an apology, which is not an answer. So the
+        # turn is retried once with no tools offered, which is the only state
+        # such a model can actually converse in. Capable models never reach it.
+        retried_bare = False
         for _ in range(MAX_TOOL_ROUNDS):
             gate = _JsonGate(on_text, hold_all=hold_all)
             self._last_round = None
@@ -459,6 +499,21 @@ class LLMClient:
             if malformed_structured or outcome is ToolCallOutcome.MALFORMED:
                 gate.discard()
                 logger.debug("Discarded malformed tool-call attempt: %r", content)
+                # ...unless what survived the strip is more of the same blob.
+                # A model that mangles a tool call badly enough leaves an
+                # unbalanced head behind — llama3.2:1b answers "hi" by echoing
+                # a tool schema, and the stripper hands back
+                # `{"type":"function","function":`. Printing that is worse than
+                # printing nothing: this branch already knows the model was
+                # attempting a tool call, so leading-bracket residue is protocol
+                # noise on every provider, not just ollama.
+                if _looks_like_json(cleaned):
+                    cleaned = None
+                if cleaned is None and not retried_bare and tool_definitions:
+                    retried_bare = True
+                    tool_definitions = []
+                    logger.debug("Retrying the round with no tools offered")
+                    continue
                 self._emit_final(on_text, messages, cleaned, gate.streamed)
                 return
 
@@ -471,6 +526,10 @@ class LLMClient:
             if hold_all and tool_definitions and _looks_like_json(content):
                 gate.discard()
                 logger.debug("Discarded all-JSON ollama reply as protocol noise: %r", content)
+                if not retried_bare:
+                    retried_bare = True
+                    tool_definitions = []
+                    continue
                 self._emit_final(on_text, messages, None, gate.streamed)
                 return
 

@@ -217,6 +217,7 @@ class SkillToggles(BaseModel):
     open_website: bool = True
     get_weather: bool = True
     play_music: bool = True
+    set_volume: bool = True
     read_file: bool = True
     write_file: bool = False
     edit_file: bool = False

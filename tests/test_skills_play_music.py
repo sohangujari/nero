@@ -11,6 +11,7 @@ import pytest
 
 from nero.skills.play_music.server import (
     ACTIONS,
+    applescript_string,
     LinuxController,
     MacOSController,
     Outcome,
@@ -61,6 +62,16 @@ class Stub:
     def control(self, action, player):
         self.calls.append((action, player))
         return Outcome(True, f"did {action} in {player}")
+
+    def play_local(self, query, player):
+        self.calls.append(("play_local", query, player))
+        return Outcome(bool(self.local_hit), f"Playing {query} in {player}.")
+
+    def open_track(self, url, player):
+        self.calls.append(("open_track", url, player))
+        return Outcome(True, f"Opened {url} in {player}.")
+
+    local_hit = False
 
 
 class TestMeta:
@@ -310,3 +321,341 @@ class TestSkillDispatch:
         controller = Stub(["Music"])
         run_skill(PlayMusicSkill(controller=controller), action=action)
         assert controller.calls == [(action, "Music")]
+
+
+class TestPlayingANamedSong:
+    """The ask: "play God's Plan by Drake". Before this the skill could only
+    press play/pause on whatever was already queued."""
+
+    def catalog(self, url="https://music.apple.com/x?i=1", label="God's Plan — Drake"):
+        async def fake(query, client=None):
+            return None if url is None else (url, label)
+
+        return fake
+
+    def skill(self, controller, catalog=None, **kw):
+        skill = PlayMusicSkill(controller=controller, **kw)
+        if catalog is not None:
+            skill._catalog = lambda track, player: catalog(track)
+        return skill
+
+    def test_a_song_in_the_library_wins_over_the_catalogue(self):
+        """The local copy is what plays. The lookup runs alongside it for speed
+        and its answer is simply dropped."""
+        controller = Stub(["Music"])
+        controller.local_hit = True
+        result = run_skill(
+            self.skill(controller, catalog=self.catalog()), action="play", track="gods plan"
+        )
+        assert result == "Playing gods plan in Music."
+
+    def test_a_song_in_the_library_still_plays_with_no_connection(self):
+        """The lookup running in parallel must not be able to break the offline
+        case — on a plane, a track you own still starts."""
+        controller = Stub(["Music"])
+        controller.local_hit = True
+
+        async def offline(query, client=None):
+            raise OSError("Network is unreachable")
+
+        skill = PlayMusicSkill(controller=controller)
+        skill._catalog = lambda track, player: offline(track)
+        assert run_skill(skill, action="play", track="gods plan") == "Playing gods plan in Music."
+
+    def test_a_dead_library_search_still_lets_the_catalogue_answer(self):
+        """The mirror case: neither half may take the other down."""
+        controller = Stub(["Music"])
+
+        def boom(query, player):
+            raise OSError("Music is wedged")
+
+        controller.play_local = boom
+        result = run_skill(
+            self.skill(controller, catalog=self.catalog()), action="play", track="gods plan"
+        )
+        assert "https://music.apple.com/x?i=1" in result
+
+    def test_the_library_search_and_the_lookup_run_at_the_same_time(self):
+        """Done in sequence the lookup is pure added latency on every miss —
+        and a miss is the normal case for a song the user does not own."""
+        import time
+
+        controller = Stub(["Music"])
+        started: list = []
+
+        def slow_local(query, player):
+            started.append(("local", time.perf_counter()))
+            time.sleep(0.3)
+            return Outcome(False, "")
+
+        controller.play_local = slow_local
+
+        async def slow_catalog(query, client=None):
+            started.append(("catalog", time.perf_counter()))
+            await asyncio.sleep(0.3)
+            return ("https://music.apple.com/x?i=1", "God's Plan — Drake")
+
+        skill = self.skill(controller, catalog=slow_catalog)
+        began = time.perf_counter()
+        run_skill(skill, action="play", track="gods plan")
+        elapsed = time.perf_counter() - began
+        assert {name for name, _ in started} == {"local", "catalog"}
+        assert elapsed < 0.55, f"ran in sequence: {elapsed:.2f}s for two 0.3s steps"
+
+    def test_a_song_not_in_the_library_is_looked_up(self):
+        controller = Stub(["Music"])
+        skill = self.skill(controller, catalog=self.catalog())
+        result = run_skill(skill, action="play", track="gods plan")
+        assert "https://music.apple.com/x?i=1" in result
+        assert ("open_track", "https://music.apple.com/x?i=1", "Music") in controller.calls
+
+    def test_the_looked_up_title_is_reported_back(self):
+        """"Playing God's Plan — Drake" tells the user the right song was found;
+        echoing their own words back does not."""
+        controller = Stub(["Music"])
+        result = run_skill(self.skill(controller, catalog=self.catalog()),
+                           action="play", track="gods plan")
+        assert "God's Plan — Drake" in result
+
+    def test_a_song_that_cannot_be_found_says_so(self):
+        controller = Stub(["Music"])
+        skill = self.skill(controller, catalog=self.catalog(url=None))
+        result = run_skill(skill, action="play", track="asdkjhasd")
+        assert "couldn't find" in result
+
+    def test_naming_a_song_with_the_wrong_action_is_refused(self):
+        """Skipping to the next track instead is a confusing way to say no."""
+        result = run_skill(self.skill(Stub(["Music"])), action="next", track="gods plan")
+        assert "only start a specific song with 'play'" in result
+
+    def test_no_track_still_just_controls_playback(self):
+        controller = Stub(["Music"])
+        run_skill(self.skill(controller), action="pause")
+        assert controller.calls == [("pause", "Music")]
+
+    def test_the_chosen_player_is_the_one_told_to_play(self):
+        controller = Stub(["Music", "Spotify"])
+        skill = self.skill(controller, catalog=self.catalog(), preferred_app="Spotify")
+        run_skill(skill, action="play", track="gods plan")
+        assert controller.calls[0] == ("play_local", "gods plan", "Spotify")
+
+
+class TestMacOSTrackPlayback:
+    def controller(self, tmp_path, responses, *names):
+        for name in names or ("Music",):
+            (tmp_path / f"{name}.app").mkdir(exist_ok=True)
+        runner = fake_runner(responses)
+        return MacOSController(runner=runner, app_dirs=(tmp_path,)), runner
+
+    def test_the_library_search_uses_the_apps_own_matcher(self, tmp_path):
+        """`search` is the same matcher as the app's search field, so "gods plan
+        drake" finds it without the apostrophe or exact casing."""
+        controller, runner = self.controller(tmp_path, [(0, "God's Plan — Drake", "")])
+        outcome = controller.play_local("gods plan drake", "Music")
+        assert outcome.ok and "God's Plan — Drake" in outcome.message
+        script = runner.calls[0][-1]
+        assert 'search library playlist 1 for "gods plan drake"' in script
+
+    def test_an_empty_library_result_is_a_miss_not_an_error(self, tmp_path):
+        """A miss has to fall through to the catalogue, so it must not look like
+        a failure."""
+        controller, _ = self.controller(tmp_path, [(0, "", "")])
+        outcome = controller.play_local("nothing here", "Music")
+        assert outcome.ok is False
+
+    def test_spotify_has_no_library_to_search(self, tmp_path):
+        """Spotify's AppleScript has no search command; pretending otherwise
+        would spend a subprocess to learn nothing."""
+        controller, runner = self.controller(tmp_path, [], "Spotify")
+        assert controller.play_local("gods plan", "Spotify").ok is False
+        assert runner.calls == []
+
+    def test_starting_a_song_gets_a_longer_leash_than_pressing_pause(self, tmp_path):
+        """It launches the app if closed, loads a catalogue page, and waits for
+        playback. Pressing pause does none of that."""
+        from nero.skills.play_music.server import TIMEOUT_SECONDS, TRACK_TIMEOUT_SECONDS
+
+        seen = []
+
+        def runner(cmd, timeout=None):
+            seen.append(timeout)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        (tmp_path / "Music.app").mkdir(exist_ok=True)
+        controller = MacOSController(runner=runner, app_dirs=(tmp_path,))
+        controller.control("pause", "Music")
+        controller.play_local("gods plan", "Music")
+        assert seen == [TIMEOUT_SECONDS, TRACK_TIMEOUT_SECONDS]
+        assert TRACK_TIMEOUT_SECONDS > TIMEOUT_SECONDS
+
+    def test_a_runner_that_takes_no_timeout_still_works(self, tmp_path):
+        """Test doubles pass just the command; production passes a timeout."""
+        (tmp_path / "Music.app").mkdir(exist_ok=True)
+        controller = MacOSController(
+            runner=lambda cmd: subprocess.CompletedProcess(cmd, 0, "A — B", ""),
+            app_dirs=(tmp_path,),
+        )
+        assert controller.play_local("x", "Music").ok
+
+    def test_it_waits_for_playback_rather_than_sleeping_a_fixed_time(self, tmp_path):
+        """A catalogue page on a cold app can take seconds; a delay long enough
+        to cover that would be dead air on every fast case."""
+        controller, runner = self.controller(tmp_path, [(0, "A — B", "")])
+        controller.open_track("https://music.apple.com/x?i=1", "Music")
+        script = runner.calls[0][-1]
+        assert "repeat" in script and "exit repeat" in script
+        assert "delay 1.5" not in script
+
+    def test_apple_music_is_told_what_actually_started(self, tmp_path):
+        """`open location` navigates; whether playback starts is the app's
+        decision. The script asks rather than assuming."""
+        controller, runner = self.controller(tmp_path, [(0, "God's Plan — Drake", "")])
+        outcome = controller.open_track("https://music.apple.com/x?i=1", "Music")
+        assert outcome.ok and "Playing God's Plan — Drake in Music." == outcome.message
+        assert "player state is playing" in runner.calls[0][-1]
+
+    def test_a_link_that_opens_but_does_not_play_says_exactly_that(self, tmp_path):
+        controller, _ = self.controller(tmp_path, [(0, "", "")])
+        outcome = controller.open_track("https://music.apple.com/x?i=1", "Music")
+        assert outcome.ok and "didn't start playing by itself" in outcome.message
+
+    def test_spotify_is_told_to_play_the_track_not_shown_a_search(self, tmp_path):
+        """"Play" has to mean play. Opening a search page and calling it done is
+        how "I've queued it up, enjoy" ends up on screen with silence."""
+        controller, runner = self.controller(tmp_path, [(0, "God's Plan — Drake", "")], "Spotify")
+        outcome = controller.open_track("spotify:track:abc123", "Spotify")
+        assert outcome.ok and outcome.message == "Playing God's Plan — Drake in Spotify."
+        assert 'play track "spotify:track:abc123"' in runner.calls[0][-1]
+
+    def test_spotify_accepting_the_track_without_playing_is_not_success(self, tmp_path):
+        controller, _ = self.controller(tmp_path, [(0, "", "")], "Spotify")
+        assert controller.open_track("spotify:track:abc", "Spotify").ok is False
+
+
+class TestAppleScriptQuoting:
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("God's Plan", "God's Plan"),          # apostrophes are safe
+            ('12" mix', '12\\" mix'),
+            ("back\\slash", "back\\\\slash"),
+        ],
+    )
+    def test_a_title_cannot_break_out_of_its_string(self, raw, expected):
+        """A song title is interpolated into a script. Same discipline as SQL."""
+        assert applescript_string(raw) == expected
+
+    def test_a_quoted_title_survives_into_the_script(self, tmp_path):
+        (tmp_path / "Music.app").mkdir()
+        runner = fake_runner([(0, "", "")])
+        MacOSController(runner=runner, app_dirs=(tmp_path,)).play_local('12" mix', "Music")
+        script = runner.calls[0][-1]
+        # One balanced string, not two — the quote is escaped, not closing it.
+        assert script.count('search library playlist 1 for "') == 1
+
+
+class TestCatalogLookup:
+    """Apple's search endpoint needs no key — that is why it is the one used.
+    A "play this song" that only works after registering for an API is one most
+    people never switch on."""
+
+    def response(self, payload, status=200):
+        import httpx
+
+        class FakeClient:
+            async def get(self, url, params=None):
+                request = httpx.Request("GET", url)
+                return httpx.Response(status, json=payload, request=request)
+
+        return FakeClient()
+
+    def test_the_first_hit_becomes_a_url_and_a_label(self):
+        from nero.skills.play_music.server import apple_catalog_url
+
+        client = self.response(
+            {"results": [{"trackName": "God's Plan", "artistName": "Drake",
+                          "trackViewUrl": "https://music.apple.com/x?i=1"}]}
+        )
+        assert asyncio.run(apple_catalog_url("gods plan", client)) == (
+            "https://music.apple.com/x?i=1",
+            "God's Plan — Drake",
+        )
+
+    def test_no_results_is_none_not_a_crash(self):
+        from nero.skills.play_music.server import apple_catalog_url
+
+        assert asyncio.run(apple_catalog_url("zzz", self.response({"results": []}))) is None
+
+    def test_a_hit_with_no_url_is_unusable(self):
+        from nero.skills.play_music.server import apple_catalog_url
+
+        client = self.response({"results": [{"trackName": "x", "artistName": "y"}]})
+        assert asyncio.run(apple_catalog_url("x", client)) is None
+
+    def test_a_search_outage_never_reaches_the_user_as_a_traceback(self):
+        from nero.skills.play_music.server import apple_catalog_url
+
+        import httpx
+
+        class Broken:
+            async def get(self, url, params=None):
+                raise httpx.ConnectError("no route to host")
+
+        assert asyncio.run(apple_catalog_url("x", Broken())) is None
+
+    def test_without_credentials_spotify_says_so_instead_of_claiming_success(self):
+        """The bug this replaces: the skill reported "I opened that search —
+        press play", the model relayed "I've queued it up, enjoy", and nothing
+        played. A skill that cannot do the thing must say so."""
+        from nero.skills.play_music.server import SPOTIFY_SETUP_HINT
+
+        controller = Stub(["Spotify"])
+        result = run_skill(
+            PlayMusicSkill(controller=controller, preferred_app="Spotify"),
+            action="play",
+            track="gods plan drake",
+        )
+        assert result == SPOTIFY_SETUP_HINT
+        assert "queued" not in result.lower()
+        assert ("open_track", "spotify:search:gods plan drake", "Spotify") not in controller.calls
+
+    def test_with_credentials_it_resolves_a_real_track_uri(self):
+        from nero.skills.play_music.server import spotify_track_uri
+
+        import httpx
+
+        class FakeClient:
+            async def post(self, url, data=None, headers=None):
+                return httpx.Response(200, json={"access_token": "tok"},
+                                      request=httpx.Request("POST", url))
+
+            async def get(self, url, params=None, headers=None):
+                return httpx.Response(
+                    200,
+                    json={"tracks": {"items": [{
+                        "uri": "spotify:track:6DCZcSspjsKoFjzjrWoCd",
+                        "name": "God's Plan",
+                        "artists": [{"name": "Drake"}]}]}},
+                    request=httpx.Request("GET", url),
+                )
+
+            async def aclose(self):
+                pass
+
+        got = asyncio.run(spotify_track_uri("gods plan", ("id", "secret"), FakeClient()))
+        assert got == ("spotify:track:6DCZcSspjsKoFjzjrWoCd", "God's Plan — Drake")
+
+    def test_bad_credentials_never_reach_the_user_as_a_traceback(self):
+        from nero.skills.play_music.server import spotify_track_uri
+
+        import httpx
+
+        class Rejecting:
+            async def post(self, url, data=None, headers=None):
+                return httpx.Response(400, json={"error": "invalid_client"},
+                                      request=httpx.Request("POST", url))
+
+            async def aclose(self):
+                pass
+
+        assert asyncio.run(spotify_track_uri("x", ("bad", "bad"), Rejecting())) is None

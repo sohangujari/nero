@@ -31,6 +31,9 @@ class ExplodingManager:
     def set_value(self, key_path, value):
         raise OSError("Read-only file system")
 
+    def get_spotify_credentials(self):
+        return None
+
 
 def run(coro):
     return asyncio.run(coro)

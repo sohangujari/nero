@@ -87,9 +87,17 @@ class TestOllamaHelpers:
             ollama, "list_models", lambda base_url=None: ["phi4-mini:latest", "qwen3:8b"]
         )
         assert ollama.has_model("qwen3:8b") is True
-        assert ollama.has_model("phi4-mini") is True  # bare name matches any tag
+        assert ollama.has_model("phi4-mini") is True  # bare name -> :latest, which is pulled
         assert ollama.has_model("phi4") is False
         assert ollama.has_model("llama3.2:3b") is False
+
+    def test_a_bare_name_means_latest_not_any_tag(self, monkeypatch):
+        """Ollama resolves a bare name to `:latest`. Treating it as a wildcard
+        said yes to `llama3.2` on a machine holding only `llama3.2:1b`, while
+        Ollama itself answered `model 'llama3.2' not found`."""
+        monkeypatch.setattr(ollama, "list_models", lambda base_url=None: ["llama3.2:1b"])
+        assert ollama.has_model("llama3.2:1b") is True
+        assert ollama.has_model("llama3.2") is False
 
     def test_pull_model_runs_ollama_cli(self, monkeypatch):
         calls = []

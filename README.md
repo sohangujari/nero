@@ -114,6 +114,13 @@ Nero> It's 31°C and humid right now.
 With `voice.vad.enabled` set to `false` there is no endpointing, so that mode
 keeps its press-Enter-to-start, press-Enter-to-stop prompt and never sleeps.
 
+Voice uses the same fallback chain as `nero chat`. It did not always: a
+throttled provider used to make a *voice* turn wait out the full request
+timeout and then fail with no second attempt, while chat quietly recovered.
+The switch is announced, and it only happens before Nero has started speaking —
+once it is talking, playing a different model's answer over the top is worse
+than surfacing the error.
+
 ### Cutting a long answer short
 
 **Press Enter while Nero Agent is speaking.** It stops mid-sentence and starts
@@ -418,12 +425,12 @@ nothing, an ISO timestamp with microseconds costs nearly double:
 ## Skills, and what asks permission
 
 Skills reach the model through one registry, so every call is audited and
-individually switchable. Twenty ship built in, grouped by what they are for:
+individually switchable. Twenty-one ship built in, grouped by what they are for:
 
 | | |
 |---|---|
 | **Web** | `web_search` `fetch_web_page` `get_weather` |
-| **Apps and media** | `open_app` `close_app` `open_website` `play_music` |
+| **Apps and media** | `open_app` `close_app` `open_website` `play_music` `set_volume` |
 | **Memory and notes** | `remember_fact` `recall_facts` `forget_fact` `search_notes` |
 | **Files** | `read_file` `write_file` `edit_file` `delete_path` `move_path` |
 | **Terminal and code** | `run_shell` `run_git` `run_python` `run_javascript` |
@@ -436,7 +443,7 @@ Cutting across that is what each one is *allowed* to do — three tiers:
 - **read-only** (`web_search`, `get_weather`, `read_file`, `fetch_web_page`,
   `search_notes`, `recall_facts`) — run silently.
 - **state-changing** (`open_app`, `close_app`, `open_website`, `play_music`,
-  `remember_fact`) — run silently.
+  `set_volume`, `remember_fact`) — run silently.
 - **destructive** (`write_file`, `edit_file`, `delete_path`, `move_path`,
   `run_shell`, `run_git`, `run_python`, `run_javascript`, `forget_fact`)
   — **ship disabled**, and once enabled each call shows you the exact
@@ -474,8 +481,8 @@ single request, so the list is not free:
 
 | tools exposed | tokens per request |
 | --- | --- |
-| 11 (default config) | ~1,580 |
-| 20 (everything on) | ~2,700 |
+| 12 (default config) | ~1,840 |
+| 21 (everything on) | ~2,960 |
 | 60 (a "does everything" assistant) | ~7,700 |
 
 That is the same prefill cost the memory window exists to control, and
@@ -495,9 +502,42 @@ Two skills would otherwise ask you the same question forever, so they remember
 the answer instead — under a normal config key, which you can read and change
 like any other.
 
-**`play_music`** finds the players you actually have by looking for their app
-bundles (`Music`, `Spotify`, `TIDAL`, `iTunes`, `Swinsian`, `Doppler`, `VLC`),
-rather than asking each one in turn whether it happens to be running:
+**`play_music`** plays a named song, and finds the players you actually have by
+looking for their app bundles (`Music`, `Spotify`, `TIDAL`, `iTunes`,
+`Swinsian`, `Doppler`, `VLC`) rather than asking each one in turn whether it
+happens to be running:
+
+```
+you   ▸ play God's Plan by Drake
+Nero  ▸ Playing God's Plan — Drake in Music.
+```
+
+The app is launched if it's closed. Your **library is searched first** — a track
+you already have starts instantly and works with no connection — and only on a
+miss does it look the song up in Apple's catalogue, through an endpoint that
+needs no key and no account. It reports the title it actually started, not the
+words you said, so you can tell a wrong match from a right one.
+
+The library search and the catalogue lookup run **at the same time**. Done in
+sequence the lookup is pure added latency on every miss, and a miss is the
+normal case for a song you don't already own. Neither half can take the other
+down: a dead network still plays a local track, and a wedged Music.app still
+lets the catalogue answer.
+
+Spotify needs one setup step, once:
+
+```sh
+nero config spotify        # client ID + secret from developer.spotify.com
+```
+
+Play, pause and skip never needed it. Only *naming* a song does, because
+Spotify's AppleScript takes a `spotify:track:` URI and there is no way to look
+one up anonymously — the web player's token endpoint answers 403. Without
+credentials Nero says it can't and points at that command. It does **not**
+open a search page and call that success; reporting "press play to start it"
+got relayed to one user as *"I've queued it up, enjoy"* while nothing played.
+
+Everything else still works as before:
 
 ```
 you   ▸ play some music
@@ -544,6 +584,17 @@ Stored as `skills.browser.preferred`, same rules as music: only a browser you
 changes — the OS default is still used, exactly as before. `chrome`, `edge`,
 `brave`, `zen` and the rest resolve to their real names, and asking for a
 browser you don't have says so instead of quietly opening a different one.
+
+**`set_volume`** takes the three shapes people actually use — an absolute level
+("set it to 30%", "full volume"), a relative nudge ("a bit louder", "much
+quieter"), or mute. It reads the current level first, because "turn it up a bit"
+is meaningless without knowing where it is now.
+
+Two behaviours worth knowing: turning it **up** while muted unmutes (staying
+silent there is technically obedient and practically useless), while turning it
+**down** while muted does not — you didn't ask to hear anything. And unmuting
+something sitting at zero nudges it off zero, because unmuting into silence
+looks exactly like the unmute having failed.
 
 **`open_app`** doesn't remember anything, but it stopped being a dead end: when
 a launch fails it scans your applications folders and suggests the closest

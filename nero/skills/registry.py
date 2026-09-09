@@ -111,6 +111,7 @@ class SkillRegistry:
             )
         if arguments is None:
             return "Error: tool arguments were not valid JSON."
+        arguments = _drop_placeholders(skill.meta.input_schema, arguments)
         if skill.meta.permission_tier == "destructive":
             # Fail closed: no confirm callback (tests, voice loop, headless
             # routine runs) means the call is refused, never auto-approved.
@@ -147,6 +148,32 @@ class SkillRegistry:
             logger.warning("Could not record audit entry for %r: %s", name, exc)
 
 
+# What a model sends when it means "I have nothing for this". Seen in the wild
+# as `get_weather {"location": "null"}` — which was then geocoded as a place
+# called "null", failed, and cost another provider round trip to recover from.
+_PLACEHOLDERS = {"null", "none", "undefined", "nil", "n/a", "not specified", ""}
+
+
+def _drop_placeholders(input_schema: dict, arguments: dict) -> dict:
+    """Remove optional string arguments that only say "nothing here".
+
+    Optional only, and only on an exact match: a *required* field is the
+    model's problem to get right, and a skill that legitimately receives the
+    four characters "null" as content must still receive them.
+    """
+    optional = set(input_schema.get("properties") or {}) - set(input_schema.get("required") or [])
+    cleaned = {
+        key: value
+        for key, value in arguments.items()
+        if not (
+            key in optional
+            and isinstance(value, str)
+            and value.strip().lower() in _PLACEHOLDERS
+        )
+    }
+    return cleaned
+
+
 def _remember(remember_setting, key: str):
     """Bind a `remember_setting(key, value)` seam to one config key, or None.
 
@@ -159,7 +186,8 @@ def _remember(remember_setting, key: str):
 
 
 def build_registry(
-    config, audit=None, remember_setting=None, confirm=None, extra_skills=None
+    config, audit=None, remember_setting=None, confirm=None, extra_skills=None,
+    spotify_auth=None,
 ) -> SkillRegistry:
     """Construct the registry from a NeroConfig.
 
@@ -190,6 +218,7 @@ def build_registry(
     from nero.skills.open_app.server import CloseAppSkill, OpenAppSkill
     from nero.skills.open_website.server import OpenWebsiteSkill
     from nero.skills.play_music.server import PlayMusicSkill
+    from nero.skills.volume.server import SetVolumeSkill
     from nero.skills.weather.server import WeatherSkill
     from nero.skills.search.server import WebSearchSkill
     from nero.skills.web.server import FetchWebPageSkill
@@ -212,9 +241,13 @@ def build_registry(
             default_location=config.skills.weather.default_location,
             on_location_resolved=_remember(remember_setting, "skills.weather.default_location"),
         ),
+        SetVolumeSkill(),
         PlayMusicSkill(
             preferred_app=config.skills.music.preferred_app,
             on_app_chosen=_remember(remember_setting, "skills.music.preferred_app"),
+            # Read on demand, not at build time: credentials added mid-session
+            # should work without a restart.
+            spotify_auth=spotify_auth,
         ),
         ReadFileSkill(),
         WriteFileSkill(),

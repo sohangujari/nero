@@ -12,6 +12,7 @@ import httpx
 import litellm
 from rich.markup import escape
 
+from nero.core.chat_loop import TRANSIENT_ERRORS
 from nero.llm.ollama_adapter import OllamaModelError
 from nero.memory.recall import recall_block, trim_to_window
 from nero.voice.audio_io import RECORD_SAMPLE_RATE, listen_for_barge_in, watch_for_enter
@@ -107,8 +108,14 @@ class VoiceLoop:
         key_stream=None,
         source=None,
         context_window: int = 0,
+        fallback_clients: list | None = None,
     ):
         self.client = client
+        # Voice had none of these, while `nero chat` had them all along. A
+        # throttled provider therefore made a *voice* turn wait out the full
+        # request timeout and then fail, with no second attempt — which is
+        # exactly what "talking to it is so slow" looks like from outside.
+        self.fallback_clients = fallback_clients or []
         self.stt = stt
         self.record = record
         self.make_player = make_player
@@ -288,7 +295,7 @@ class VoiceLoop:
                     source=self.source,
                 )
 
-            self.client.send(self.messages, on_text=tap)
+            self._send(self.messages, tap, spoken_count)
             tail = buffer.flush()
             if tail:
                 timer.mark("speech")
@@ -416,6 +423,35 @@ class VoiceLoop:
             # success path's close()/join() never ran, which would leave the
             # playback thread parked on the queue and hang interpreter shutdown.
             player.shutdown()
+
+    def _send(self, messages: list[dict], tap, spoken_count) -> None:
+        """One turn's stream, falling back down the chain if the provider fails.
+
+        Only retried while nothing has reached the speaker: once Nero has begun
+        talking, starting a different model's answer over the top of it is worse
+        than surfacing the error.
+        """
+        try:
+            self.client.send(messages, on_text=tap)
+            return
+        except TRANSIENT_ERRORS:
+            if not self.fallback_clients or spoken_count[0]:
+                raise
+        for index, fallback in enumerate(self.fallback_clients):
+            self.console.print(
+                f"\n[yellow]{self.client.model} is unreachable — retrying with "
+                f"{fallback.model} via {fallback.provider}.[/yellow]"
+            )
+            self._prefix()
+            try:
+                fallback.send(messages, on_text=tap)
+                return
+            except TRANSIENT_ERRORS:
+                if index == len(self.fallback_clients) - 1:
+                    raise
+
+    def _prefix(self) -> None:
+        self.console.print(f"[bold magenta]{self.assistant_name}>[/bold magenta] ", end="")
 
     def _trim(self) -> None:
         """Cap the live window so the prompt — and so the wait before Nero
