@@ -1,4 +1,5 @@
 import {
+  BookOpen,
   Blocks,
   CalendarClock,
   Cpu,
@@ -32,6 +33,7 @@ import {
 export const PAGES = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, group: "" },
   { id: "chat", label: "Chat", icon: MessagesSquare, group: "" },
+  { id: "docs", label: "Docs", icon: BookOpen, group: "" },
   { id: "channels", label: "Channels", icon: Radio, group: "Interfaces" },
   { id: "sessions", label: "Sessions", icon: History, group: "Interfaces" },
   { id: "logs", label: "Logs", icon: ScrollText, group: "Interfaces" },

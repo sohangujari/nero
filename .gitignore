@@ -9,8 +9,13 @@ build/
 # subagent-driven-development scratch workspace (ledger, briefs, review diffs)
 .superpowers/
 
-# specs/plans/PRDs — local working notes, never committed
-docs/
+# specs/plans/PRDs — local working notes, never committed.
+# Anchored: unanchored, this matches any directory named docs at any depth, and
+# it silently swallowed web/src/pages/docs — which also hid those files from
+# Tailwind, whose source scan skips whatever git ignores.
+/docs/
 # web UI build inputs (the built bundle in nero/webui_dist IS committed)
 web/node_modules/
 web/.vite/
+# published docs site — built by .github/workflows/docs.yml, never committed
+/site/

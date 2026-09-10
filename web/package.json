@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "build:docs": "tsc -b && vite build --config vite.docs.config.ts"
   },
   "dependencies": {
     "class-variance-authority": "^0.7.1",

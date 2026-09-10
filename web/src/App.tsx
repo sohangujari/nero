@@ -11,6 +11,7 @@ import { Toaster } from "@/components/ui/sonner"
 import { Chat } from "@/pages/chat"
 import { Config } from "@/pages/config"
 import { Dashboard } from "@/pages/dashboard"
+import { Docs } from "@/pages/docs"
 import { Logs } from "@/pages/logs"
 import { Sessions } from "@/pages/sessions"
 import { Channels, Mcp, Memory, Models, Routines, Skills } from "@/pages/setup"
@@ -102,6 +103,8 @@ export default function App() {
         <div className="min-h-0 flex-1">
           {page === "chat" ? (
             <Chat client={client!} />
+          ) : page === "docs" ? (
+            <Docs />
           ) : page === "logs" ? (
             <Logs client={client!} />
           ) : page === "config" ? (

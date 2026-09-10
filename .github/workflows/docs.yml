@@ -1,0 +1,62 @@
+name: Docs
+
+# Publishes the documentation site to GitHub Pages.
+#
+# One-time setup in the repo: Settings -> Pages -> Source: "GitHub Actions".
+# The site then lives at https://<owner>.github.io/nero/ — the trailing /nero/
+# is baked in as Vite's base path (web/vite.docs.config.ts). On a custom domain
+# or a user site, build with DOCS_BASE=/ instead.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "web/**"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+# Everything the deploy needs and nothing else: read the code, write Pages,
+# and mint the OIDC token deploy-pages authenticates with.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; a newer push supersedes an in-flight one.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install (locked — fails if package-lock.json is stale)
+        run: npm ci
+        working-directory: web
+
+      - name: Build the docs site
+        run: npm run build:docs
+        working-directory: web
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
