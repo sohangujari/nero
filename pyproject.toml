@@ -19,6 +19,12 @@ dependencies = [
     "keyring==25.7.0",
     "questionary==2.1.1",
     "pyyaml==6.0.3",
+    # Discord's Gateway and Slack's Socket Mode are both WebSocket-only: unlike
+    # Telegram there is no long-poll endpoint, and the alternative (inbound
+    # webhooks) would mean hosting a public HTTPS endpoint, which this app
+    # exists to avoid. Pure Python, no build step, and its sync client fits the
+    # threaded bridge loop without dragging asyncio into it.
+    "websockets==15.0.1",
     "pynput==1.8.2; sys_platform == 'win32'",
 ]
 

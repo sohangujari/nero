@@ -205,6 +205,36 @@ class TelegramConfig(BaseModel):
     allowed_chat_ids: list[int] = []
 
 
+class DiscordConfig(BaseModel):
+    """Talking to Nero from Discord (nero/discord.py).
+
+    Same rule as Telegram, for the same reason: `allowed_channel_ids` is the
+    entire security model, and empty means the bridge answers nobody.
+
+    Channel ids are strings, not ints. A Discord snowflake fits in a signed
+    64-bit integer today, but nothing here does arithmetic on one, and YAML
+    round-tripping a 19-digit number is a needless way to lose an id.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    allowed_channel_ids: list[str] = []
+
+
+class SlackConfig(BaseModel):
+    """Talking to Nero from Slack (nero/slack.py).
+
+    Same rule again. Slack ids are not numeric at all (`D01ABCDEF`), which is
+    why every channel's allowlist is a list of strings.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    allowed_channel_ids: list[str] = []
+
+
 class SkillToggles(BaseModel):
     """One field per skill, rather than dict[str, bool], so a typo'd skill name
     is rejected instead of silently ignored. Adding a skill means adding a field
@@ -358,4 +388,6 @@ class NeroConfig(BaseModel):
     security: SecurityConfig = SecurityConfig()
     mcp: MCPConfig = MCPConfig()
     telegram: TelegramConfig = TelegramConfig()
+    discord: DiscordConfig = DiscordConfig()
+    slack: SlackConfig = SlackConfig()
     routines: RoutinesConfig = RoutinesConfig()

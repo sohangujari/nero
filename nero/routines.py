@@ -140,32 +140,45 @@ def install_routine(
 BRIDGE_LABEL = "com.neroagent.telegram"
 
 
-def bridge_plist_path(agents_dir: Path) -> Path:
-    return Path(agents_dir) / f"{BRIDGE_LABEL}.plist"
+def bridge_label(channel: str = "telegram") -> str:
+    """One launchd label per channel, so Discord and Slack can be installed and
+    removed without disturbing each other.
+
+    Telegram keeps the label it has always had. Renaming it would orphan the
+    agent already loaded on every machine that installed one: launchctl would
+    know it by the old label while `nero telegram uninstall` looked for the new
+    one, and the old bridge would keep running with nothing able to stop it.
+    """
+    return BRIDGE_LABEL if channel == "telegram" else f"com.neroagent.{channel}"
 
 
-def install_bridge(executable: str, agents_dir: Path) -> str:
-    """Keep `nero telegram` running: at login, and again if it ever stops.
+def bridge_plist_path(agents_dir: Path, channel: str = "telegram") -> Path:
+    return Path(agents_dir) / f"{bridge_label(channel)}.plist"
+
+
+def install_bridge(executable: str, agents_dir: Path, channel: str = "telegram") -> str:
+    """Keep `nero <channel>` running: at login, and again if it ever stops.
 
     A routine is a schedule (`StartCalendarInterval`); this is a daemon, so it
     takes RunAtLoad + KeepAlive instead. Same plist plumbing either way.
     """
     agents_dir = Path(agents_dir)
     agents_dir.mkdir(parents=True, exist_ok=True)
-    path = bridge_plist_path(agents_dir)
+    label = bridge_label(channel)
+    path = bridge_plist_path(agents_dir, channel)
     log_dir = Path(user_log_dir("nero"))
     log_dir.mkdir(parents=True, exist_ok=True)
     plist = {
-        "Label": BRIDGE_LABEL,
-        "ProgramArguments": [executable, "telegram"],
+        "Label": label,
+        "ProgramArguments": [executable, channel],
         "RunAtLoad": True,
         "KeepAlive": True,
-        # Long polling reconnects on its own; this only bites if the process
+        # Every bridge reconnects on its own; this only bites if the process
         # dies instantly and repeatedly, where a tight respawn loop would burn
-        # CPU and hammer Telegram.
+        # CPU and hammer the service.
         "ThrottleInterval": 30,
-        "StandardOutPath": str(log_dir / "telegram.out.log"),
-        "StandardErrorPath": str(log_dir / "telegram.err.log"),
+        "StandardOutPath": str(log_dir / f"{channel}.out.log"),
+        "StandardErrorPath": str(log_dir / f"{channel}.err.log"),
     }
     with path.open("wb") as f:
         plistlib.dump(plist, f)
@@ -173,24 +186,25 @@ def install_bridge(executable: str, agents_dir: Path) -> str:
     if sys.platform != "darwin":
         return f"Wrote {path}. Loading skipped: launchd is darwin-only."
 
-    _run_launchctl("bootout", f"gui/{os.getuid()}/{BRIDGE_LABEL}")
+    _run_launchctl("bootout", f"gui/{os.getuid()}/{label}")
     result = _run_launchctl("bootstrap", f"gui/{os.getuid()}", str(path))
     if result.returncode != 0:
         result = _run_launchctl("load", "-w", str(path))
         if result.returncode != 0:
             return f"Wrote {path}, but launchctl could not load it: {result.stderr.strip()}"
-    return f"Installed {BRIDGE_LABEL}. Logs: {log_dir / 'telegram.err.log'}"
+    return f"Installed {label}. Logs: {log_dir / f'{channel}.err.log'}"
 
 
-def uninstall_bridge(agents_dir: Path) -> str:
-    path = bridge_plist_path(Path(agents_dir))
+def uninstall_bridge(agents_dir: Path, channel: str = "telegram") -> str:
+    label = bridge_label(channel)
+    path = bridge_plist_path(Path(agents_dir), channel)
     if sys.platform == "darwin":
-        _run_launchctl("bootout", f"gui/{os.getuid()}/{BRIDGE_LABEL}")
+        _run_launchctl("bootout", f"gui/{os.getuid()}/{label}")
         _run_launchctl("unload", "-w", str(path))
     if not path.exists():
-        return "The Telegram bridge was not installed."
+        return f"The {channel.title()} bridge was not installed."
     path.unlink()
-    return f"Removed {BRIDGE_LABEL}."
+    return f"Removed {label}."
 
 
 def uninstall_routine(name: str, agents_dir: Path) -> str:

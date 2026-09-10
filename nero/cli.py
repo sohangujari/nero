@@ -7,6 +7,8 @@ import signal
 import sys
 import threading
 import uuid
+from collections.abc import Callable
+from dataclasses import dataclass
 
 import typer
 from rich.console import Console
@@ -57,6 +59,7 @@ from nero.voice.models import ensure_vad_model
 from nero.voice.stt import STT_MODELS, FasterWhisperSTT
 from nero.voice.tts import VOICE_CATALOG, build_tts
 from nero.voice.vad import VoiceActivityDetector
+from nero.channels import ChannelError, PeerStore
 from nero.telegram import PairingStore, TelegramBot, TelegramError, incoming, serve
 from nero import webui
 from nero.voice.voice_loop import VoiceLoop
@@ -72,6 +75,10 @@ routine_app = typer.Typer(invoke_without_command=True, help="Manage scheduled ro
 app.add_typer(routine_app, name="routine")
 telegram_app = typer.Typer(invoke_without_command=True, help="Talk to Nero Agent from Telegram on your phone.")
 app.add_typer(telegram_app, name="telegram")
+discord_app = typer.Typer(invoke_without_command=True, help="Talk to Nero Agent from Discord.")
+app.add_typer(discord_app, name="discord")
+slack_app = typer.Typer(invoke_without_command=True, help="Talk to Nero Agent from Slack.")
+app.add_typer(slack_app, name="slack")
 approvals_app = typer.Typer(
     invoke_without_command=True, help="Review actions routines queued for approval."
 )
@@ -110,8 +117,9 @@ def main(
     """Nero Agent — your personal AI assistant.
 
     Run with no arguments for the universal session: the terminal chat, plus
-    the Telegram bridge if you have paired a phone. `nero chat` is the terminal
-    on its own, `nero talk` is voice, `nero telegram` is the bridge on its own.
+    every chat bridge you have paired. `nero chat` is the terminal on its own,
+    `nero talk` is voice, and `nero telegram` / `nero discord` / `nero slack`
+    each run one bridge on its own.
     """
     if debug:
         _enable_debug_logging()
@@ -728,6 +736,370 @@ def _connect_telegram(manager: ConfigManager) -> bool:
     return True
 
 
+# --- Discord and Slack ------------------------------------------------------
+#
+# Two channels, one implementation. Their transports differ (a Gateway socket
+# and a Socket Mode socket) but every command around them is the same shape:
+# store credentials, run the bridge, list who is waiting, approve one, install
+# it as a login agent. `_Channel` holds the four things that actually differ,
+# so a fix to the pairing flow lands on both rather than on whichever was
+# edited last.
+#
+# Telegram is deliberately NOT folded in here. Its ids are integers, its
+# pairing table already exists on disk with an integer key, and its setup can
+# poll for a pairing code without holding a socket open. Reworking a bridge
+# people already run, to save a file that is mostly per-channel prose anyway,
+# is the kind of trade this codebase does not make.
+
+
+@dataclass(frozen=True)
+class _Channel:
+    """What one WebSocket-based chat bridge needs in order to be driven."""
+
+    name: str            # "discord" — the CLI verb, config section and db name
+    label: str           # "Discord" — how it is written to a person
+    setup_help: str      # what to go and create before running setup
+    connect: "Callable[[ConfigManager], object | None]"
+    serve: "Callable[..., None]"
+    error: type[Exception]
+
+
+def _discord_bot(manager: ConfigManager):
+    from nero.discord import DiscordBot
+
+    token = manager.get_discord_token()
+    return DiscordBot(token) if token else None
+
+
+def _slack_bot(manager: ConfigManager):
+    from nero.slack import SlackBot
+
+    tokens = manager.get_slack_tokens()
+    return SlackBot(*tokens) if tokens else None
+
+
+def _discord_channel() -> _Channel:
+    from nero import discord as discord_bridge
+
+    return _Channel(
+        name="discord",
+        label="Discord",
+        setup_help=(
+            "Create an app first at "
+            "[bold]https://discord.com/developers/applications[/bold]: New "
+            "Application, then Bot, then Reset Token and copy it.\n"
+            "[dim]Invite it to a server, or just open a DM with it — Nero "
+            "answers direct messages.[/dim]"
+        ),
+        connect=_discord_bot,
+        serve=discord_bridge.serve,
+        error=discord_bridge.DiscordError,
+    )
+
+
+def _slack_channel() -> _Channel:
+    from nero import slack as slack_bridge
+
+    return _Channel(
+        name="slack",
+        label="Slack",
+        setup_help=(
+            "Create an app first at [bold]https://api.slack.com/apps[/bold]. "
+            "Enable [bold]Socket Mode[/bold] (which mints an app token, "
+            "xapp-…), add the [bold]chat:write[/bold] and "
+            "[bold]im:history[/bold] scopes plus the [bold]message.im[/bold] "
+            "event, then install it to your workspace for a bot token "
+            "(xoxb-…)."
+        ),
+        connect=_slack_bot,
+        serve=slack_bridge.serve,
+        error=slack_bridge.SlackError,
+    )
+
+
+def _allowed_peers(manager: ConfigManager, channel: str) -> set[str]:
+    """The paired channels, re-read from disk. Never raises: a bridge is a
+    long-running server, and a config the user is mid-edit must not stop it."""
+    try:
+        section = getattr(manager.load(), channel)
+        return {str(peer) for peer in section.allowed_channel_ids}
+    except (ConfigError, OSError, AttributeError) as exc:
+        logger.debug("could not re-read the %s allowlist: %s", channel, exc)
+        return set()
+
+
+def _run_channel(channel: _Channel) -> None:
+    """Run one bridge in the foreground, sharing a ChatLoop with nothing else."""
+    manager = ConfigManager()
+    config = _load_or_exit(manager)
+    bot = channel.connect(manager)
+    if bot is None:
+        console.print(
+            f"[yellow]{channel.label} is not set up.[/yellow] Run "
+            f"[bold]nero {channel.name} setup[/bold] first."
+        )
+        raise typer.Exit(1)
+
+    api_key = _provider_preflight(manager, config)
+    mcp_skills, mcp_connections = _load_mcp(config)
+    registry = _build_registry(manager, config, extra_skills=mcp_skills)
+    loop, mcp_connections = _build_chat_loop(manager, config, api_key, registry, mcp_connections)
+
+    try:
+        name = bot.username()
+    except ChannelError as exc:
+        console.print(f"[red]{escape(str(exc))}[/red]")
+        raise typer.Exit(1) from exc
+
+    allowed = _allowed_peers(manager, channel.name)
+    console.print(
+        f"[bold]{config.assistant.name}[/bold] is on {channel.label} as "
+        f"[bold]{name}[/bold], answering {len(allowed)} paired "
+        f"channel{'s' if len(allowed) != 1 else ''}. Press Ctrl+C to stop."
+    )
+    if not allowed:
+        console.print(
+            f"[yellow]Nothing is paired yet.[/yellow] Message the bot on "
+            f"{channel.label}, then run [bold]nero {channel.name} approve "
+            "<code>[/bold] with the code it sends back."
+        )
+    console.print(
+        "[dim]Destructive skills stay refused here — there is no safe way to "
+        "approve them from a chat app.[/dim]\n"
+    )
+    try:
+        channel.serve(
+            bot,
+            allowed,
+            loop.ask,
+            peers=PeerStore(channel.name),
+            refresh=lambda: _allowed_peers(manager, channel.name),
+            on_event=lambda m: console.print(f"[dim]{escape(m)}[/dim]"),
+        )
+    except KeyboardInterrupt:
+        console.print(f"\n[dim]{channel.label} bridge stopped.[/dim]")
+    except ChannelError as exc:
+        console.print(f"[red]{escape(str(exc))}[/red]")
+        raise typer.Exit(1) from exc
+    finally:
+        bot.close()
+        for connection in mcp_connections:
+            connection.close()
+
+
+def _approve_peer(channel: _Channel, code: str) -> None:
+    manager = ConfigManager()
+    config = _load_or_exit(manager)
+    peer_id = PeerStore(channel.name).approve(code)
+    if peer_id is None:
+        console.print(
+            "[red]No pending request matches that code.[/red] Codes expire "
+            f"after 10 minutes — message the bot on {channel.label} again for "
+            "a fresh one."
+        )
+        raise typer.Exit(1)
+    section = getattr(config, channel.name)
+    allowed = sorted({str(p) for p in section.allowed_channel_ids} | {peer_id})
+    manager.set_value(f"{channel.name}.allowed_channel_ids", ",".join(allowed))
+    manager.set_value(f"{channel.name}.enabled", "true")
+    console.print(
+        f"[green]Paired channel {peer_id}.[/green] A running "
+        f"[bold]nero {channel.name}[/bold] picks it up on the next message."
+    )
+
+
+def _pending_peers(channel: _Channel) -> None:
+    waiting = PeerStore(channel.name).pending()
+    if not waiting:
+        console.print(f"[dim]No {channel.label} channels are waiting to pair.[/dim]")
+        return
+    table = Table(title=f"pending {channel.name} pairings", show_header=True)
+    table.add_column("Channel ID")
+    table.add_column("Asked")
+    for request in waiting:
+        table.add_row(request.peer_id, request.age())
+    console.print(table)
+    console.print(
+        f"[dim]Approve with the code the bot sent to that channel: "
+        f"nero {channel.name} approve <code>[/dim]"
+    )
+
+
+def _install_channel(channel: _Channel) -> None:
+    manager = ConfigManager()
+    config = _load_or_exit(manager)
+    if channel.connect(manager) is None:
+        console.print(
+            f"[yellow]{channel.label} is not set up.[/yellow] Run "
+            f"[bold]nero {channel.name} setup[/bold] first."
+        )
+        raise typer.Exit(1)
+    if not getattr(config, channel.name).allowed_channel_ids:
+        console.print(
+            "[yellow]Nothing is paired yet.[/yellow] Pair a channel first, or "
+            "the service will start with nobody to answer."
+        )
+        raise typer.Exit(1)
+    try:
+        message = routines.install_bridge(
+            routines.resolve_executable(), routines.default_agents_dir(), channel.name
+        )
+    except routines.RoutineError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(message)
+    console.print(
+        "[dim]It is running now and will start again at login. Stop it with "
+        f"[bold]nero {channel.name} uninstall[/bold].[/dim]"
+    )
+
+
+def _setup_channel(channel: _Channel, prompts: list[tuple[str, str]], store) -> bool:
+    """Store credentials, prove they work, and explain how to pair.
+
+    Pairing is deliberately a second step here, unlike Telegram's setup, which
+    can poll for the first message that arrives. Discord and Slack only deliver
+    over a socket, and holding one open inside an interactive prompt buys a few
+    saved keystrokes in exchange for a setup that hangs when anything is
+    misconfigured.
+    """
+    console.print(channel.setup_help + "\n")
+    values = []
+    for prompt, existing in prompts:
+        if existing:
+            console.print(f"[dim]A {prompt.lower()} is already stored — Enter keeps it.[/dim]")
+        entered = Prompt.ask(prompt, password=True, default="", console=console).strip()
+        if not entered:
+            if not existing:
+                console.print("[yellow]Nothing entered — setup cancelled.[/yellow]")
+                return False
+            entered = existing
+        values.append(entered)
+
+    store(*values)
+    bot = channel.connect(ConfigManager())
+    if bot is None:
+        # Only reachable if the keyring accepted the write and then could not
+        # read it back — rare, but silence here would look like success.
+        console.print(
+            f"[red]Stored the credentials, but could not read them back.[/red] "
+            f"Check your system keyring, then re-run [bold]nero {channel.name} setup[/bold]."
+        )
+        return False
+    try:
+        name = bot.username()
+    except ChannelError as exc:
+        console.print(f"[red]{escape(str(exc))}[/red]")
+        return False
+    finally:
+        bot.close()
+
+    console.print(f"[green]Connected as {name}.[/green]")
+    console.print(
+        f"\nNow start it with [bold]nero {channel.name}[/bold] and send it a "
+        f"message on {channel.label}. It replies with a pairing code — approve "
+        f"that with [bold]nero {channel.name} approve <code>[/bold]."
+    )
+    return True
+
+
+@discord_app.callback()
+def discord_main(ctx: typer.Context) -> None:
+    """Talk to Nero Agent from Discord."""
+    if ctx.invoked_subcommand is None:
+        _run_channel(_discord_channel())
+
+
+@discord_app.command("setup")
+def discord_setup() -> None:
+    """Store a Discord bot token and explain how to pair a channel."""
+    manager = ConfigManager()
+    if not manager.exists():
+        _first_time_setup(manager)
+    ok = _setup_channel(
+        _discord_channel(),
+        [("Bot token", manager.get_discord_token() or "")],
+        manager.set_discord_token,
+    )
+    if not ok:
+        raise typer.Exit(1)
+
+
+@discord_app.command("approve")
+def discord_approve(
+    code: str = typer.Argument(..., help="The six-digit code the bot sent you in Discord."),
+) -> None:
+    """Pair the channel that was given this code."""
+    _approve_peer(_discord_channel(), code)
+
+
+@discord_app.command("pending")
+def discord_pending() -> None:
+    """Channels waiting to be paired. Codes are shown in Discord, never here."""
+    _pending_peers(_discord_channel())
+
+
+@discord_app.command("install")
+def discord_install() -> None:
+    """Keep the Discord bridge running: at login, and again if it ever stops."""
+    _install_channel(_discord_channel())
+
+
+@discord_app.command("uninstall")
+def discord_uninstall() -> None:
+    """Stop the background Discord bridge and remove its launchd agent."""
+    console.print(routines.uninstall_bridge(routines.default_agents_dir(), "discord"))
+
+
+@slack_app.callback()
+def slack_main(ctx: typer.Context) -> None:
+    """Talk to Nero Agent from Slack."""
+    if ctx.invoked_subcommand is None:
+        _run_channel(_slack_channel())
+
+
+@slack_app.command("setup")
+def slack_setup() -> None:
+    """Store Slack's app and bot tokens, and explain how to pair a channel."""
+    manager = ConfigManager()
+    if not manager.exists():
+        _first_time_setup(manager)
+    stored = manager.get_slack_tokens() or ("", "")
+    ok = _setup_channel(
+        _slack_channel(),
+        [("App token (xapp-…)", stored[0]), ("Bot token (xoxb-…)", stored[1])],
+        manager.set_slack_tokens,
+    )
+    if not ok:
+        raise typer.Exit(1)
+
+
+@slack_app.command("approve")
+def slack_approve(
+    code: str = typer.Argument(..., help="The six-digit code the bot sent you in Slack."),
+) -> None:
+    """Pair the channel that was given this code."""
+    _approve_peer(_slack_channel(), code)
+
+
+@slack_app.command("pending")
+def slack_pending() -> None:
+    """Channels waiting to be paired. Codes are shown in Slack, never here."""
+    _pending_peers(_slack_channel())
+
+
+@slack_app.command("install")
+def slack_install() -> None:
+    """Keep the Slack bridge running: at login, and again if it ever stops."""
+    _install_channel(_slack_channel())
+
+
+@slack_app.command("uninstall")
+def slack_uninstall() -> None:
+    """Stop the background Slack bridge and remove its launchd agent."""
+    console.print(routines.uninstall_bridge(routines.default_agents_dir(), "slack"))
+
+
 def _allowed_chats(manager: ConfigManager) -> set[int]:
     """The paired chats, re-read from disk. Never raises: the bridge is a
     long-running server, and a config the user is mid-edit must not stop it."""
@@ -1053,7 +1425,7 @@ def _confirm_skill(name: str, tier: str, arguments: dict, security, tainted: boo
 
 @app.command()
 def chat() -> None:
-    """Chat in this terminal only — no Telegram bridge."""
+    """Chat in this terminal only — no Telegram, Discord or Slack bridge."""
     _run_chat(with_telegram=False)
 
 
@@ -1069,12 +1441,12 @@ def _run_chat(with_telegram: bool = False) -> None:
     registry = _build_registry(manager, config, extra_skills=mcp_skills)
 
     loop, mcp_connections = _build_chat_loop(manager, config, api_key, registry, mcp_connections)
-    bridge = _start_telegram_bridge(manager, config, loop) if with_telegram else None
+    bridges = _start_bridges(manager, config, loop) if with_telegram else []
     try:
         loop.run()
     finally:
-        if bridge is not None:
-            bridge.set()
+        for stop in bridges:
+            stop.set()
         # A session must never leave orphaned server processes behind.
         for connection in mcp_connections:
             connection.close()
@@ -1112,15 +1484,77 @@ def _start_telegram_bridge(manager: ConfigManager, config: NeroConfig, loop):
             bot.close()
 
     threading.Thread(target=run, daemon=True, name="nero-telegram").start()
-    console.print(
-        f"[dim]Also answering Telegram ({len(config.telegram.allowed_chat_ids)} paired). "
-        "Run [/dim][bold]nero chat[/bold][dim] for the terminal alone.[/dim]"
-    )
     return stop
 
 
+def _start_channel_bridge(manager: ConfigManager, config: NeroConfig, loop, channel: _Channel):
+    """Answer one WebSocket channel in the background of a terminal session,
+    or None when it isn't set up.
+
+    Same contract as the Telegram bridge: silent unless credentials and a
+    paired channel both exist, and it shares `loop`, so a question asked from
+    Discord and one typed here are the same conversation.
+    """
+    allowed = {str(peer) for peer in getattr(config, channel.name).allowed_channel_ids}
+    if not allowed or channel.connect(manager) is None:
+        return None
+
+    stop = threading.Event()
+
+    def run() -> None:
+        # Built inside the thread: an httpx.Client belongs to whoever uses it,
+        # and this one is used only here.
+        bot = channel.connect(manager)
+        try:
+            channel.serve(
+                bot,
+                allowed,
+                loop.ask,
+                peers=PeerStore(channel.name),
+                refresh=lambda: _allowed_peers(manager, channel.name),
+                stop=stop,
+                on_event=lambda m: logger.info("%s: %s", channel.name, m),
+            )
+        except Exception:  # noqa: BLE001 — a chat app going quiet must not end the session
+            logger.debug("%s bridge stopped", channel.name, exc_info=True)
+        finally:
+            bot.close()
+
+    threading.Thread(target=run, daemon=True, name=f"nero-{channel.name}").start()
+    return stop
+
+
+def _start_bridges(manager: ConfigManager, config: NeroConfig, loop) -> list[threading.Event]:
+    """Every configured chat bridge, running behind the terminal session.
+
+    Each is independent: a broken Slack token must not cost you Telegram. The
+    single "also answering" line names them together rather than one line per
+    channel, which would push the first prompt down the screen.
+    """
+    started: list[tuple[str, threading.Event]] = []
+    telegram = _start_telegram_bridge(manager, config, loop)
+    if telegram is not None:
+        started.append((f"Telegram ({len(config.telegram.allowed_chat_ids)} paired)", telegram))
+    for build in (_discord_channel, _slack_channel):
+        channel = build()
+        try:
+            stop = _start_channel_bridge(manager, config, loop, channel)
+        except Exception:  # noqa: BLE001 — one misconfigured channel must not cost the others
+            logger.debug("could not start the %s bridge", channel.name, exc_info=True)
+            continue
+        if stop is not None:
+            paired = len(getattr(config, channel.name).allowed_channel_ids)
+            started.append((f"{channel.label} ({paired} paired)", stop))
+    if started:
+        console.print(
+            f"[dim]Also answering {', '.join(name for name, _ in started)}. "
+            "Run [/dim][bold]nero chat[/bold][dim] for the terminal alone.[/dim]"
+        )
+    return [stop for _name, stop in started]
+
+
 def _build_chat_loop(manager, config, api_key, registry, mcp_connections):
-    """The one place a ChatLoop is assembled — `nero` and `nero telegram` both
+    """The one place a ChatLoop is assembled — `nero` and every chat bridge
     call it, so a turn from a phone is the same turn as a turn in the terminal:
     same fallback chain, key rotation, memory and skills."""
     fallback_clients = _build_fallback_clients(manager, config, registry)

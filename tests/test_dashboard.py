@@ -187,7 +187,9 @@ class TestState:
 
     def test_channels_name_every_way_in_including_this_one(self, isolated):
         channels = dashboard.channels_payload()
-        assert set(channels) == {"terminal", "dashboard", "voice", "telegram"}
+        assert set(channels) == {
+            "terminal", "dashboard", "voice", "telegram", "discord", "slack",
+        }
         assert channels["dashboard"]["enabled"] is True
 
     def test_mcp_reports_env_keys_but_never_env_values(self, isolated):

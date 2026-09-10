@@ -44,6 +44,8 @@ from pathlib import Path
 import httpx
 from platformdirs import user_state_dir
 
+from nero.channels import split
+
 logger = logging.getLogger("nero.telegram")
 
 API_ROOT = "https://api.telegram.org"
@@ -302,23 +304,6 @@ def to_html(text: str) -> str:
     return _HELD.sub(lambda m: held[int(m.group(1))], text)
 
 
-def _split(text: str, limit: int = MAX_MESSAGE_CHARS) -> list[str]:
-    """`text` in Telegram-sized pieces, broken at newlines where possible."""
-    text = text.strip() or "(no reply)"
-    parts = []
-    while len(text) > limit:
-        window = text[:limit]
-        cut = window.rfind("\n")
-        if cut <= 0:
-            cut = window.rfind(" ")
-        if cut <= 0:
-            cut = limit
-        parts.append(text[:cut].rstrip())
-        text = text[cut:].lstrip()
-    parts.append(text)
-    return parts
-
-
 def _messages(text: str) -> list[str]:
     """`text` as rendered HTML pieces, each inside Telegram's ceiling.
 
@@ -328,7 +313,7 @@ def _messages(text: str) -> list[str]:
     """
     limit = MAX_MESSAGE_CHARS
     while True:
-        rendered = [to_html(part) for part in _split(text, limit)]
+        rendered = [to_html(part) for part in split(text, limit)]
         if limit <= 500 or all(len(part) <= TELEGRAM_LIMIT for part in rendered):
             return rendered
         limit //= 2

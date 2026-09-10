@@ -44,6 +44,11 @@ hiddenimports += collect_submodules("keyring")
 # backends resolve at runtime, so static analysis misses them.
 hiddenimports += collect_submodules("prompt_toolkit")
 
+# The Discord and Slack bridges use websockets' sync client, which resolves its
+# protocol extensions (permessage-deflate) lazily — so the frozen binary would
+# import fine and then fail on the first handshake.
+hiddenimports += collect_submodules("websockets")
+
 a = Analysis(
     ["../nero/__main__.py"],
     pathex=[".."],

@@ -23,8 +23,8 @@ from nero.telegram import (
     to_html,
     TELEGRAM_LIMIT,
     _messages,
-    _split,
 )
+from nero.channels import split
 
 
 @pytest.fixture
@@ -215,20 +215,23 @@ class TestIncoming:
 
 
 class TestSplit:
+    """The splitter is shared with the Discord and Slack bridges
+    (nero/channels.py); what is Telegram's is the budget it is given."""
+
     def test_short_text_is_one_message(self):
-        assert _split("hello") == ["hello"]
+        assert split("hello", MAX_MESSAGE_CHARS) == ["hello"]
 
     def test_long_text_is_split_not_truncated(self):
-        parts = _split("x" * (MAX_MESSAGE_CHARS * 2 + 50))
+        parts = split("x" * (MAX_MESSAGE_CHARS * 2 + 50), MAX_MESSAGE_CHARS)
         assert all(len(p) <= MAX_MESSAGE_CHARS for p in parts)
         assert sum(len(p) for p in parts) == MAX_MESSAGE_CHARS * 2 + 50
 
     def test_breaks_on_a_newline_when_it_can(self):
         text = "a" * (MAX_MESSAGE_CHARS - 10) + "\n" + "b" * 100
-        assert _split(text)[0].endswith("a")
+        assert split(text, MAX_MESSAGE_CHARS)[0].endswith("a")
 
     def test_empty_text_is_never_sent_as_empty(self):
-        assert _split("") == ["(no reply)"]
+        assert split("", MAX_MESSAGE_CHARS) == ["(no reply)"]
 
 
 class TestBotApi:

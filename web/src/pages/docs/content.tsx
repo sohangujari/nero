@@ -26,8 +26,8 @@ import {
 type Row = { cmd: string; does: string }
 
 const SESSIONS: Row[] = [
-  { cmd: "nero", does: "The universal session: terminal chat, plus the Telegram bridge if a phone is paired." },
-  { cmd: "nero chat", does: "The terminal on its own. No Telegram bridge." },
+  { cmd: "nero", does: "The universal session: terminal chat, plus every chat bridge you have paired." },
+  { cmd: "nero chat", does: "The terminal on its own. No chat bridges." },
   { cmd: "nero talk", does: "Voice. Recording stops on its own; talk over Nero to interrupt its reply." },
   { cmd: "nero talk --once", does: "A single voice exchange, then exit." },
   { cmd: "nero dashboard", does: "The browser UI: chat, plus every channel, model, skill and log." },
@@ -54,13 +54,15 @@ const MEMORY_CMDS: Row[] = [
   { cmd: "nero notes search <query>", does: "Search the indexed notes. -n for more results." },
 ]
 
-const TELEGRAM: Row[] = [
-  { cmd: "nero telegram", does: "Run the bridge in the foreground." },
+const CHANNELS: Row[] = [
+  { cmd: "nero telegram", does: "Run the Telegram bridge in the foreground. Same for discord and slack." },
   { cmd: "nero telegram setup", does: "Store a bot token and pair the chat allowed to use it." },
-  { cmd: "nero telegram install", does: "Keep the bridge running: at login, and again if it ever stops." },
-  { cmd: "nero telegram uninstall", does: "Stop the background bridge and remove its launchd agent." },
-  { cmd: "nero telegram pending", does: "Chats waiting to be paired. Codes are shown in Telegram, never here." },
-  { cmd: "nero telegram approve <code>", does: "Pair the chat that was given this code." },
+  { cmd: "nero discord setup", does: "Store a Discord bot token." },
+  { cmd: "nero slack setup", does: "Store Slack's app token and bot token." },
+  { cmd: "nero <channel> pending", does: "Who is waiting to be paired. Codes are shown in the chat app, never here." },
+  { cmd: "nero <channel> approve <code>", does: "Pair whoever was given this code." },
+  { cmd: "nero <channel> install", does: "Keep that bridge running: at login, and again if it ever stops." },
+  { cmd: "nero <channel> uninstall", does: "Stop the background bridge and remove its launchd agent." },
 ]
 
 const AUTOMATION: Row[] = [
@@ -117,6 +119,9 @@ const SETTINGS: Row[] = [
   { cmd: "voice.tts.voice_id", does: "Which synthesized voice speaks." },
   { cmd: "security.command_denylist", does: "Substrings run_shell will never execute." },
   { cmd: "security.max_cost_usd_per_session", does: "Hard ceiling on spend. 0 means no ceiling." },
+  { cmd: "telegram.allowed_chat_ids", does: "Paired Telegram chats. Empty answers nobody." },
+  { cmd: "discord.allowed_channel_ids", does: "Paired Discord channels. Empty answers nobody." },
+  { cmd: "slack.allowed_channel_ids", does: "Paired Slack channels. Empty answers nobody." },
 ]
 
 /* ---------------------------------------------------------- primitives --- */
@@ -257,15 +262,15 @@ export const SECTIONS: Section[] = [
 
         <H3 id="one-assistant">One assistant, four ways</H3>
         <p>
-          Nero is reachable from the terminal, your voice, Telegram, and a browser dashboard. Every
-          route runs the same turn, so a question you ask on your phone sees the same memory, the
+          Nero is reachable from the terminal, your voice, a browser dashboard, and Telegram, Discord
+          or Slack. Every route runs the same turn, so a question you ask on your phone sees the same memory, the
           same skills, and the same model as one you type at the command line.
         </p>
         <Cards
           items={[
             { title: "Terminal", body: "Streaming conversation where you already work." },
             { title: "Voice", body: "Speak, and talk over the reply to interrupt it." },
-            { title: "Telegram", body: "The same assistant, from your phone." },
+            { title: "Chat apps", body: "Telegram, Discord and Slack, from anywhere." },
           ]}
         />
 
@@ -376,7 +381,7 @@ nero config set llm.model qwen3`}</Cmd>
     headings: [
       { id: "sessions", label: "Sessions" },
       { id: "voice", label: "Voice" },
-      { id: "phone", label: "Your phone" },
+      { id: "phone", label: "Telegram, Discord and Slack" },
     ],
     body: (
       <>
@@ -394,13 +399,31 @@ nero config set llm.model qwen3`}</Cmd>
           over a reply to interrupt it. A waveform shows the level it is hearing.
         </p>
 
-        <H3 id="phone">Your phone</H3>
+        <H3 id="phone">Telegram, Discord and Slack</H3>
         <p>
-          Create a bot with Telegram's BotFather, then hand Nero the token. Only chats you pair can
-          talk to it.
+          All three work the same way, and all three connect outward. Nothing listens for inbound
+          connections and there is no endpoint to host.
         </p>
-        <Cmd>{`nero telegram setup
-nero telegram install`}</Cmd>
+        <Cards
+          items={[
+            { title: "Telegram", body: "Create a bot with BotFather and copy the token." },
+            { title: "Discord", body: "Create an app in the developer portal. Nero answers DMs." },
+            { title: "Slack", body: "Enable Socket Mode. Slack gives you two tokens, and both are needed." },
+          ]}
+        />
+        <Cmd>{`nero discord setup
+nero discord            # message the bot, it replies with a code
+nero discord approve 123456
+nero discord install    # keep it running at login`}</Cmd>
+        <Callout tone="note">
+          Only channels you pair can talk to Nero, and pairing takes both devices: the code is shown
+          only in the chat app, and approving it happens only at this terminal. An empty allowlist
+          answers nobody rather than whoever finds the bot.
+        </Callout>
+        <p>
+          Destructive skills stay refused on every one of them. There is no safe way to approve{" "}
+          <K>rm -rf</K> from a phone keyboard.
+        </p>
       </>
     ),
   },
@@ -412,7 +435,7 @@ nero telegram install`}</Cmd>
     headings: [
       { id: "cmd-config", label: "Configuration" },
       { id: "cmd-memory", label: "Memory and history" },
-      { id: "cmd-telegram", label: "Telegram" },
+      { id: "cmd-telegram", label: "Chat apps" },
       { id: "cmd-automation", label: "Routines and MCP" },
     ],
     body: (
@@ -428,8 +451,8 @@ nero telegram install`}</Cmd>
         <H3 id="cmd-memory">Memory and history</H3>
         <Commands rows={MEMORY_CMDS} />
 
-        <H3 id="cmd-telegram">Telegram</H3>
-        <Commands rows={TELEGRAM} />
+        <H3 id="cmd-telegram">Chat apps</H3>
+        <Commands rows={CHANNELS} />
 
         <H3 id="cmd-automation">Routines, approvals and MCP</H3>
         <Commands rows={AUTOMATION} />

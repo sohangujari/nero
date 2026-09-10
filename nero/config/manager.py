@@ -172,6 +172,35 @@ class ConfigManager:
 
         keyring.set_password(KEYRING_SERVICE, KEYRING_ENTRY, value)
 
+    def get_discord_token(self) -> str | None:
+        from nero.discord import KEYRING_ENTRY
+
+        return self._read_key(KEYRING_ENTRY)
+
+    def set_discord_token(self, value: str) -> None:
+        from nero.discord import KEYRING_ENTRY
+
+        keyring.set_password(KEYRING_SERVICE, KEYRING_ENTRY, value)
+
+    def get_slack_tokens(self) -> tuple[str, str] | None:
+        """(app_token, bot_token), or None unless both are stored.
+
+        Both or neither: Socket Mode needs the app token to open the socket and
+        the bot token to answer on it, and half a pair only fails later, at the
+        first message, where the cause is much harder to see.
+        """
+        from nero.slack import KEYRING_APP_TOKEN, KEYRING_BOT_TOKEN
+
+        app = self._read_key(KEYRING_APP_TOKEN)
+        bot = self._read_key(KEYRING_BOT_TOKEN)
+        return (app, bot) if app and bot else None
+
+    def set_slack_tokens(self, app_token: str, bot_token: str) -> None:
+        from nero.slack import KEYRING_APP_TOKEN, KEYRING_BOT_TOKEN
+
+        keyring.set_password(KEYRING_SERVICE, KEYRING_APP_TOKEN, app_token)
+        keyring.set_password(KEYRING_SERVICE, KEYRING_BOT_TOKEN, bot_token)
+
     def get_spotify_credentials(self) -> tuple[str, str] | None:
         """(client_id, client_secret), or None if either is missing.
 

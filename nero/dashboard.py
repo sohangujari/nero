@@ -35,7 +35,10 @@ def load_config() -> NeroConfig:
 # `mcp` is the section that is not: MCPServerConfig.env holds literal
 # environment values, which are commonly API keys. It has its own page, which
 # reports env by key name only. `routines` has its own page too.
-CONFIG_SECTIONS = ("assistant", "mode", "llm", "skills", "memory", "security", "telegram", "voice")
+CONFIG_SECTIONS = (
+    "assistant", "mode", "llm", "skills", "memory", "security",
+    "telegram", "discord", "slack", "voice",
+)
 
 
 def config_payload(config: NeroConfig | None = None) -> dict:
@@ -91,12 +94,26 @@ def channels_payload(config: NeroConfig | None = None) -> dict:
     page should not have to wonder which door they came through.
     """
     config = config or load_config()
-    try:
-        from nero.routines import bridge_plist_path, default_agents_dir
 
-        bridge = bridge_plist_path(default_agents_dir()).exists()
-    except Exception:  # noqa: BLE001 — a missing launchd dir is not an error here
-        bridge = False
+    def installed(channel: str) -> bool:
+        try:
+            from nero.routines import bridge_plist_path, default_agents_dir
+
+            return bridge_plist_path(default_agents_dir(), channel).exists()
+        except Exception:  # noqa: BLE001 — a missing launchd dir is not an error here
+            return False
+
+    def chat_app(channel: str, peers: list, noun: str) -> dict:
+        bridge = installed(channel)
+        return {
+            "enabled": getattr(config, channel).enabled,
+            "detail": f"{len(peers)} paired {noun}(s)"
+            + (", runs at login" if bridge else ""),
+            "paired": len(peers),
+            "chat_ids": [str(peer) for peer in peers],
+            "bridge_installed": bridge,
+        }
+
     return {
         "terminal": {"enabled": True, "detail": "nero chat / nero talk"},
         "dashboard": {"enabled": True, "detail": "this page, on 127.0.0.1"},
@@ -105,14 +122,9 @@ def channels_payload(config: NeroConfig | None = None) -> dict:
             "detail": f"{config.voice.stt.engine} in, {config.voice.tts.engine} out"
             f" ({config.voice.tts.voice_id})",
         },
-        "telegram": {
-            "enabled": config.telegram.enabled,
-            "detail": f"{len(config.telegram.allowed_chat_ids)} paired chat(s)"
-            + (", runs at login" if bridge else ""),
-            "paired": len(config.telegram.allowed_chat_ids),
-            "chat_ids": list(config.telegram.allowed_chat_ids),
-            "bridge_installed": bridge,
-        },
+        "telegram": chat_app("telegram", list(config.telegram.allowed_chat_ids), "chat"),
+        "discord": chat_app("discord", list(config.discord.allowed_channel_ids), "channel"),
+        "slack": chat_app("slack", list(config.slack.allowed_channel_ids), "channel"),
     }
 
 
