@@ -227,6 +227,20 @@ def split(text: str, limit: int) -> list[str]:
 # different enough target that sharing this would mean a function with two
 # unrelated halves.
 
+# A model writing `### **Title**` means one heading, not a heading that is also
+# bold. Left alone, the heading rule wraps the line and the bold rule wraps the
+# text inside it, giving `<b><b>Title</b></b>` on Telegram and `***Title***` on
+# Slack — which renders as literal asterisks rather than bold.
+_EMPHASIS = re.compile(r"^(\*\*|__|\*|_)(.*)\1$")
+
+
+def strip_emphasis(text: str) -> str:
+    """`text` with one layer of surrounding markdown emphasis removed."""
+    text = text.strip()
+    match = _EMPHASIS.match(text)
+    return match.group(2).strip() if match else text
+
+
 _FENCE = re.compile(r"```[\w+-]*\n?([\s\S]*?)```")
 _SPAN = re.compile(r"`([^`\n]+)`")
 _LINK = re.compile(r"!?\[([^\]]*)\]\(\s*([^)\s]+)[^)]*\)")
@@ -274,7 +288,9 @@ def starred_markdown(text: str, escape: "Callable[[str], str]") -> str:
     for pattern in _BOLD:
         # The last group is the content either way: the heading pattern has one
         # group, the bold pattern's second group is the text inside the markers.
-        text = pattern.sub(lambda m: hold(f"*{m.group(m.re.groups)}*"), text)
+        text = pattern.sub(
+            lambda m: hold(f"*{strip_emphasis(m.group(m.re.groups))}*"), text
+        )
     for pattern, replacement in _INLINE:
         text = pattern.sub(replacement, text)
     return _HELD.sub(lambda m: held[int(m.group(1))], text)

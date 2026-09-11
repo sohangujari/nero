@@ -52,7 +52,20 @@ class LLMConfig(BaseModel):
     # nero/llm/routing.py for what each dimension actually measures.
     route_by: Literal["off", "cost", "latency", "quality"] = "off"
     quality_rank: list[str] = []  # model ids, best first; unranked sorts last
-    health_check: bool = True  # skip a chain entry after 2 consecutive failures this session
+    health_check: bool = True
+    # Ollama only. Newer local models "think" before answering, and by default
+    # ollama lets them: measured on qwen3.5:2b, "hi" took 17.29 s with thinking
+    # and 0.62 s without, and "open calculator" 10.47 s against 2.02 s. The
+    # reasoning is thrown away either way — Nero never shows it — so the cost
+    # buys a little tool-call accuracy and nothing else. Measured on the same
+    # model: 8/8 skills reached with thinking, 7/8 without. Off by default,
+    # because an assistant you talk to is judged on the 28x, not the 1/8.
+    think: bool = False
+    # Ollama unloads an idle model after five minutes, and loading it back costs
+    # 4.75 s on the next message (measured, 2.4 GB model). Fifteen minutes
+    # covers a conversation with pauses for reading; the price is that the model
+    # keeps its RAM for that long, which matters on a small machine.
+    keep_alive: str = "15m"  # skip a chain entry after 2 consecutive failures this session
     coding_model: str | None = None  # "provider/model" resolved for /code
 
     @model_validator(mode="after")

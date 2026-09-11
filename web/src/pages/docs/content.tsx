@@ -132,6 +132,8 @@ const SETTINGS: Row[] = [
   { cmd: "voice.tts.voice_id", does: "Which synthesized voice speaks." },
   { cmd: "security.command_denylist", does: "Substrings run_shell will never execute." },
   { cmd: "security.max_cost_usd_per_session", does: "Hard ceiling on spend. 0 means no ceiling." },
+  { cmd: "llm.think", does: "Let a local model reason before replying. Off: it is ~10x slower." },
+  { cmd: "llm.keep_alive", does: "How long ollama holds the model in RAM. Shorter means reload stalls." },
   { cmd: "memory.learning", does: "Carry a matching learned procedure on the turn." },
   { cmd: "memory.learn_after", does: "Times work must recur before it is written down." },
   { cmd: "telegram.allowed_chat_ids", does: "Paired Telegram chats. Empty answers nobody." },

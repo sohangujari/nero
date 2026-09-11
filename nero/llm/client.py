@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 from datetime import datetime
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
@@ -10,6 +11,7 @@ import litellm
 from nero.config.schema import LLMConfig
 from nero.llm import ollama, providers
 from nero.memory.facts import facts_prompt_block
+from nero.memory.facts import relevant as relevant_facts
 from nero.llm.ollama_adapter import (
     ToolCallOutcome,
     ToolCallRequest,
@@ -203,10 +205,17 @@ class LLMClient:
             '"you shared", "conversation history", "no facts found". Talk about '
             "what you know, never about how you know it."
         )
-        # Empty/None facts leaves the prompt byte-identical to before this
-        # feature existed — a regression lock (see TestSystemPromptFraming).
-        if facts:
-            self.system_prompt += facts_prompt_block(facts)
+        # Carried on the user's message rather than appended here, and for a
+        # measured reason. Tool schemas are rendered between the system prompt
+        # and the question — about 2,000 tokens of them — and a 2B model
+        # reading facts that far upstream stops using them: qwen3.5:2b answered
+        # "who is my brother" correctly 1 time in 3 with the facts up here, and
+        # 3 times in 3 with them next to the question. Nothing leaks into plain
+        # chat either way (0/3 on "hi", "good morning", "what is 2+2").
+        #
+        # It also takes the one part of the prefix that changes as Nero learns
+        # out of the prefix, which is the same lesson as `current_time_line`.
+        self.facts = list(facts or [])
         self._last_round: RoundResult | None = None
         # Accumulated USD cost of the turn currently in progress (reset at the
         # top of _run_turn). Local/ollama rounds never touch this — no cost.
@@ -292,7 +301,28 @@ class LLMClient:
         `current_time_line`). What makes it affordable is its granularity: it
         only changes six times an hour, so the prefix survives in between.
         """
-        return [{"role": "system", "content": self.system_message()}, *messages]
+        outgoing = [{"role": "system", "content": self.system_message()}, *messages]
+        if not self.facts:
+            return outgoing
+        # Only the facts this turn is about. Attaching all of them put a
+        # seven-line block in front of "skip this track", and the model
+        # answered the block instead of running the command.
+        asked = _last_user_text(messages)
+        block = facts_prompt_block(relevant_facts(self.facts, asked)).strip()
+        if not block:
+            return outgoing
+        # Tagged, not headed, for the reason recorded in nero/memory/recall.py:
+        # a bare list above a question reads to a small model like something the
+        # user pasted, and gets answered instead of used.
+        for index in range(len(outgoing) - 1, -1, -1):
+            message = outgoing[index]
+            if message.get("role") == "user" and isinstance(message.get("content"), str):
+                outgoing[index] = {
+                    **message,
+                    "content": f"<memory>\n{block}\n</memory>\n\n{message['content']}",
+                }
+                break
+        return outgoing
 
     async def stream_chat(self, messages: list, tools: list) -> AsyncIterator[str]:
         """One completion round: yields display-text deltas as they arrive.
@@ -381,7 +411,14 @@ class LLMClient:
         model = self.config.model.removeprefix("ollama/")
         parts: list[str] = []
         calls = []
-        async for response in ollama_chat(self.ollama_base_url, model, request_messages, tools):
+        async for response in ollama_chat(
+            self.ollama_base_url,
+            model,
+            request_messages,
+            tools,
+            think=self.config.think,
+            keep_alive=self.config.keep_alive,
+        ):
             if response.tool_calls:
                 calls.extend(response.tool_calls)
             if response.content:
@@ -426,9 +463,36 @@ class LLMClient:
         """Run one user turn to completion, mutating `messages` in place."""
         asyncio.run(self._run_turn(messages, on_text))
 
+    def _gated_tools(self, messages: list[dict], tool_definitions: list[dict]) -> list[dict]:
+        """`tool_definitions`, or none of them when this turn is plainly just talk.
+
+        Only for local models measured to call a tool on every message
+        (`ollama.misfires_tools`). They cannot decide mid-generation whether to
+        emit a tool call, but they answer "is this asking me to do something?"
+        reliably — so the decision is taken *before* the turn, in a 145-token
+        question, instead of being left to a 2,000-token prompt they will
+        mishandle.
+
+        Every other model, cloud or local, is untouched: it gates tools itself,
+        and a second round trip to ask would be pure cost.
+        """
+        if not tool_definitions or self.config.provider != "ollama":
+            return tool_definitions
+        model = self.config.model.removeprefix("ollama/")
+        if not ollama.misfires_tools(model):
+            return tool_definitions
+        asked = _last_user_text(messages)
+        if not asked:
+            return tool_definitions
+        wants = ollama.wants_action(model, asked, self.ollama_base_url)
+        if wants is False:
+            logger.debug("gate: no tools offered for %r", asked[:60])
+            return []
+        return tool_definitions
+
     async def _run_turn(self, messages: list[dict], on_text: Callable[[str], None]) -> None:
         self.last_turn_cost = 0.0
-        tool_definitions = self._tool_definitions()
+        tool_definitions = self._gated_tools(messages, self._tool_definitions())
         # Ollama rounds are fully buffered: local models mix filler text with
         # tool calls, and accompanying content must not print as an answer.
         # Cloud rounds keep live streaming (their preamble text is intentional).
@@ -574,6 +638,25 @@ class LLMClient:
 
     async def _execute_tool(self, name: str, arguments: dict | None) -> str:
         return await self.registry.execute(name, arguments, self.provider)
+
+
+_CARRIED = re.compile(r"(?s).*</(?:memory|playbook)>\s*")
+
+
+def _last_user_text(messages: list[dict]) -> str:
+    """What the user actually typed on this turn.
+
+    Recall and learned procedures ride on the front of the user message
+    (nero/memory/recall.py), and handing a classifier a transcript of earlier
+    conversation would have it classify the wrong thing entirely.
+    """
+    for message in reversed(messages):
+        if message.get("role") == "user":
+            content = message.get("content")
+            if isinstance(content, str):
+                return _CARRIED.sub("", content).strip()
+            return ""
+    return ""
 
 
 def _looks_like_json(content: str | None) -> bool:

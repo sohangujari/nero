@@ -113,6 +113,32 @@ class FactStore:
         return [Fact(key=r[0], value=r[1], source=r[2], updated_at=r[3]) for r in rows]
 
 
+def relevant(facts: list[tuple[str, str]], text: str) -> list[tuple[str, str]]:
+    """The facts `text` is plausibly asking about, or none of them.
+
+    Every fact used to go on every turn. That is fine in a system prompt and
+    wrong next to the question: measured on qwen3.5:2b, a seven-fact block in
+    front of "skip this track" got answered *as the block* — "Got it! I
+    remember some of your preferences" — and the command never ran. The same
+    commands worked with no block attached.
+
+    Matched on the key and the value together, so "who is my brother" finds
+    `brother_name` and "pause" finds nothing. This is the same keyword
+    retrieval `nero/memory/recall.py` does, for the same reason: what is
+    relevant helps, and what is merely present distracts.
+    """
+    from nero.memory.recall import query_terms
+
+    wanted = set(query_terms(text))
+    if not wanted:
+        return []
+    return [
+        (key, value)
+        for key, value in facts
+        if wanted & set(query_terms(f"{key.replace('_', ' ')} {value}"))
+    ]
+
+
 def facts_prompt_block(facts: list[tuple[str, str]]) -> str:
     """The system-prompt appendix for known facts, or "" for none.
 

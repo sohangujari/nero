@@ -645,3 +645,71 @@ class TestGoogleChatCredentials:
     def test_a_key_missing_fields_says_so(self):
         with pytest.raises(gchat_bridge.GoogleChatError, match="missing something"):
             gchat_bridge.GoogleChatBot('{"type": "service_account"}', "p", "s")
+
+
+class TestHeadingsAreNotDoubleBolded:
+    """A model writing `### **Title**` means one heading, not a heading that is
+    also bold. Unfixed it gave <b><b>Title</b></b> on Telegram and ***Title***
+    on Slack, which renders as literal asterisks rather than bold."""
+
+    @pytest.mark.parametrize(
+        "source",
+        ["### **Top Picks**", "# __Top Picks__", "## *Top Picks*", "###   **Top Picks**  "],
+    )
+    def test_telegram_emits_one_bold_tag(self, source):
+        from nero.telegram import to_html
+
+        assert to_html(source) == "<b>Top Picks</b>"
+
+    @pytest.mark.parametrize("source", ["### **Top Picks**", "# __Top Picks__"])
+    def test_slack_emits_one_asterisk_pair(self, source):
+        assert slack_bridge.to_mrkdwn(source) == "*Top Picks*"
+
+    @pytest.mark.parametrize("source", ["### **Top Picks**", "# __Top Picks__"])
+    def test_google_chat_emits_one_asterisk_pair(self, source):
+        assert gchat_bridge.to_google_chat(source) == "*Top Picks*"
+
+    def test_a_plain_heading_is_unchanged(self):
+        from nero.telegram import to_html
+
+        assert to_html("## Plain Heading") == "<b>Plain Heading</b>"
+        assert slack_bridge.to_mrkdwn("## Plain Heading") == "*Plain Heading*"
+
+    def test_ordinary_bold_still_works(self):
+        from nero.telegram import to_html
+
+        assert to_html("**just bold**") == "<b>just bold</b>"
+        assert slack_bridge.to_mrkdwn("**just bold**") == "*just bold*"
+
+    def test_emphasis_inside_a_heading_is_not_stripped_from_the_middle(self):
+        """Only a layer wrapping the whole heading comes off."""
+        from nero.telegram import to_html
+
+        assert to_html("### Buy **now** today") == "<b>Buy <b>now</b> today</b>"
+
+
+class TestStripEmphasis:
+    @pytest.mark.parametrize(
+        ("source", "expected"),
+        [
+            ("**bold**", "bold"),
+            ("__bold__", "bold"),
+            ("*italic*", "italic"),
+            ("_italic_", "italic"),
+            ("  **padded**  ", "padded"),
+            ("plain", "plain"),
+            ("**mismatched__", "**mismatched__"),
+            ("**only opening", "**only opening"),
+            ("", ""),
+        ],
+    )
+    def test_one_layer_comes_off(self, source, expected):
+        from nero.channels import strip_emphasis
+
+        assert strip_emphasis(source) == expected
+
+    def test_only_one_layer_comes_off(self):
+        """Two layers is a model being odd, not a reason to unwrap forever."""
+        from nero.channels import strip_emphasis
+
+        assert strip_emphasis("****double****") == "**double**"

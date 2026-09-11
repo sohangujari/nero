@@ -27,7 +27,7 @@ from rich.progress import (
 from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
-from nero import __version__, routines, ui
+from nero import __version__, banner, routines, ui
 from nero._runtime import check_python_version
 from nero.config.manager import ConfigError, ConfigManager
 from nero.config.schema import NeroConfig, STTConfig, TTSConfig
@@ -140,7 +140,7 @@ def main(
         # Frozen binaries bundle 3.12, so only warn on the pip/pipx path.
         Console(stderr=True).print(f"[yellow dim]{warning}[/yellow dim]")
     if ctx.invoked_subcommand is None:
-        _run_chat(with_telegram=True)
+        _run_chat(universal=True)
 
 
 def _load_or_exit(manager: ConfigManager) -> NeroConfig:
@@ -1809,10 +1809,10 @@ def _confirm_skill(name: str, tier: str, arguments: dict, security, tainted: boo
 @app.command()
 def chat() -> None:
     """Chat in this terminal only — no Telegram, Discord or Slack bridge."""
-    _run_chat(with_telegram=False)
+    _run_chat(universal=False)
 
 
-def _run_chat(with_telegram: bool = False) -> None:
+def _run_chat(universal: bool = False) -> None:
     manager = ConfigManager()
     if not manager.exists():
         _first_time_setup(manager)
@@ -1824,11 +1824,26 @@ def _run_chat(with_telegram: bool = False) -> None:
     registry = _build_registry(manager, config, extra_skills=mcp_skills)
 
     loop, mcp_connections = _build_chat_loop(manager, config, api_key, registry, mcp_connections)
-    bridges = _start_bridges(manager, config, loop) if with_telegram else []
+    # `nero` is the universal session: the terminal, every paired chat app, and
+    # the browser, all sharing one ChatLoop. `nero chat` is this without any of
+    # the rest, which is what `universal=False` means.
+    started = _start_bridges(manager, config, loop) if universal else []
+    dashboard_url = _start_dashboard(config, loop, registry) if universal else None
+    if universal:
+        banner.render(
+            console,
+            assistant_name=config.assistant.name,
+            model=config.llm.model,
+            provider=config.llm.provider,
+            mode=config.mode,
+            skills=len(registry.tool_definitions()),
+            channels=[name for name, _stop in started],
+            dashboard_url=dashboard_url,
+        )
     try:
         loop.run()
     finally:
-        for stop in bridges:
+        for _name, stop in started:
             stop.set()
         # A session must never leave orphaned server processes behind.
         for connection in mcp_connections:
@@ -1907,6 +1922,40 @@ def _start_channel_bridge(manager: ConfigManager, config: NeroConfig, loop, chan
     return stop
 
 
+def _start_dashboard(config: NeroConfig, loop, registry) -> str | None:
+    """Serve the dashboard behind the terminal session, or None.
+
+    Same loop as the terminal and every chat bridge, so the browser is another
+    way into one conversation rather than a second one. Never fatal: a port
+    already in use costs you the dashboard, not the session you actually
+    started.
+    """
+    url: list[str] = []
+    ready = threading.Event()
+
+    def run() -> None:
+        try:
+            webui.serve(
+                loop.ask,
+                _build_history(config),
+                config.assistant.name,
+                on_ready=lambda address: (url.append(address), ready.set()),
+                registry=registry,
+            )
+        except OSError:
+            logger.debug("dashboard could not start", exc_info=True)
+            ready.set()
+        except Exception:  # noqa: BLE001 — a dead dashboard must not end the session
+            logger.debug("dashboard stopped", exc_info=True)
+            ready.set()
+
+    threading.Thread(target=run, daemon=True, name="nero-dashboard").start()
+    # Bounded: the banner is about to print, and it should say the real URL or
+    # nothing rather than wait on a socket that may never bind.
+    ready.wait(timeout=3.0)
+    return url[0] if url else None
+
+
 def _start_bridges(manager: ConfigManager, config: NeroConfig, loop) -> list[threading.Event]:
     """Every configured chat bridge, running behind the terminal session.
 
@@ -1928,12 +1977,7 @@ def _start_bridges(manager: ConfigManager, config: NeroConfig, loop) -> list[thr
         if stop is not None:
             paired = len(getattr(config, channel.name).allowed_channel_ids)
             started.append((f"{channel.label} ({paired} paired)", stop))
-    if started:
-        console.print(
-            f"[dim]Also answering {', '.join(name for name, _ in started)}. "
-            "Run [/dim][bold]nero chat[/bold][dim] for the terminal alone.[/dim]"
-        )
-    return [stop for _name, stop in started]
+    return started
 
 
 def _build_chat_loop(manager, config, api_key, registry, mcp_connections):
@@ -2371,13 +2415,10 @@ def _warn_if_no_tool_support(manager: ConfigManager) -> None:
         return
     if ollama.misfires_tools(config.llm.model):
         console.print(
-            f"[yellow]Heads up:[/yellow] [bold]{config.llm.model}[/bold] calls a "
-            "skill on almost every message, including plain chat — it answers "
-            '"hi" by running a tool instead of saying hello, which makes replies '
-            "both wrong and several seconds slower. Ollama reports it as "
-            "tool-capable; measurement says otherwise. [bold]phi4-mini[/bold] or "
-            "[bold]qwen3[/bold] handle skills properly, or point Nero at a cloud "
-            "provider with [bold]nero config set llm.provider[/bold]."
+            f"[dim]{config.llm.model} cannot decide on its own when to use a "
+            "skill, so Nero asks it first, once per turn, and only offers the "
+            "skills when the answer is yes. Costs about a third of a second on "
+            "an action; saves several seconds on ordinary chat.[/dim]"
         )
         return
     if ollama.supports_tools(config.llm.model) is False:

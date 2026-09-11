@@ -1,4 +1,5 @@
 import logging
+import re
 
 from nero.skills.base import Skill, validate_arguments
 
@@ -87,9 +88,17 @@ class SkillRegistry:
         ]
 
     def validate(self, name: str, arguments) -> bool:
-        """Argument-shape validation only — permission gates live in execute()."""
+        """Argument-shape validation only — permission gates live in execute().
+
+        Cleaned first, and with exactly the same pipeline `execute` uses. The
+        two must agree: if this said no to `{"mute": "true"}` while execute
+        would have accepted it, the call would be discarded as malformed before
+        ever reaching the skill that could have run it.
+        """
         skill = self._skills.get(name)
-        return skill is not None and validate_arguments(skill.meta.input_schema, arguments)
+        if skill is None or not isinstance(arguments, dict):
+            return False
+        return validate_arguments(skill.meta.input_schema, clean(skill.meta.input_schema, arguments))
 
     async def execute(self, name: str, arguments: dict | None, provider: str = "unknown") -> str:
         result = await self._dispatch(name, arguments)
@@ -111,7 +120,7 @@ class SkillRegistry:
             )
         if arguments is None:
             return "Error: tool arguments were not valid JSON."
-        arguments = _drop_placeholders(skill.meta.input_schema, arguments)
+        arguments = clean(skill.meta.input_schema, arguments)
         if skill.meta.permission_tier == "destructive":
             # Fail closed: no confirm callback (tests, voice loop, headless
             # routine runs) means the call is refused, never auto-approved.
@@ -172,6 +181,69 @@ def _drop_placeholders(input_schema: dict, arguments: dict) -> dict:
         )
     }
     return cleaned
+
+
+# What a model writes when it means True or False but has emitted JSON as text.
+_TRUE = {"true", "yes", "1", "on"}
+_FALSE = {"false", "no", "0", "off"}
+
+
+def _coerce_types(input_schema: dict, arguments: dict) -> dict:
+    """Arguments retyped to what the schema asks for, where that is unambiguous.
+
+    Small local models routinely send every argument as a string —
+    `{"mute": "true", "level": "30"}` for what the schema declares as a boolean
+    and an integer. The call is perfectly clear; only its encoding is wrong, and
+    refusing it means the user's "mute it" comes back as "I didn't quite catch
+    that". Measured on llama3.2, this alone was every one of three failed
+    `set_volume` calls.
+
+    Conservative on purpose. Only string values are touched, only where the
+    schema names a type, and only when the string maps to exactly one value —
+    anything else is left as it is, so a genuinely wrong argument still fails
+    validation rather than being coerced into something plausible.
+    """
+    properties = input_schema.get("properties") or {}
+    converted = {}
+    for key, value in arguments.items():
+        wanted = (properties.get(key) or {}).get("type")
+        converted[key] = _as_type(wanted, value) if isinstance(value, str) else value
+    return converted
+
+
+def _as_type(wanted: str | None, text: str):
+    """`text` as `wanted`, or `text` unchanged when that is not clearly possible."""
+    stripped = text.strip()
+    if wanted == "boolean":
+        if stripped.lower() in _TRUE:
+            return True
+        if stripped.lower() in _FALSE:
+            return False
+    elif wanted == "integer":
+        try:
+            return int(stripped)
+        except ValueError:
+            # "30%" and "30 percent" are the model quoting the user rather than
+            # answering the schema, and the number in them is unambiguous.
+            digits = re.match(r"[-+]?\d+", stripped)
+            if digits:
+                return int(digits.group())
+    elif wanted == "number":
+        try:
+            return float(stripped)
+        except ValueError:
+            pass
+    return text
+
+
+def clean(input_schema: dict, arguments: dict) -> dict:
+    """Arguments as the skill should receive them: placeholders dropped, then
+    strings retyped to what the schema asks for.
+
+    One function so `validate` and `execute` can never disagree about what a
+    call means.
+    """
+    return _coerce_types(input_schema, _drop_placeholders(input_schema, arguments))
 
 
 def _remember(remember_setting, key: str):

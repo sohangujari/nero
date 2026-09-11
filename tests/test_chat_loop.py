@@ -441,8 +441,8 @@ class TestOllamaPathWiring:
 
         seen = {}
 
-        async def fake_ollama_chat(base_url, model, messages, tools):
-            seen.update(base_url=base_url, model=model, tools=tools)
+        async def fake_ollama_chat(base_url, model, messages, tools, think=None, keep_alive=None):
+            seen.update(base_url=base_url, model=model, tools=tools, think=think, keep_alive=keep_alive)
             from nero.llm.ollama_adapter import OllamaChatResponse
 
             yield OllamaChatResponse(content="hello", tool_calls=None)
@@ -864,7 +864,7 @@ class TestCurrentTime:
 
         seen = {}
 
-        async def fake_ollama(base_url, model, messages, tools):
+        async def fake_ollama(base_url, model, messages, tools, think=None, keep_alive=None):
             seen["ollama"] = messages
             return
             yield  # pragma: no cover — makes this an async generator
@@ -942,17 +942,74 @@ class TestSystemPromptFraming:
 
 
 class TestFactsInPrompt:
+    """Facts reach the model on the user's message, not in the system prompt.
+
+    Tool schemas are rendered between the two — about 2,000 tokens of them —
+    and a 2B model reading facts that far upstream stops using them.
+    qwen3.5:2b answered "who is my brother" 1 time in 3 with the facts in the
+    system prompt, and 3 times in 3 with them beside the question.
+    """
+
+    def _sent(self, facts, text="what is my favourite editor"):
+        return make_client(facts=facts).outgoing([{"role": "user", "content": text}])
+
     def test_no_facts_prompt_is_byte_identical_to_baseline(self):
         # Regression lock (spec §1): empty/None facts must never change the
         # prompt a single byte, whether by omission or by explicit empty list.
         assert make_client(facts=None).system_prompt == make_client().system_prompt
         assert make_client(facts=[]).system_prompt == make_client().system_prompt
 
-    def test_facts_are_appended_to_the_prompt(self):
-        prompt = make_client(facts=[("favorite_editor", "vim")]).system_prompt
-        assert prompt.startswith(make_client().system_prompt)
-        assert "favorite_editor: vim" in prompt
-        assert "What you know about this user" in prompt
+    def test_the_system_prompt_no_longer_carries_them(self):
+        """Which is also what keeps the cacheable prefix stable as Nero learns
+        — the same lesson as the clock in `current_time_line`."""
+        client = make_client(facts=[("favorite_editor", "vim")])
+        assert "favorite_editor" not in client.system_prompt
+        assert "favorite_editor" not in client.system_message()
+
+    def test_they_ride_on_the_user_message(self):
+        sent = self._sent([("favorite_editor", "vim")])
+        assert "favorite_editor: vim" in sent[-1]["content"]
+        assert "What you know about this user" in sent[-1]["content"]
+
+    def test_they_are_tagged_so_they_read_as_memory_not_as_pasted_text(self):
+        sent = self._sent([("favorite_editor", "vim")])
+        assert sent[-1]["content"].startswith("<memory>")
+        assert sent[-1]["content"].endswith("what is my favourite editor")
+
+    def test_no_facts_leaves_the_message_untouched(self):
+        assert self._sent([])[-1]["content"] == "what is my favourite editor"
+        assert self._sent(None)[-1]["content"] == "what is my favourite editor"
+
+    def test_they_attach_to_the_latest_user_message(self):
+        client = make_client(facts=[("favorite_editor", "vim")])
+        sent = client.outgoing([
+            {"role": "user", "content": "what is my favourite editor"},
+            {"role": "assistant", "content": "vim"},
+            {"role": "user", "content": "and my favourite editor again"},
+        ])
+        assert "favorite_editor" not in sent[1]["content"]
+        assert "favorite_editor" in sent[-1]["content"]
+
+    def test_only_the_facts_the_question_is_about_are_attached(self):
+        """A block of every fact in front of "skip this track" got answered as
+        the block — "Got it! I remember some of your preferences" — and the
+        command never ran."""
+        client = make_client(facts=[("brother_name", "Somansh"), ("favorite_color", "blue")])
+        asked = client.outgoing([{"role": "user", "content": "who is my brother"}])
+        assert "Somansh" in asked[-1]["content"]
+        assert "favorite_color" not in asked[-1]["content"]
+
+    def test_a_command_carries_no_facts_at_all(self):
+        client = make_client(facts=[("brother_name", "Somansh")])
+        sent = client.outgoing([{"role": "user", "content": "skip this track"}])
+        assert sent[-1]["content"] == "skip this track"
+
+    def test_a_turn_with_no_user_message_is_left_alone(self):
+        """A tool-result round can end on a `tool` message; nothing to attach
+        to is not an error."""
+        client = make_client(facts=[("favorite_editor", "vim")])
+        sent = client.outgoing([{"role": "assistant", "content": "thinking"}])
+        assert len(sent) == 2
 
 
 from nero.llm.ollama_adapter import OllamaModelError

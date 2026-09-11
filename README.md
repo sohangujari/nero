@@ -53,6 +53,13 @@ ollama`. Choosing ollama auto-fills the model from the hardware recommendation
 and never asks for a key. For ollama, Nero Agent checks that the server is running
 (`ollama serve`) and offers to `ollama pull` the model if it isn't downloaded.
 
+Two settings matter a lot for a local model, and both default to the fast
+answer. `llm.think` is off: a thinking-capable model reasons before every reply
+unless told not to, Nero discards that reasoning, and it cost 9.87 s against
+0.74 s on "hi" (qwen3.5:2b). `llm.keep_alive` is 15 minutes: ollama unloads an
+idle model after five, and loading it back costs about 4.75 s on the next
+message.
+
 Set `mode` to `offline` and nothing leaves your machine: network skills are
 withdrawn from the model entirely rather than failing at call time.
 

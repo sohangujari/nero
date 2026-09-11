@@ -343,3 +343,41 @@ class TestNothingExecutes:
         block = playbook_block(store, "clean the build directory")
         assert isinstance(block, str)
         assert "rm -rf build" in block
+
+
+class TestRelevantFacts:
+    """Every fact used to ride on every turn. Next to the question that is a
+    distraction: qwen3.5:2b answered a seven-fact block instead of the command
+    in front of it."""
+
+    FACTS = [
+        ("brother_name", "Somansh"),
+        ("favorite_color", "blue"),
+        ("favorite_day_of_week", "Thursday"),
+    ]
+
+    def _relevant(self, text):
+        from nero.memory.facts import relevant
+
+        return dict(relevant(self.FACTS, text))
+
+    def test_a_question_finds_the_fact_it_is_about(self):
+        assert self._relevant("who is my brother") == {"brother_name": "Somansh"}
+
+    def test_a_fact_is_matched_on_its_value_too(self):
+        assert "brother_name" in self._relevant("tell me about Somansh")
+
+    def test_a_command_matches_nothing(self):
+        assert self._relevant("skip this track") == {}
+        assert self._relevant("pause the music") == {}
+
+    def test_a_greeting_matches_nothing(self):
+        assert self._relevant("hi") == {}
+
+    def test_an_underscored_key_still_matches_ordinary_words(self):
+        assert "favorite_day_of_week" in self._relevant("what is my favorite day")
+
+    def test_no_facts_at_all_is_not_an_error(self):
+        from nero.memory.facts import relevant
+
+        assert relevant([], "who is my brother") == []

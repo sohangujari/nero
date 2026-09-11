@@ -126,7 +126,7 @@ class TestMisfiringModels:
         manager = _manager(tmp_path, "ollama", "llama3.2")
         monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
         result = runner.invoke(cli.app, ["config", "set", "llm.model", "llama3.2"])
-        assert "almost every message" in result.stdout
+        assert "cannot decide on its own" in result.stdout
         # The other warning's wording would be actively misleading here: the
         # model does support tool calling, which is the whole problem.
         assert "no tool-calling support" not in result.stdout

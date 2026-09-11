@@ -52,6 +52,8 @@ async def ollama_chat(
     model: str,
     messages: list,
     tools: list,
+    think: bool = False,
+    keep_alive: str | None = None,
 ) -> AsyncIterator[OllamaChatResponse]:
     """Stream one chat completion from Ollama's native /api/chat endpoint.
 
@@ -63,8 +65,16 @@ async def ollama_chat(
         "model": model,
         "messages": messages,
         "stream": True,
+        # Sent explicitly rather than left to the model's default: a
+        # thinking-capable model thinks unless told not to, and Nero discards
+        # the reasoning, so on a chat turn it is pure latency (see
+        # LLMConfig.think for the numbers). Harmless on a model that cannot
+        # think — ollama ignores it.
+        "think": think,
         "options": {"temperature": OLLAMA_TEMPERATURE},
     }
+    if keep_alive:
+        payload["keep_alive"] = keep_alive
     if tools:
         payload["tools"] = tools
     async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=5.0)) as client:

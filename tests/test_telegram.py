@@ -7,6 +7,7 @@ locked down here is that boundary.
 
 from datetime import timedelta
 
+import io
 import time
 
 import httpx
@@ -571,19 +572,27 @@ class TestUniversalCommand:
     """`nero` runs everything; `nero chat` / `nero talk` / `nero telegram` are
     the single interfaces."""
 
-    def test_bare_nero_asks_for_the_bridge(self):
-        import inspect
+    def _universal_flag(self, monkeypatch, argv):
+        """What `nero` and `nero chat` actually ask _run_chat for.
+
+        Behavioural rather than a source-text match: the previous version of
+        this asserted on the literal call site and broke the moment the keyword
+        was renamed, which told us nothing about behaviour.
+        """
+        from typer.testing import CliRunner
 
         from nero import cli
 
-        assert "_run_chat(with_telegram=True)" in inspect.getsource(cli.main)
+        seen = {}
+        monkeypatch.setattr(cli, "_run_chat", lambda universal=False: seen.update(u=universal))
+        CliRunner().invoke(cli.app, argv)
+        return seen.get("u")
 
-    def test_nero_chat_does_not(self):
-        import inspect
+    def test_bare_nero_runs_the_universal_session(self, monkeypatch):
+        assert self._universal_flag(monkeypatch, []) is True
 
-        from nero import cli
-
-        assert "_run_chat(with_telegram=False)" in inspect.getsource(cli.chat)
+    def test_nero_chat_is_the_terminal_alone(self, monkeypatch):
+        assert self._universal_flag(monkeypatch, ["chat"]) is False
 
     def test_the_bridge_is_silent_when_telegram_is_not_set_up(self, monkeypatch, tmp_path):
         """`nero` must behave exactly as it always has for anyone who never
@@ -752,3 +761,57 @@ class TestFormatting:
             parts = _messages(markdown)
             assert all(len(part) <= TELEGRAM_LIMIT for part in parts)
             assert "<b>a</b>" in parts[0] or "<i>a</i>" in parts[0]
+
+
+class TestUniversalSessionBanner:
+    """`nero` is the one command that starts everything. The banner is how you
+    can tell what "everything" actually came up as."""
+
+    def _render(self, width=80, **over):
+        from rich.console import Console
+
+        from nero import banner
+
+        console = Console(width=width, file=io.StringIO(), force_terminal=False)
+        fields = {
+            "assistant_name": "Nero", "model": "qwen3.5:2b", "provider": "ollama",
+            "mode": "online", "skills": 12, "channels": ["Telegram (1 paired)"],
+            "dashboard_url": "http://127.0.0.1:8643/?token=abc",
+        }
+        banner.render(console, **{**fields, **over})
+        return console.file.getvalue()
+
+    def test_it_names_the_model_and_provider(self):
+        assert "qwen3.5:2b" in self._render() and "ollama" in self._render()
+
+    def test_the_terminal_is_listed_first_among_the_channels(self):
+        """Leaving it out makes the list read as "instead of here"."""
+        answering = [l for l in self._render().splitlines() if "answering" in l][0]
+        assert answering.index("terminal") < answering.index("Telegram")
+
+    def test_a_session_with_no_bridges_still_says_terminal(self):
+        assert "terminal" in self._render(channels=[])
+
+    def test_the_dashboard_url_is_shown_when_it_started(self):
+        assert "127.0.0.1:8643" in self._render()
+
+    def test_nothing_is_claimed_when_the_dashboard_did_not_start(self):
+        """A port already in use costs the dashboard, not the session — and it
+        must not leave a URL on screen that answers nothing."""
+        assert "dashboard" not in self._render(dashboard_url=None)
+
+    def test_offline_mode_is_called_out(self):
+        assert "offline" in self._render(mode="offline")
+
+    def test_a_narrow_terminal_gets_the_name_not_broken_block_letters(self):
+        narrow = self._render(width=30)
+        assert "███" not in narrow
+        assert "Nero" in narrow
+
+    def test_a_narrow_terminal_keeps_the_url_on_one_line(self):
+        """A wrapped URL cannot be clicked or copied in one go."""
+        for line in self._render(width=30).splitlines():
+            if "127.0.0.1" in line:
+                assert line.strip().endswith("token=abc")
+                return
+        raise AssertionError("the dashboard URL was not printed")
