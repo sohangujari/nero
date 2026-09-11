@@ -14,7 +14,7 @@ import { Dashboard } from "@/pages/dashboard"
 import { Docs } from "@/pages/docs"
 import { Logs } from "@/pages/logs"
 import { Sessions } from "@/pages/sessions"
-import { Channels, Mcp, Memory, Models, Routines, Skills } from "@/pages/setup"
+import { Channels, Learning, Mcp, Memory, Models, Routines, Skills } from "@/pages/setup"
 import { NeroClient, readToken, type Edit, type State } from "@/lib/api"
 
 export default function App() {
@@ -90,6 +90,7 @@ export default function App() {
           sessions: state?.counts.sessions,
           routines: state?.counts.routines,
           mcp: state?.counts.mcp,
+          learning: state?.counts.playbooks,
         }}
       />
       <SidebarInset className="h-svh min-h-0 overflow-hidden">
@@ -135,6 +136,8 @@ export default function App() {
             <Routines state={state} edit={edit} />
           ) : page === "mcp" ? (
             <Mcp state={state} edit={edit} />
+          ) : page === "learning" ? (
+            <Learning state={state} edit={edit} />
           ) : (
             <Memory state={state} edit={edit} />
           )}

@@ -345,3 +345,69 @@ class TestKeyringAcrossProviders:
     def test_unknown_provider_has_no_key(self, manager):
         assert manager.provider_needs_key("nonesuch") is False
         assert manager.get_api_key("nonesuch") is None
+
+
+class TestSetKeyWording:
+    """Replacing your only key is one step. Saying "(slot 1)" at someone doing
+    it makes a one-step job look like it has a concept in it."""
+
+    def _run(self, monkeypatch, tmp_path, stored, args):
+        from typer.testing import CliRunner
+
+        from nero import cli
+        from nero.config.manager import ConfigManager
+        from nero.config.schema import NeroConfig
+
+        manager = ConfigManager(config_dir=tmp_path)
+        manager.save(NeroConfig())
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        monkeypatch.setattr(manager, "get_api_keys", lambda _p: stored)
+        written = {}
+        monkeypatch.setattr(
+            manager, "set_api_key",
+            lambda provider, value, slot=1: written.update(
+                provider=provider, value=value, slot=slot
+            ),
+        )
+        result = CliRunner().invoke(cli.app, args, input="sk-new\n")
+        return result, written
+
+    def test_replacing_the_only_key_never_says_slot(self, monkeypatch, tmp_path):
+        result, written = self._run(
+            monkeypatch, tmp_path, ["sk-old"], ["config", "set-key", "gemini"]
+        )
+        assert "slot" not in result.stdout.lower()
+        assert "Replaced the gemini key" in result.stdout
+        assert written["slot"] == 1
+
+    def test_a_first_key_is_saved_not_replaced(self, monkeypatch, tmp_path):
+        result, _written = self._run(
+            monkeypatch, tmp_path, [], ["config", "set-key", "gemini"]
+        )
+        assert "Saved the gemini key" in result.stdout
+        assert "slot" not in result.stdout.lower()
+
+    def test_an_explicit_slot_is_still_named(self, monkeypatch, tmp_path):
+        """Someone who typed --slot 2 does want to be told which one it went to."""
+        result, written = self._run(
+            monkeypatch, tmp_path, ["sk-old"], ["config", "set-key", "gemini", "--slot", "2"]
+        )
+        assert "slot 2" in result.stdout
+        assert written["slot"] == 2
+
+    def test_pressing_enter_cancels_rather_than_re_asking(self, monkeypatch, tmp_path):
+        from typer.testing import CliRunner
+
+        from nero import cli
+        from nero.config.manager import ConfigManager
+        from nero.config.schema import NeroConfig
+
+        manager = ConfigManager(config_dir=tmp_path)
+        manager.save(NeroConfig())
+        monkeypatch.setattr(cli, "ConfigManager", lambda: manager)
+        monkeypatch.setattr(manager, "get_api_keys", lambda _p: ["sk-old"])
+        calls = []
+        monkeypatch.setattr(manager, "set_api_key", lambda *a, **k: calls.append(a))
+        result = CliRunner().invoke(cli.app, ["config", "set-key", "gemini"], input="\n")
+        assert calls == []
+        assert "unchanged" in result.stdout

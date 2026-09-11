@@ -1,18 +1,44 @@
 # Nero Agent
 
-A cross-platform CLI personal AI assistant: a streaming text conversation with
-an LLM in your terminal, where the model can call one real tool — opening an
-application on your machine.
+A personal AI assistant for your terminal, your voice, and the chat apps you
+already use. Any model, cloud or fully local. It runs real skills on your
+machine, and it learns from what it has done.
 
-**Phase 2** adds multi-provider support: Nero Agent talks to Claude, GPT, Gemini, or
-a local Ollama model, switchable via config with zero code changes. On first
-run it detects your hardware and recommends a local model tier.
+**Documentation: <https://sohangujari.github.io/nero/>**
 
-**Phase 3** adds voice: `nero talk` lets you speak to Nero Agent and hear it speak
-back, using the same LLM providers and tools as text mode. More tools and
-persistent memory are later phases.
+One assistant, reachable six ways, and every one of them runs the *same* turn
+through `ChatLoop.ask` — the same fallback chain, key rotation, memory recall,
+skills and error messages:
+
+| Where | How |
+| --- | --- |
+| Terminal | `nero chat` |
+| Voice | `nero talk` — recording stops on its own; talk over it to interrupt |
+| Browser | `nero dashboard` — chat, plus every channel, model, skill and log |
+| Telegram | long polling |
+| Discord | Gateway WebSocket, in direct messages |
+| Slack | Socket Mode |
+| Google Chat | a Cloud Pub/Sub subscription |
+
+None of the chat bridges opens a port or hosts an endpoint. Nero connects
+outward; your machine stays where it is.
+
+What separates it from a chat window is that the model can call **skills**:
+open an app, play a named song, set the volume, read a file, search the web,
+run a shell command. Everything that writes, deletes or executes is off by
+default, asks before it runs, is checked against a denylist, and is written to
+an audit log you can read with `nero history`.
+
+And because that log exists, Nero can **learn** from it: `nero learn` finds the
+work that keeps coming back and writes each one down as a procedure it follows
+next time.
 
 ## Providers
+
+Twenty of them, switchable with a config change and no code change:
+`claude`, `openai`, `gemini`, `ollama`, `bedrock`, `mistral`, `deepseek`,
+`groq`, `openrouter`, `xai`, `qwen`, `kimi`, `glm`, `minimax`, `cohere`,
+`perplexity`, `replicate`, `huggingface`, and two custom-endpoint dialects.
 
 | Provider | Default model | API key |
 | --- | --- | --- |
@@ -20,11 +46,21 @@ persistent memory are later phases.
 | `openai` | `gpt-5` | keyring `nero/openai_api_key` |
 | `gemini` | `gemini-2.5-pro` | keyring `nero/gemini_api_key` |
 | `ollama` | hardware recommendation | none — fully local/offline |
+| `bedrock` | your AWS region's model | AWS credentials, no key stored |
 
 Switch with `nero config` (interactive) or `nero config set llm.provider
 ollama`. Choosing ollama auto-fills the model from the hardware recommendation
 and never asks for a key. For ollama, Nero Agent checks that the server is running
 (`ollama serve`) and offers to `ollama pull` the model if it isn't downloaded.
+
+Set `mode` to `offline` and nothing leaves your machine: network skills are
+withdrawn from the model entirely rather than failing at call time.
+
+> **A warning worth reading before you pick a local model.** Some small models
+> cannot tell when *not* to call a skill — they answer "hi" by running a tool,
+> which is both wrong and several seconds slower, because the skill schemas
+> dominate the prompt and a tool call costs a second round trip. Nero warns at
+> startup for models measured to do this. `llama3.2` is one of them.
 
 ## Install
 
@@ -83,7 +119,7 @@ versions CI tested — the Python-3.13 install failure that motivated this setup
 cannot recur. If you install via bare `pip`/`pipx` against a non-3.12
 interpreter instead, Nero Agent prints a one-line warning pointing you here.
 
-## Voice (Phase 3)
+## Voice
 
 ```sh
 nero talk          # speak; Nero Agent transcribes, answers, and speaks back
@@ -262,7 +298,7 @@ terminal stayed yours alone.
 
 | Command | What it does |
 | --- | --- |
-| `nero` | Everything at once: terminal chat, plus Telegram if paired (first run triggers setup) |
+| `nero` | Everything at once: terminal chat, plus every chat bridge you have paired |
 | `nero chat` | Terminal chat only |
 | `nero config` | Interactive menu: assistant name, model, API key |
 | `nero config set <key> <value>` | Scriptable edit, e.g. `nero config set llm.provider ollama` |
@@ -275,9 +311,14 @@ terminal stayed yours alone.
 | `nero routine list` \| `run` \| `install` \| `uninstall` | Manage scheduled routines (launchd) |
 | `nero approvals` | Review destructive actions a routine queued for you |
 | `nero dashboard` | Browser UI: chat, skill activity, and current config |
-| `nero telegram setup` \| `approve <code>` \| `pending` | Connect a Telegram bot and pair a phone |
-| `nero telegram` | Answer Telegram messages from paired chats |
-| `nero telegram install` \| `uninstall` | Run the bridge in the background, from login |
+| `nero telegram` \| `discord` \| `slack` \| `googlechat` | Run one chat bridge in the foreground |
+| `nero <channel> setup` | Store that channel's credentials |
+| `nero <channel> approve <code>` \| `pending` | Pair whoever messaged the bot |
+| `nero <channel> install` \| `uninstall` | Run the bridge in the background, from login |
+| `nero learn` | Review what Nero has done and write down what keeps coming back |
+| `nero learn --install` \| `--uninstall` | Run that review nightly |
+| `nero playbooks` | Procedures Nero has learned |
+| `nero playbooks show` \| `edit` \| `history` \| `restore` \| `forget` | Read and correct one |
 | `nero config set-key <provider> --slot N` | Store an extra API key for rotation |
 | `nero --debug` | Chat with verbose stderr logging (tool-call plumbing, per-turn history) |
 | `nero --version` | Print the installed version |
@@ -288,8 +329,9 @@ vision-capable model, and `/code <request>` routes one turn to
 
 Valid config keys include `assistant.name`, `llm.provider`, `llm.model`,
 `llm.fallback_chain`, `llm.route_by`, `llm.coding_model`,
-`skills.enabled.*`, `security.command_denylist`, `memory.notes_dir`, and the
-`mcp.servers` / `routines.routines` blocks above. `nero config show` prints
+`skills.enabled.*`, `security.command_denylist`, `memory.notes_dir`,
+`memory.learning`, `telegram.*` / `discord.*` / `slack.*` / `googlechat.*`, and
+the `mcp.servers` / `routines.routines` blocks above. `nero config show` prints
 the current values. The `hardware.*` block is
 auto-populated by detection. The RAM → local-model table lives in
 `nero/hardware/tiers.py` — edit it as models improve.
@@ -496,11 +538,12 @@ because an injected instruction could be behind the call that follows.
 
 Enable one with `nero config set skills.enabled.run_shell true`.
 
-### Skills that learn
+### Skills that remember a preference
 
 Two skills would otherwise ask you the same question forever, so they remember
 the answer instead — under a normal config key, which you can read and change
-like any other.
+like any other. This is a much smaller thing than [Learning](#learning): one
+answer stored under one key, not a procedure written from the audit log.
 
 **`play_music`** plays a named song, and finds the players you actually have by
 looking for their app bundles (`Music`, `Spotify`, `TIDAL`, `iTunes`,
@@ -616,6 +659,69 @@ in one script). And unlike `open_app` it will not act on a fuzzy match: opening
 the wrong app is a harmless annoyance, quitting the wrong one can lose work, so
 `'Musci'` becomes a question rather than a closed Music.
 
+## Learning
+
+Nero already logs every action it takes. `nero learn` reads that log, finds the
+work that keeps coming back, and writes each one down as a **playbook**: when it
+applies, the steps that worked, and what to avoid. Next time a matching request
+arrives, the playbook is in the prompt.
+
+```sh
+nero learn              # review now
+nero learn --install    # and every night at 03:20
+nero playbooks          # what it has learned
+```
+
+Because the log was being written anyway, an ordinary turn pays nothing for
+this. Run against a real audit log, the first review found things like this
+without being told to look:
+
+```
+play-spotify-music  v1
+How to Play music using the Spotify application:
+1. Call play_music with the action set to play.
+Avoid:
+Do not rely on Music if Spotify is preferred; handle potential refusals.
+```
+
+### A playbook is read, never run
+
+This is the whole safety argument. A playbook is text the model is shown,
+exactly like a recalled conversation. It is not code and nothing executes it.
+When a step says to run a command, doing so still means calling a skill, which
+is off by default, asks first, is checked against the denylist, and is logged.
+
+So a wrong playbook is a wrong *suggestion*, not a wrong command. The reviewer
+itself is built with an empty skill registry, so a model summarising commands
+out of your audit log is never one step from running any of them.
+
+Facts are the one thing the review will not write on its own. A fact goes into
+every prompt of every turn, which is a far wider blast radius than a procedure
+that only appears when it matches, so an observed preference comes back as a
+note and a person decides.
+
+### Nothing it learns is permanent
+
+Every save is a new version and no version is ever lost. Restoring an old one is
+itself undoable, because the version it replaced stays in the history.
+
+```sh
+nero playbooks edit deploy-docs        # opens $EDITOR; saving writes a new version
+nero playbooks history deploy-docs
+nero playbooks restore deploy-docs 2
+nero playbooks forget deploy-docs
+```
+
+Retrieval is keyword overlap against each playbook's name and task, capped at
+one per turn — two competing procedures in a prompt is how a small model follows
+half of each. Turn the whole thing off with `nero config set memory.learning
+false`.
+
+Where this stops short of self-*improving*: `uses` counts retrievals, not
+outcomes, so a playbook that gets pulled into ten turns and makes all ten worse
+looks identical to one that saves you every time. Closing that loop needs an
+outcome flag on skill results, which does not exist yet.
+
 ## Dashboard
 
 Nero in a browser. React + Tailwind with real [shadcn/ui](https://ui.shadcn.com)
@@ -712,11 +818,38 @@ Adding a component is the normal shadcn flow — `npx shadcn@latest add dialog` 
 then rebuild. A test fails if `nero/webui_dist` is missing, so a forgotten build
 can't ship.
 
-## Telegram
+## Chat apps
 
-Talk to Nero from your phone. It uses long polling, so nothing is hosted and no
-port is opened — Nero connects out to Telegram, and your machine stays where it
-is. Built on `httpx`, which was already a dependency; there is no bot framework.
+Talk to Nero from Telegram, Discord, Slack or Google Chat. Every one of them
+connects *outward*: nothing is hosted, no port is opened, and there is no
+endpoint to expose. Where a platform offered a choice, the firewall-friendly
+route is the one taken — long polling for Telegram, the Gateway socket for
+Discord, Socket Mode for Slack, and a Pub/Sub subscription for Google Chat.
+
+All four share the same security model, in `nero/channels.py`: an allowlist, a
+pairing code that travels by the chat app and is approved at the terminal, and
+destructive skills refused throughout. The walkthrough below is Telegram; the
+other three are the same four steps with different credentials.
+
+| Channel | What setup asks for |
+| --- | --- |
+| Telegram | one bot token, from [@BotFather](https://t.me/BotFather) |
+| Discord | one bot token, from the developer portal |
+| Slack | two tokens: an app token (`xapp-`) and a bot token (`xoxb-`) |
+| Google Chat | a service account key, a project id, and a subscription id |
+
+Google Chat is the awkward one, and not by choice. It has no bot token: an app
+authenticates as a Google Cloud service account, and the only delivery route
+that works from a laptop is pulling a Pub/Sub subscription. That means creating
+a service account, a topic and a subscription before the first message arrives.
+`nero googlechat setup` lists the steps.
+
+Discord answers **direct messages** only. Reading a server channel needs the
+Message Content intent, which Discord gates behind a manual toggle and refuses
+the connection over if you ask for it without having enabled it — so Nero asks
+for nothing privileged, and connecting works the moment the token exists.
+
+### Telegram, step by step
 
 **1. Create the bot.** Message [@BotFather](https://t.me/BotFather), send
 `/newbot`, copy the token it gives you.
@@ -765,8 +898,10 @@ skills and every error message behave identically.
 
 ### Why a code, and not just "the first chat wins"
 
-A bot token is a URL anyone can message, and Nero can open apps and read files
-on your machine. So an unpaired chat gets exactly one thing back: a code, which
+This applies to all four channels, not just Telegram.
+
+A bot token is an address anyone can message, and Nero can open apps and read
+files on your machine. So an unpaired chat gets exactly one thing back: a code, which
 grants nothing on its own.
 
 The code is shown **only in Telegram** — never printed at the terminal. That is
@@ -785,12 +920,17 @@ not on being the first to find the bot.
   approve `rm -rf` from a phone keyboard
 
 Pair another device by messaging the bot from it and approving its code.
-Approved chats live in `telegram.allowed_chat_ids`, which stays the single
-source of truth:
+Approved peers live in config, which stays the single source of truth —
+`telegram.allowed_chat_ids` for Telegram, and `allowed_channel_ids` under
+`discord`, `slack` and `googlechat` for the rest:
 
 ```sh
 nero config set telegram.allowed_chat_ids 12345678,87654321
+nero config set discord.allowed_channel_ids 1319283746152637485
 ```
+
+Telegram numbers its chats; Discord uses 19-digit snowflakes and Slack uses
+`D01ABCDEF`, so the other three hold their ids as strings.
 
 ## MCP servers
 
@@ -853,10 +993,36 @@ service name `nero`.
 ## Development
 
 ```sh
-python -m venv .venv && .venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest
+uv sync --extra voice --group dev   # never a bare `uv sync` — it drops the extras
+uv run pytest -q
 ```
 
-Layout: `nero/config` (schema + manager), `nero/tools` (tool interface +
-`open_app`), `nero/llm` (Claude client: streaming + tool loop), `nero/core`
-(REPL), `nero/cli.py` (typer entry point).
+Layout:
+
+| Path | What lives there |
+| --- | --- |
+| `nero/cli.py` | every command; the typer entry point |
+| `nero/config/` | the pydantic schema and the manager that validates and saves it |
+| `nero/llm/` | the provider-agnostic client, the fallback chain, the ollama path |
+| `nero/core/` | `ChatLoop`, the audit log, the approvals queue |
+| `nero/skills/` | one package per skill, behind one registry |
+| `nero/memory/` | history, recall, facts, notes, playbooks |
+| `nero/voice/` | audio in and out, and the interruptible playback loop |
+| `nero/channels.py` | what every chat bridge shares: allowlist, pairing, splitting |
+| `nero/telegram.py` `discord.py` `slack.py` `googlechat.py` | one bridge each |
+| `nero/learn.py` | the review that turns the audit log into playbooks |
+| `nero/dashboard.py` `webui.py` | the read side of the browser UI, and its server |
+| `web/` | the React + shadcn/ui source, built into `nero/webui_dist` |
+
+The web UI and the documentation site come out of the same `web/` source:
+
+```sh
+cd web
+npm install
+npm run build        # the dashboard, into nero/webui_dist (committed)
+npm run build:docs   # the public docs site, into site/ (gitignored)
+```
+
+Building the dashboard is required before `nero dashboard` will serve anything,
+and the built bundle *is* committed, so that `pip install nero` and the
+PyInstaller binary both carry the UI with no node on the user's machine.

@@ -207,6 +207,61 @@ def uninstall_bridge(agents_dir: Path, channel: str = "telegram") -> str:
     return f"Removed {label}."
 
 
+REVIEW_LABEL = "com.neroagent.learn"
+# 03:20 daily. Off the hour on purpose: launchd fires everything scheduled for
+# :00 at once, and a review that reads the audit log and calls a model is
+# exactly the thing not to run alongside every other agent on the machine.
+REVIEW_SCHEDULE = "20 3 * * *"
+
+
+def review_plist_path(agents_dir: Path) -> Path:
+    return Path(agents_dir) / f"{REVIEW_LABEL}.plist"
+
+
+def install_review(executable: str, agents_dir: Path, schedule: str = REVIEW_SCHEDULE) -> str:
+    """Run `nero learn` on a schedule.
+
+    Same plist plumbing as a routine, but it runs a command rather than a
+    prompt, so it does not go through RoutineConfig.
+    """
+    agents_dir = Path(agents_dir)
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    path = review_plist_path(agents_dir)
+    log_dir = Path(user_log_dir("nero"))
+    log_dir.mkdir(parents=True, exist_ok=True)
+    plist = {
+        "Label": REVIEW_LABEL,
+        "ProgramArguments": [executable, "learn", "--quiet"],
+        "StartCalendarInterval": cron_to_calendar(schedule),
+        "StandardOutPath": str(log_dir / "learn.out.log"),
+        "StandardErrorPath": str(log_dir / "learn.err.log"),
+    }
+    with path.open("wb") as f:
+        plistlib.dump(plist, f)
+
+    if sys.platform != "darwin":
+        return f"Wrote {path}. Loading skipped: launchd is darwin-only."
+
+    _run_launchctl("bootout", f"gui/{os.getuid()}/{REVIEW_LABEL}")
+    result = _run_launchctl("bootstrap", f"gui/{os.getuid()}", str(path))
+    if result.returncode != 0:
+        result = _run_launchctl("load", "-w", str(path))
+        if result.returncode != 0:
+            return f"Wrote {path}, but launchctl could not load it: {result.stderr.strip()}"
+    return f"Installed {REVIEW_LABEL} ({schedule}). Logs: {log_dir / 'learn.err.log'}"
+
+
+def uninstall_review(agents_dir: Path) -> str:
+    path = review_plist_path(Path(agents_dir))
+    if sys.platform == "darwin":
+        _run_launchctl("bootout", f"gui/{os.getuid()}/{REVIEW_LABEL}")
+        _run_launchctl("unload", "-w", str(path))
+    if not path.exists():
+        return "The periodic review was not installed."
+    path.unlink()
+    return f"Removed {REVIEW_LABEL}."
+
+
 def uninstall_routine(name: str, agents_dir: Path) -> str:
     """Unload from launchd and remove the plist. A missing plist is a no-op,
     not an error."""

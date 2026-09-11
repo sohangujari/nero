@@ -14,6 +14,7 @@ from rich.text import Text
 
 from nero.llm.ollama_adapter import OllamaModelError
 from nero.llm.routing import SessionStats, order_chain
+from nero.memory.playbooks import playbook_block
 from nero.memory.recall import recall_block, trim_to_window
 from nero.spinner import Spinner
 
@@ -37,6 +38,25 @@ TRANSIENT_ERRORS = (
     litellm.exceptions.InternalServerError,
     httpx.HTTPError,
 )
+
+
+def _why_failed(exc: Exception) -> str:
+    """Why the model did not answer, in three words the user can act on.
+
+    Every one of these used to be reported as "unreachable", which is wrong for
+    all but one of them and actively misleading for the most common: a free-tier
+    model returning 429 is working perfectly and simply busy, but "unreachable"
+    reads as broken and sends people looking for a fault that isn't there.
+    """
+    if isinstance(exc, litellm.exceptions.RateLimitError):
+        return "is rate limited"
+    if isinstance(exc, litellm.exceptions.Timeout):
+        return "timed out"
+    if isinstance(exc, litellm.exceptions.InternalServerError):
+        return "returned a server error"
+    if isinstance(exc, litellm.exceptions.ServiceUnavailableError):
+        return "is unavailable"
+    return "is unreachable"
 
 
 def _validate_image(path_str: str) -> str | None:
@@ -106,6 +126,7 @@ class ChatLoop:
         health_check: bool = True,
         primary_api_keys: list[str] | None = None,
         coding_client=None,
+        playbooks=None,
     ):
         self.client = client
         self.console = console
@@ -118,6 +139,10 @@ class ChatLoop:
         # this feature existed.
         self.registry = registry
         self.security = security
+        # Optional: absent (voice loop, most tests) means no learned procedure
+        # is ever carried, and the turn is byte-identical to before this
+        # feature existed.
+        self.playbooks = playbooks
         # Live-window cap: messages beyond this are trimmed off the front
         # (and recalled on demand). 0 disables trimming entirely — unchanged
         # behavior for every caller that doesn't pass this.
@@ -265,10 +290,11 @@ class ChatLoop:
                 self.stats.record_latency(
                     provider_key, model_key, time.monotonic() - started
                 )
-            except TRANSIENT_ERRORS:
+            except TRANSIENT_ERRORS as exc:
                 self.stats.record_failure(*_client_key(primary_client))
                 if not self.fallback_clients:
                     raise
+                why = _why_failed(exc)
                 # Walk the chain in routed/health-filtered order; first
                 # success wins. Each attempt rolls back first — partial
                 # tool/assistant turns from the failed stream must not leak
@@ -279,8 +305,8 @@ class ChatLoop:
                     del self.messages[turn_start:]
                     self.messages.append(user_message)
                     self.console.print(
-                        "\n[yellow]Primary model unreachable — retrying with "
-                        f"{fallback_client.model} via "
+                        f"\n[yellow]{primary_client.model} {why} — retrying "
+                        f"with {fallback_client.model} via "
                         f"{fallback_client.provider}.[/yellow]"
                     )
                     self._prefix()
@@ -395,10 +421,22 @@ class ChatLoop:
         )
 
     def _recalled(self, text: str) -> str:
-        """Relevant older exchanges to carry on this turn's user message, or "".
-        Never raises: recall is an optimisation, not part of the turn."""
+        """What Nero already knows that bears on this turn, carried on the
+        user's message: a matching learned procedure, then relevant older
+        exchanges.
+
+        Both ride the user message rather than the system prompt, and for the
+        measured reason in `nero/llm/client.py:current_time_line` — anything
+        that varies at the front of the prompt invalidates the provider's cache
+        of every token after it, and these two vary the most of anything Nero
+        sends.
+
+        Never raises: both are optimisations, not part of the turn.
+        """
         try:
-            return recall_block(self.history, text, self.messages)
+            return playbook_block(self.playbooks, text) + recall_block(
+                self.history, text, self.messages
+            )
         except Exception:  # noqa: BLE001 — see docstring
             logger.debug("recall failed", exc_info=True)
             return ""

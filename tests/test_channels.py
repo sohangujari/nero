@@ -478,3 +478,170 @@ class TestSlackErrors:
 
     def test_an_unknown_error_is_passed_through_rather_than_swallowed(self):
         assert "ratelimited" in slack_bridge._why("ratelimited")
+
+
+# --- Google Chat ------------------------------------------------------------
+
+from nero import googlechat as gchat_bridge  # noqa: E402
+
+
+class TestGoogleChatFormatting:
+    def test_it_reads_the_same_dialect_as_slack(self):
+        assert gchat_bridge.to_google_chat("**bold** and *italic*") == "*bold* and _italic_"
+
+    def test_a_heading_becomes_bold(self):
+        assert gchat_bridge.to_google_chat("# Title") == "*Title*"
+
+    def test_angle_brackets_are_left_alone(self):
+        """Slack reads &, < and > as markup in ordinary text; Google Chat does
+        not, and escaping them would show entities to the reader."""
+        assert gchat_bridge.to_google_chat("a < b & c") == "a < b & c"
+
+    def test_a_link_becomes_the_angle_bracket_form(self):
+        assert gchat_bridge.to_google_chat("[docs](https://x.test)") == "<https://x.test|docs>"
+
+
+class TestGoogleChatIncoming:
+    def event(self, **over):
+        message = {
+            "sender": {"type": "HUMAN", "name": "users/1"},
+            "space": {"name": "spaces/AAA"},
+            "text": "hello",
+        } | over.pop("message", {})
+        return {"type": "MESSAGE", "message": message} | over
+
+    def test_a_message_is_a_turn(self):
+        assert gchat_bridge.incoming(self.event()) == ("spaces/AAA", "hello")
+
+    def test_the_apps_own_message_is_never_a_turn(self):
+        """Nero's reply arrives on the same topic; without this it answers
+        itself forever."""
+        event = self.event(message={"sender": {"type": "BOT"}})
+        assert gchat_bridge.incoming(event) is None
+
+    def test_being_added_to_a_space_is_not_a_turn(self):
+        """Chat publishes ADDED_TO_SPACE and card clicks on the same topic."""
+        assert gchat_bridge.incoming(self.event(type="ADDED_TO_SPACE")) is None
+
+    def test_an_empty_message_is_not_a_turn(self):
+        assert gchat_bridge.incoming(self.event(message={"text": "   "})) is None
+
+
+class _FakeGoogleChatBot:
+    """Stands in for the REST calls. `pull` hands out one batch, then nothing,
+    the way an idle subscription behaves."""
+
+    def __init__(self, batches):
+        self.batches = list(batches)
+        self.sent = []
+        self.acked = []
+        self.checked = False
+
+    def check(self):
+        self.checked = True
+
+    def pull(self, max_messages=10):
+        return self.batches.pop(0) if self.batches else []
+
+    def acknowledge(self, ack_ids):
+        self.acked.extend(ack_ids)
+
+    def send(self, space, text):
+        self.sent.append((space, text))
+
+    def close(self):
+        pass
+
+
+def _gc_event(space="spaces/AAA", text="hello", sender="HUMAN"):
+    return {
+        "type": "MESSAGE",
+        "message": {"sender": {"type": sender}, "space": {"name": space}, "text": text},
+    }
+
+
+class TestGoogleChatServe:
+    def run(self, batches, allowed, peers, **over):
+        bot = _FakeGoogleChatBot(batches)
+        asked = []
+        gchat_bridge.serve(
+            bot, allowed, lambda text: asked.append(text) or "answered",
+            peers=peers, once=True, **over,
+        )
+        return bot, asked
+
+    def test_a_paired_space_gets_an_answer(self, tmp_path):
+        peers = PeerStore("googlechat", tmp_path / "p.db")
+        bot, asked = self.run([[("ack1", _gc_event())]], {"spaces/AAA"}, peers)
+        assert asked == ["hello"]
+        assert bot.sent == [("spaces/AAA", "answered")]
+
+    def test_every_event_is_acknowledged(self, tmp_path):
+        """Pub/Sub redelivers anything unacknowledged, so a slow turn would
+        otherwise be asked and answered twice."""
+        peers = PeerStore("googlechat", tmp_path / "p.db")
+        bot, _asked = self.run([[("ack1", _gc_event())]], {"spaces/AAA"}, peers)
+        assert bot.acked == ["ack1"]
+
+    def test_it_acknowledges_before_running_the_turn(self, tmp_path):
+        peers = PeerStore("googlechat", tmp_path / "p.db")
+        bot = _FakeGoogleChatBot([[("ack1", _gc_event())]])
+        order = []
+        gchat_bridge.serve(
+            bot, {"spaces/AAA"},
+            lambda _t: order.append(list(bot.acked)) or "answered",
+            peers=peers, once=True,
+        )
+        assert order[0] == ["ack1"]
+
+    def test_an_event_that_is_not_a_turn_is_still_acknowledged(self, tmp_path):
+        """Otherwise one join notice comes back forever and blocks the queue."""
+        peers = PeerStore("googlechat", tmp_path / "p.db")
+        bot, asked = self.run(
+            [[("ack1", {"type": "ADDED_TO_SPACE"})]], {"spaces/AAA"}, peers
+        )
+        assert asked == [] and bot.acked == ["ack1"]
+
+    def test_an_unpaired_space_is_never_run(self, tmp_path):
+        peers = PeerStore("googlechat", tmp_path / "p.db")
+        bot, asked = self.run(
+            [[("ack1", _gc_event(space="spaces/ZZZ"))]], {"spaces/AAA"}, peers
+        )
+        assert asked == []
+        assert "pairing code" in bot.sent[0][1]
+        assert "nero googlechat approve" in bot.sent[0][1]
+
+    def test_a_space_approved_mid_run_is_picked_up(self, tmp_path):
+        peers = PeerStore("googlechat", tmp_path / "p.db")
+        bot, asked = self.run(
+            [[("ack1", _gc_event(space="spaces/ZZZ"))]], set(), peers,
+            refresh=lambda: {"spaces/ZZZ"},
+        )
+        assert asked == ["hello"]
+
+    def test_the_subscription_is_checked_before_polling(self, tmp_path):
+        """A subscription that was never created is not a transient failure;
+        retrying it forever is how a bridge looks alive and answers nothing."""
+        peers = PeerStore("googlechat", tmp_path / "p.db")
+        bot, _asked = self.run([], {"spaces/AAA"}, peers)
+        assert bot.checked
+
+    def test_a_failing_turn_does_not_kill_the_bridge(self, tmp_path):
+        peers = PeerStore("googlechat", tmp_path / "p.db")
+        bot = _FakeGoogleChatBot([[("ack1", _gc_event())]])
+
+        def boom(_text):
+            raise RuntimeError("provider exploded")
+
+        gchat_bridge.serve(bot, {"spaces/AAA"}, boom, peers=peers, once=True)
+        assert "provider exploded" in bot.sent[0][1]
+
+
+class TestGoogleChatCredentials:
+    def test_a_key_that_is_not_json_says_so(self):
+        with pytest.raises(gchat_bridge.GoogleChatError, match="not valid JSON"):
+            gchat_bridge.GoogleChatBot("not json at all", "p", "s")
+
+    def test_a_key_missing_fields_says_so(self):
+        with pytest.raises(gchat_bridge.GoogleChatError, match="missing something"):
+            gchat_bridge.GoogleChatBot('{"type": "service_account"}', "p", "s")

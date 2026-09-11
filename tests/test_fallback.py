@@ -588,3 +588,39 @@ class TestBlacklistWhitelistWarnOnly:
         assert "explicit choice stands" not in result.output
 
 
+
+
+class TestWhyItFailed:
+    """The fallback message used to say "Primary model unreachable" whatever
+    went wrong. A rate-limited free-tier model is working perfectly and simply
+    busy; calling that unreachable sends people hunting a fault that is not
+    there."""
+
+    def _why(self, exc):
+        from nero.core.chat_loop import _why_failed
+
+        return _why_failed(exc)
+
+    def test_a_rate_limit_says_so(self):
+        import litellm
+
+        assert self._why(
+            litellm.exceptions.RateLimitError("429", "openrouter", "gemma")
+        ) == "is rate limited"
+
+    def test_a_timeout_says_so(self):
+        import litellm
+
+        assert self._why(litellm.exceptions.Timeout("slow", "openrouter", "gemma")) == "timed out"
+
+    def test_a_server_error_says_so(self):
+        import litellm
+
+        assert self._why(
+            litellm.exceptions.InternalServerError("500", "openrouter", "gemma")
+        ) == "returned a server error"
+
+    def test_anything_else_is_still_unreachable(self):
+        import httpx
+
+        assert self._why(httpx.ConnectError("no route")) == "is unreachable"

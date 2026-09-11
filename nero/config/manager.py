@@ -201,6 +201,16 @@ class ConfigManager:
         keyring.set_password(KEYRING_SERVICE, KEYRING_APP_TOKEN, app_token)
         keyring.set_password(KEYRING_SERVICE, KEYRING_BOT_TOKEN, bot_token)
 
+    def get_googlechat_key(self) -> str | None:
+        from nero.googlechat import KEYRING_ENTRY
+
+        return self._read_key(KEYRING_ENTRY)
+
+    def set_googlechat_key(self, value: str) -> None:
+        from nero.googlechat import KEYRING_ENTRY
+
+        keyring.set_password(KEYRING_SERVICE, KEYRING_ENTRY, value)
+
     def get_spotify_credentials(self) -> tuple[str, str] | None:
         """(client_id, client_secret), or None if either is missing.
 

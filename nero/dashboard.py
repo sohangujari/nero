@@ -37,7 +37,7 @@ def load_config() -> NeroConfig:
 # reports env by key name only. `routines` has its own page too.
 CONFIG_SECTIONS = (
     "assistant", "mode", "llm", "skills", "memory", "security",
-    "telegram", "discord", "slack", "voice",
+    "telegram", "discord", "slack", "googlechat", "voice",
 )
 
 
@@ -125,6 +125,9 @@ def channels_payload(config: NeroConfig | None = None) -> dict:
         "telegram": chat_app("telegram", list(config.telegram.allowed_chat_ids), "chat"),
         "discord": chat_app("discord", list(config.discord.allowed_channel_ids), "channel"),
         "slack": chat_app("slack", list(config.slack.allowed_channel_ids), "channel"),
+        "googlechat": chat_app(
+            "googlechat", list(config.googlechat.allowed_channel_ids), "space"
+        ),
     }
 
 
@@ -213,6 +216,23 @@ def memory_payload(config: NeroConfig | None = None) -> dict:
         ]
     except Exception:  # noqa: BLE001 — a stats line must never break the page
         facts = []
+    try:
+        from nero.memory.playbooks import PlaybookStore
+
+        playbooks = [
+            {
+                "name": book.name,
+                "task": book.task,
+                "steps": book.steps,
+                "avoid": book.avoid,
+                "version": book.version,
+                "uses": book.uses,
+                "updated_at": book.updated_at,
+            }
+            for book in PlaybookStore().all()
+        ]
+    except Exception:  # noqa: BLE001 — a stats line must never break the page
+        playbooks = []
     memory = config.memory
     return {
         "enabled": memory.enabled,
@@ -222,6 +242,10 @@ def memory_payload(config: NeroConfig | None = None) -> dict:
         "compact_after_messages": memory.compact_after_messages,
         "semantic_recall": memory.semantic_recall,
         "notes_dir": memory.notes_dir,
+        "learning": memory.learning,
+        "learn_after": memory.learn_after,
+        "playbooks": len(playbooks),
+        "playbook_list": playbooks,
     }
 
 
@@ -232,7 +256,7 @@ class EditError(Exception):
 def apply_edit(action: str, key: str, value: str | None = None) -> None:
     """Perform one edit from the dashboard.
 
-    Four verbs, one door. `set` and `remove` go through ConfigManager — the
+    Five verbs, one door. `set` and `remove` go through ConfigManager — the
     same validate-then-save path `nero config set` uses, so a value the CLI
     would reject is rejected here too and a half-written config is never
     persisted. The other two delete stored data rather than settings.
@@ -259,6 +283,10 @@ def apply_edit(action: str, key: str, value: str | None = None) -> None:
         from nero.memory.facts import FactStore, default_facts_path
 
         FactStore(default_facts_path()).forget(key)
+    elif action == "forget_playbook":
+        from nero.memory.playbooks import PlaybookStore
+
+        PlaybookStore().forget(key)
     else:
         raise EditError(f"Unknown action: {action!r}")
 
@@ -273,6 +301,7 @@ def state_payload(registry=None) -> dict:
     config = load_config()
     sessions = sessions_payload()
     skills = skills_payload(registry)
+    memory = memory_payload(config)
     return {
         "assistant": config.assistant.name,
         "mode": config.mode,
@@ -282,13 +311,14 @@ def state_payload(registry=None) -> dict:
         "routines": routines_payload(config),
         "sessions": sessions,
         "mcp": mcp_payload(config),
-        "memory": memory_payload(config),
+        "memory": memory,
         "counts": {
             "skills_available": sum(1 for s in skills if s["available"]),
             "skills_total": len(skills),
             "sessions": len(sessions),
             "turns": sum(s["turns"] for s in sessions),
             "routines": len(config.routines.routines),
+            "playbooks": memory["playbooks"],
             "mcp": len(config.mcp.servers),
         },
     }

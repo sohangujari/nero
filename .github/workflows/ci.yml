@@ -1,9 +1,16 @@
 name: CI
 
+# Deliberately manual for now: no push or pull_request trigger, so nothing runs
+# on its own while the project is still moving fast. Run it from the Actions tab
+# ("Run workflow") whenever you want the answer, and before tagging a release —
+# it is the only thing that tests Linux and Windows.
+#
+# To put it back, restore:
+#   push:
+#     branches: [main]
+#   pull_request:
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_dispatch:
 
 jobs:
   test:

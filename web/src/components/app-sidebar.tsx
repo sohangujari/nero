@@ -1,6 +1,7 @@
 import {
   BookOpen,
   Blocks,
+  GraduationCap,
   CalendarClock,
   Cpu,
   Database,
@@ -42,6 +43,7 @@ export const PAGES = [
   { id: "routines", label: "Routines", icon: CalendarClock, group: "Setup" },
   { id: "mcp", label: "MCP servers", icon: Plug, group: "Setup" },
   { id: "memory", label: "Memory", icon: Database, group: "Setup" },
+  { id: "learning", label: "Learning", icon: GraduationCap, group: "Setup" },
   { id: "config", label: "Config", icon: SlidersHorizontal, group: "Setup" },
 ] as const
 

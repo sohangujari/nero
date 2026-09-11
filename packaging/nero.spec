@@ -49,6 +49,11 @@ hiddenimports += collect_submodules("prompt_toolkit")
 # import fine and then fail on the first handshake.
 hiddenimports += collect_submodules("websockets")
 
+# google-auth resolves its credential and transport backends by import at call
+# time, so a frozen binary would import fine and fail on the first token.
+hiddenimports += collect_submodules("google.auth")
+hiddenimports += collect_submodules("google.oauth2")
+
 a = Analysis(
     ["../nero/__main__.py"],
     pathex=[".."],

@@ -113,6 +113,18 @@ export type State = {
     compact_after_messages: number
     semantic_recall: boolean
     notes_dir: string | null
+    learning: boolean
+    learn_after: number
+    playbooks: number
+    playbook_list: {
+      name: string
+      task: string
+      steps: string
+      avoid: string
+      version: number
+      uses: number
+      updated_at: string
+    }[]
   }
   counts: {
     skills_available: number
@@ -120,11 +132,17 @@ export type State = {
     sessions: number
     turns: number
     routines: number
+    playbooks: number
     mcp: number
   }
 }
 
-export type EditAction = "set" | "remove" | "forget_session" | "forget_fact"
+export type EditAction =
+  | "set"
+  | "remove"
+  | "forget_session"
+  | "forget_fact"
+  | "forget_playbook"
 
 /** What a page calls to change something. Resolves once Nero has saved. */
 export type Edit = (action: EditAction, key: string, value?: string) => Promise<void>

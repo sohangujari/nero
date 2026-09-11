@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import threading
 import time
 from collections.abc import Callable
@@ -47,7 +46,7 @@ import httpx
 from websockets.exceptions import ConnectionClosed, WebSocketException
 from websockets.sync.client import connect
 
-from nero.channels import PAIRING_REPLY, ChannelError, PeerStore, split
+from nero.channels import PAIRING_REPLY, ChannelError, PeerStore, split, starred_markdown
 
 logger = logging.getLogger("nero.slack")
 
@@ -149,65 +148,25 @@ def _why(error: str | None) -> str:
     return _ERRORS.get(error, f"Slack refused the request ({error}).")
 
 
-# Slack's mrkdwn is not markdown: bold is *one* asterisk, italic is an
-# underscore, and there are no headings. Converting is not optional — sent
-# as-is, every `**bold**` the model writes arrives as literal asterisks.
-_FENCE = re.compile(r"```[\w+-]*\n?([\s\S]*?)```")
-_SPAN = re.compile(r"`([^`\n]+)`")
-_LINK = re.compile(r"!?\[([^\]]*)\]\(\s*([^)\s]+)[^)]*\)")
-_HELD = re.compile(r"\x00(\d+)\x00")
-
-# Bold and headings both render as *one asterisk* in mrkdwn — which is exactly
-# the syntax the italic rule below consumes. Left in the text, `**bold**` became
-# `*bold*` became `_bold_`. So their output is parked as a placeholder the
-# italic pass cannot see, the same trick code spans and links already use.
-_BOLD = [
-    re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$", re.M),   # heading
-    re.compile(r"(\*\*|__)(?=\S)(.+?)(?<=\S)\1"),      # bold
-]
-# Order still matters here: the bullet rule would otherwise eat the leading
-# asterisk of an italic run at the start of a line.
-_INLINE = [
-    (re.compile(r"^(\s*)[-*+][ \t]+", re.M), "\\1\u2022 "),            # bullet
-    (re.compile(r"~~(?=\S)(.+?)(?<=\S)~~"), r"~\1~"),                  # strike
-    (re.compile(r"(?<![\w*])\*(?=\S)([^*\n]+?)(?<=\S)\*(?![\w*])"), r"_\1_"),  # italic
-]
-
-
 def _escape(text: str) -> str:
-    """The three characters Slack reads as markup in plain text.
+    """The three characters Slack reads as markup in ordinary text.
 
-    Only these three: escaping more would show backslashes to the reader,
-    which is what Slack's own guidance warns against.
+    Only these three: escaping more would show backslashes to the reader, which
+    is what Slack's own guidance warns against. Google Chat needs none of this,
+    which is the whole reason `starred_markdown` takes an escaper.
     """
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def to_mrkdwn(text: str) -> str:
-    """`text` as Slack mrkdwn, treating it as markdown.
+    """`text` as Slack mrkdwn.
 
-    Code and links are lifted out and rendered before the escape pass, so
-    markup inside a code block is shown rather than interpreted.
+    The dialect is shared with Google Chat — both read `*bold*`, `_italic_`,
+    `~strike~` and `<url|text>` — so the conversion lives in nero/channels.py.
+    What is Slack's is the escaping: it is the only one of the two that reads
+    `&`, `<` and `>` as markup in ordinary text.
     """
-    held: list[str] = []
-
-    def hold(rendered: str) -> str:
-        held.append(rendered)
-        return f"\x00{len(held) - 1}\x00"
-
-    text = _FENCE.sub(lambda m: hold(f"```\n{_escape(m.group(1).strip())}\n```"), text)
-    text = _SPAN.sub(lambda m: hold(f"`{_escape(m.group(1))}`"), text)
-    text = _LINK.sub(
-        lambda m: hold(f"<{_escape(m.group(2))}|{_escape(m.group(1)) or 'link'}>"), text
-    )
-    text = _escape(text)
-    for pattern in _BOLD:
-        # The last group is the content either way: the heading pattern has one
-        # group, the bold pattern's second group is the text inside the markers.
-        text = pattern.sub(lambda m: hold(f"*{m.group(m.re.groups)}*"), text)
-    for pattern, replacement in _INLINE:
-        text = pattern.sub(replacement, text)
-    return _HELD.sub(lambda m: held[int(m.group(1))], text)
+    return starred_markdown(text, _escape)
 
 
 def incoming(payload: dict, bot_id: str) -> tuple[str, str] | None:

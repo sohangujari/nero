@@ -25,6 +25,13 @@ dependencies = [
     # exists to avoid. Pure Python, no build step, and its sync client fits the
     # threaded bridge loop without dragging asyncio into it.
     "websockets==15.0.1",
+    # Google Chat delivers to a bot either through a public HTTPS endpoint or
+    # through Cloud Pub/Sub, and only the second works from a laptop. Pulling a
+    # subscription is plain REST, but signing the service-account assertion
+    # that authorises it is RS256 — 60 lines of security-sensitive JWT code to
+    # hand-roll, which is not the kind of thing to write yourself. google-auth
+    # is pure Python (it signs via `rsa`) so it adds no build step.
+    "google-auth==2.42.1",
     "pynput==1.8.2; sys_platform == 'win32'",
 ]
 

@@ -47,6 +47,9 @@ const CHANNEL_COPY: Record<string, string> = {
   dashboard: "This page. Token-gated, loopback only.",
   voice: "Hands-free: speech in, speech out.",
   telegram: "Your phone. Only paired chats are answered.",
+  discord: "Direct messages. Only paired channels are answered.",
+  slack: "Socket Mode. Only paired channels are answered.",
+  googlechat: "Cloud Pub/Sub. Only paired spaces are answered.",
 }
 
 /** Which config key switches a channel on, where one exists. The terminal and
@@ -54,69 +57,91 @@ const CHANNEL_COPY: Record<string, string> = {
 const CHANNEL_KEY: Record<string, string> = {
   voice: "voice.enabled",
   telegram: "telegram.enabled",
+  discord: "discord.enabled",
+  slack: "slack.enabled",
+  googlechat: "googlechat.enabled",
+}
+
+/** Where the config key is not the name a person would write. Everything not
+ *  listed here is just capitalised. */
+const CHANNEL_NAME: Record<string, string> = { googlechat: "Google Chat", mcp: "MCP" }
+
+/** The config key holding each chat app's allowlist. Its presence is also what
+ *  marks a channel as one that pairs at all, so the paired list below is driven
+ *  by this table rather than by naming Telegram in the markup. */
+const ALLOWLIST_KEY: Record<string, string> = {
+  telegram: "telegram.allowed_chat_ids",
+  discord: "discord.allowed_channel_ids",
+  slack: "slack.allowed_channel_ids",
+  googlechat: "googlechat.allowed_channel_ids",
 }
 
 export function Channels({ state, edit }: PageProps) {
-  const paired = state.channels.telegram?.chat_ids ?? []
   return (
     <Page title="Channels" lede="Every way a person can reach Nero. Switch one off and it stops answering.">
       <div className="grid gap-4 sm:grid-cols-2">
-        {Object.entries(state.channels).map(([name, channel]) => (
-          <Card key={name}>
-            <CardHeader className="pb-3">
-              <div className="flex items-center gap-2">
-                <CardTitle className="text-base capitalize">{name}</CardTitle>
-                {CHANNEL_KEY[name] ? (
-                  <div className="ml-auto">
-                    <Toggle
-                      field={CHANNEL_KEY[name]}
-                      on={channel.enabled}
-                      edit={edit}
-                      label={`${name} enabled`}
-                    />
-                  </div>
-                ) : (
-                  <Badge variant="secondary" className="ml-auto">
-                    always on
-                  </Badge>
-                )}
-              </div>
-              <CardDescription>{CHANNEL_COPY[name] ?? ""}</CardDescription>
-            </CardHeader>
-            <CardContent className="text-muted-foreground text-sm">
-              {channel.detail}
-              {name === "telegram" && (
-                <div className="mt-3">
-                  {paired.length === 0 ? (
-                    <p className="text-foreground text-xs">
-                      No chat paired yet. Message the bot, then run{" "}
-                      <code>nero telegram approve &lt;code&gt;</code>.
-                    </p>
+        {Object.entries(state.channels).map(([name, channel]) => {
+          const allowlist = ALLOWLIST_KEY[name]
+          const paired = channel.chat_ids ?? []
+          return (
+            <Card key={name}>
+              <CardHeader className="pb-3">
+                <div className="flex items-center gap-2">
+                  <CardTitle className="text-base capitalize">
+                    {CHANNEL_NAME[name] ?? name}
+                  </CardTitle>
+                  {CHANNEL_KEY[name] ? (
+                    <div className="ml-auto">
+                      <Toggle
+                        field={CHANNEL_KEY[name]}
+                        on={channel.enabled}
+                        edit={edit}
+                        label={`${name} enabled`}
+                      />
+                    </div>
                   ) : (
-                    <ul className="space-y-1">
-                      {paired.map((id) => (
-                        <li key={id} className="flex items-center gap-2">
-                          <span className="font-mono text-xs">{id}</span>
-                          <Remove
-                            what={`chat ${id}`}
-                            detail="That phone stops being answered. It can pair again with a new code."
-                            onConfirm={() =>
-                              edit(
-                                "set",
-                                "telegram.allowed_chat_ids",
-                                paired.filter((other) => other !== id).join(","),
-                              )
-                            }
-                          />
-                        </li>
-                      ))}
-                    </ul>
+                    <Badge variant="secondary" className="ml-auto">
+                      always on
+                    </Badge>
                   )}
                 </div>
-              )}
-            </CardContent>
-          </Card>
-        ))}
+                <CardDescription>{CHANNEL_COPY[name] ?? ""}</CardDescription>
+              </CardHeader>
+              <CardContent className="text-muted-foreground text-sm">
+                {channel.detail}
+                {allowlist && (
+                  <div className="mt-3">
+                    {paired.length === 0 ? (
+                      <p className="text-foreground text-xs">
+                        Nothing paired yet. Message the bot, then run{" "}
+                        <code>nero {name} approve &lt;code&gt;</code>.
+                      </p>
+                    ) : (
+                      <ul className="space-y-1">
+                        {paired.map((id) => (
+                          <li key={id} className="flex items-center gap-2">
+                            <span className="font-mono text-xs">{id}</span>
+                            <Remove
+                              what={`${name} ${id}`}
+                              detail="It stops being answered. It can pair again with a new code."
+                              onConfirm={() =>
+                                edit(
+                                  "set",
+                                  allowlist,
+                                  paired.filter((other) => other !== id).join(","),
+                                )
+                              }
+                            />
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )
+        })}
       </div>
     </Page>
   )
@@ -424,6 +449,83 @@ export function Mcp({ state, edit }: PageProps) {
 }
 
 // --- Memory -----------------------------------------------------------------
+
+export function Learning({ state, edit }: PageProps) {
+  const m = state.memory
+  return (
+    <Page
+      title="Learning"
+      lede="Nero reviews what it has actually done, finds the work that keeps coming back, and writes each one down as a procedure it can follow next time."
+    >
+      <Setting label="Learning" hint="Carry a matching procedure on the turn">
+        <Toggle field="memory.learning" on={m.learning} edit={edit} label="learning enabled" />
+      </Setting>
+      <Setting label="Write it down after" hint="Times work must recur before it counts">
+        <TextField
+          field="memory.learn_after"
+          value={String(m.learn_after)}
+          edit={edit}
+          className="h-8 w-24 font-mono text-xs"
+        />
+      </Setting>
+
+      <div className="text-muted-foreground mt-6 rounded-lg border-l-2 py-1 pl-4 text-sm leading-relaxed">
+        A playbook is text Nero reads, not code it runs. When a step says to run a command, doing
+        that is still an ordinary skill call, with the same confirmation, denylist and audit log.
+      </div>
+
+      <h3 className="mt-8 mb-1 text-sm font-semibold">Playbooks</h3>
+      <p className="text-muted-foreground mb-3 text-xs">
+        Written by <code className="font-mono">nero learn</code>. Removing one here is immediate.
+        Earlier versions stay in <code className="font-mono">nero playbooks history</code> unless
+        the whole playbook is deleted.
+      </p>
+      {m.playbook_list.length === 0 ? (
+        <Empty>
+          Nothing learned yet. Run <span className="font-mono">nero learn</span> once Nero has done
+          some work, or <span className="font-mono">nero learn --install</span> to review nightly.
+        </Empty>
+      ) : (
+        <div className="space-y-3">
+          {m.playbook_list.map((book) => (
+            <Card key={book.name}>
+              <CardHeader>
+                <div className="flex items-start gap-3">
+                  <div className="min-w-0 flex-1">
+                    <CardTitle className="font-mono text-sm">{book.name}</CardTitle>
+                    <CardDescription>{book.task}</CardDescription>
+                  </div>
+                  <Badge variant="secondary">v{book.version}</Badge>
+                  <Badge variant="outline">
+                    {book.uses} use{book.uses === 1 ? "" : "s"}
+                  </Badge>
+                  <Remove
+                    what={`"${book.name}"`}
+                    detail="Nero stops following this immediately, and its earlier versions go too."
+                    onConfirm={() => edit("forget_playbook", book.name)}
+                  />
+                </div>
+              </CardHeader>
+              <CardContent>
+                <pre className="bg-muted/50 overflow-x-auto rounded-md p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap">
+                  {book.steps}
+                </pre>
+                {book.avoid ? (
+                  <>
+                    <p className="text-muted-foreground mt-3 mb-1 text-xs font-medium">Avoid</p>
+                    <pre className="text-muted-foreground overflow-x-auto font-mono text-xs leading-relaxed whitespace-pre-wrap">
+                      {book.avoid}
+                    </pre>
+                  </>
+                ) : null}
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      )}
+    </Page>
+  )
+}
 
 export function Memory({ state, edit }: PageProps) {
   const m = state.memory

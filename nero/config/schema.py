@@ -189,6 +189,14 @@ class MemoryConfig(BaseModel):
     # ollama and numpy, and silently stays off otherwise). Worth about +9
     # points of recall; costs ~25 ms on the turn and nothing on the network.
     semantic_recall: bool = True
+    # Carry a matching learned procedure on the turn (nero/memory/playbooks.py).
+    # Costs one keyword scan over a store that holds tens of rows; adds nothing
+    # to a turn that has no matching playbook.
+    learning: bool = True
+    # How many times work has to recur before `nero learn` writes it down. Two
+    # is a repeat, three is a habit — lower this and a review starts turning
+    # coincidences into procedures.
+    learn_after: int = Field(default=3, ge=2)
 
 
 class TelegramConfig(BaseModel):
@@ -233,6 +241,23 @@ class SlackConfig(BaseModel):
 
     enabled: bool = False
     allowed_channel_ids: list[str] = []
+
+
+class GoogleChatConfig(BaseModel):
+    """Talking to Nero from Google Chat (nero/googlechat.py).
+
+    Same allowlist rule as every other channel. The two extra fields are the
+    Pub/Sub coordinates Chat publishes to; neither is a secret, so they live
+    here rather than in the keyring, and neither can be guessed, so the bridge
+    refuses to start without them.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    allowed_channel_ids: list[str] = []
+    project_id: str | None = None
+    subscription_id: str | None = None
 
 
 class SkillToggles(BaseModel):
@@ -390,4 +415,5 @@ class NeroConfig(BaseModel):
     telegram: TelegramConfig = TelegramConfig()
     discord: DiscordConfig = DiscordConfig()
     slack: SlackConfig = SlackConfig()
+    googlechat: GoogleChatConfig = GoogleChatConfig()
     routines: RoutinesConfig = RoutinesConfig()

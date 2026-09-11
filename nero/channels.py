@@ -34,8 +34,10 @@ without a per-platform schema, and nothing here does arithmetic on an id.
 
 from __future__ import annotations
 
+import re
 import secrets
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -212,3 +214,67 @@ def split(text: str, limit: int) -> list[str]:
         text = text[cut:].lstrip()
     parts.append(text)
     return parts
+
+
+# --- Formatting -------------------------------------------------------------
+#
+# Slack and Google Chat read the same dialect, and it is not markdown: bold is
+# *one* asterisk, italic is an underscore, strikethrough is one tilde, and a
+# link is <url|text>. Converting is not optional — sent as-is, every `**bold**`
+# the model writes arrives as literal asterisks.
+#
+# Telegram is not here: it renders a subset of HTML instead, which is a
+# different enough target that sharing this would mean a function with two
+# unrelated halves.
+
+_FENCE = re.compile(r"```[\w+-]*\n?([\s\S]*?)```")
+_SPAN = re.compile(r"`([^`\n]+)`")
+_LINK = re.compile(r"!?\[([^\]]*)\]\(\s*([^)\s]+)[^)]*\)")
+_HELD = re.compile(r"\x00(\d+)\x00")
+
+# Bold and headings both render as *one asterisk*, which is exactly the syntax
+# the italic rule below consumes. Left in the text, `**bold**` became `*bold*`
+# became `_bold_`. So their output is parked as a placeholder the italic pass
+# cannot see, the same trick code spans and links already use.
+_BOLD = [
+    re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$", re.M),   # heading
+    re.compile(r"(\*\*|__)(?=\S)(.+?)(?<=\S)\1"),      # bold
+]
+# Order still matters here: the bullet rule would otherwise eat the leading
+# asterisk of an italic run at the start of a line.
+_INLINE = [
+    (re.compile(r"^(\s*)[-*+][ \t]+", re.M), "\\1\u2022 "),            # bullet
+    (re.compile(r"~~(?=\S)(.+?)(?<=\S)~~"), r"~\1~"),                  # strike
+    (re.compile(r"(?<![\w*])\*(?=\S)([^*\n]+?)(?<=\S)\*(?![\w*])"), r"_\1_"),  # italic
+]
+
+
+def starred_markdown(text: str, escape: "Callable[[str], str]") -> str:
+    """`text` in the *bold* / _italic_ dialect Slack and Google Chat share.
+
+    `escape` is what differs between them: Slack reads `&`, `<` and `>` as
+    markup in ordinary text and Google Chat does not, so each passes its own
+    (or `str` for none).
+
+    Code and links are lifted out and rendered before the escape pass, so
+    markup inside a code block is shown rather than interpreted.
+    """
+    held: list[str] = []
+
+    def hold(rendered: str) -> str:
+        held.append(rendered)
+        return f"\x00{len(held) - 1}\x00"
+
+    text = _FENCE.sub(lambda m: hold(f"```\n{escape(m.group(1).strip())}\n```"), text)
+    text = _SPAN.sub(lambda m: hold(f"`{escape(m.group(1))}`"), text)
+    text = _LINK.sub(
+        lambda m: hold(f"<{escape(m.group(2))}|{escape(m.group(1)) or 'link'}>"), text
+    )
+    text = escape(text)
+    for pattern in _BOLD:
+        # The last group is the content either way: the heading pattern has one
+        # group, the bold pattern's second group is the text inside the markers.
+        text = pattern.sub(lambda m: hold(f"*{m.group(m.re.groups)}*"), text)
+    for pattern, replacement in _INLINE:
+        text = pattern.sub(replacement, text)
+    return _HELD.sub(lambda m: held[int(m.group(1))], text)

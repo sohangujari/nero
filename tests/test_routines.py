@@ -10,7 +10,7 @@ import plistlib
 import pytest
 from typer.testing import CliRunner
 
-from nero import cli
+from nero import cli, routines
 from nero.config.manager import ConfigManager
 from nero.config.schema import NeroConfig, RoutineConfig
 from nero.routines import (
@@ -101,6 +101,10 @@ class TestInstallUninstall:
 
     def test_launchctl_is_invoked_but_never_the_real_binary(self, tmp_path, monkeypatch):
         calls = []
+        # Pinned to darwin: launchd is darwin-only, so on Linux and Windows
+        # install_routine returns before it ever reaches launchctl. Without
+        # this the test asserts on the ambient OS and passes only on a Mac.
+        monkeypatch.setattr(routines.sys, "platform", "darwin")
         monkeypatch.setattr(
             "nero.routines._run_launchctl",
             lambda *args: calls.append(args) or _fake_completed(0),
@@ -116,9 +120,26 @@ class TestInstallUninstall:
             calls.append(args)
             return _fake_completed(0 if args[0] == "load" else 1)
 
+        monkeypatch.setattr(routines.sys, "platform", "darwin")
         monkeypatch.setattr("nero.routines._run_launchctl", fake)
         install_routine("morning", _routine(), "/usr/local/bin/nero", tmp_path)
         assert [c[0] for c in calls] == ["bootstrap", "load"]
+
+    def test_off_darwin_the_plist_is_written_and_loading_is_skipped(
+        self, tmp_path, monkeypatch
+    ):
+        """What every Linux and Windows user actually gets, and what nothing
+        tested until these two above turned out to be Mac-only."""
+        calls = []
+        monkeypatch.setattr(routines.sys, "platform", "linux")
+        monkeypatch.setattr(
+            "nero.routines._run_launchctl",
+            lambda *args: calls.append(args) or _fake_completed(0),
+        )
+        message = install_routine("morning", _routine(), "/usr/local/bin/nero", tmp_path)
+        assert plist_path("morning", tmp_path).exists()
+        assert calls == []
+        assert "darwin-only" in message
 
     def test_is_installed_reflects_plist_presence(self, tmp_path, monkeypatch):
         monkeypatch.setattr("nero.routines._run_launchctl", lambda *args: _fake_completed(0))

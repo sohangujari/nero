@@ -3,6 +3,8 @@ import contextlib
 import json
 import logging
 import os
+import pathlib
+import re
 import signal
 import sys
 import threading
@@ -43,6 +45,8 @@ from nero.llm import ollama, openai_compat, providers
 from nero.llm.client import LLMClient
 from nero.memory.embeddings import Embedder
 from nero.memory.facts import FactStore, default_facts_path
+from nero.memory.playbooks import PlaybookStore
+from nero import learn as nero_learn
 from nero.memory.history_store import HistoryStore, default_history_path
 from nero.memory.notes import NoteIndex, default_notes_index_path
 from nero.security import denylisted
@@ -79,6 +83,14 @@ discord_app = typer.Typer(invoke_without_command=True, help="Talk to Nero Agent 
 app.add_typer(discord_app, name="discord")
 slack_app = typer.Typer(invoke_without_command=True, help="Talk to Nero Agent from Slack.")
 app.add_typer(slack_app, name="slack")
+googlechat_app = typer.Typer(
+    invoke_without_command=True, help="Talk to Nero Agent from Google Chat."
+)
+app.add_typer(googlechat_app, name="googlechat")
+playbooks_app = typer.Typer(
+    invoke_without_command=True, help="Procedures Nero has learned from what it has done."
+)
+app.add_typer(playbooks_app, name="playbooks")
 approvals_app = typer.Typer(
     invoke_without_command=True, help="Review actions routines queued for approval."
 )
@@ -817,6 +829,45 @@ def _slack_channel() -> _Channel:
     )
 
 
+def _googlechat_bot(manager: ConfigManager):
+    from nero.googlechat import GoogleChatBot, GoogleChatError
+
+    key = manager.get_googlechat_key()
+    section = manager.load().googlechat
+    if not key or not section.project_id or not section.subscription_id:
+        return None
+    try:
+        return GoogleChatBot(key, section.project_id, section.subscription_id)
+    except GoogleChatError:
+        # A stored key that no longer parses is the same situation as no key:
+        # the caller says "not set up", which is the actionable message.
+        logger.debug("stored Google Chat key is unusable", exc_info=True)
+        return None
+
+
+def _googlechat_channel() -> _Channel:
+    from nero import googlechat as googlechat_bridge
+
+    return _Channel(
+        name="googlechat",
+        label="Google Chat",
+        setup_help=(
+            "Google Chat needs more setting up than the others, because it has "
+            "no bot token. In the Google Cloud console:\n"
+            "  1. Enable the [bold]Google Chat API[/bold] and [bold]Pub/Sub[/bold].\n"
+            "  2. Create a [bold]service account[/bold] and download its JSON key.\n"
+            "  3. Create a Pub/Sub [bold]topic[/bold] and a [bold]subscription[/bold] "
+            "on it, and give the service account the Pub/Sub Subscriber role.\n"
+            "  4. In the Chat API config, set Connection settings to "
+            "[bold]Cloud Pub/Sub[/bold] and point it at that topic.\n"
+            "Then paste the whole JSON key file below."
+        ),
+        connect=_googlechat_bot,
+        serve=googlechat_bridge.serve,
+        error=googlechat_bridge.GoogleChatError,
+    )
+
+
 def _allowed_peers(manager: ConfigManager, channel: str) -> set[str]:
     """The paired channels, re-read from disk. Never raises: a bridge is a
     long-running server, and a config the user is mid-edit must not stop it."""
@@ -1098,6 +1149,338 @@ def slack_install() -> None:
 def slack_uninstall() -> None:
     """Stop the background Slack bridge and remove its launchd agent."""
     console.print(routines.uninstall_bridge(routines.default_agents_dir(), "slack"))
+
+
+# --- Learning ---------------------------------------------------------------
+
+
+def _review_client(manager: ConfigManager, config: NeroConfig):
+    """A client for the review pass, with no skills offered.
+
+    Deliberately built with an empty registry rather than the session's one: a
+    review reads an audit log full of commands Nero has run and asks a model to
+    summarise them, and that model must not be one step away from running any
+    of them. No tools offered means none can be called.
+    """
+    from nero.skills.registry import SkillRegistry
+
+    api_key = manager.get_api_key(config.llm.provider)
+    return LLMClient(
+        config=config.llm,
+        assistant_name=config.assistant.name,
+        registry=SkillRegistry([]),
+        api_key=api_key,
+    )
+
+
+def _ask_once(client) -> "Callable[[str], str | None]":
+    """One question, one answer, no conversation kept between them.
+
+    Each candidate procedure is judged on its own evidence; carrying the
+    previous one into the next prompt is how three habits turn into three
+    variations of the same playbook.
+    """
+
+    def ask(prompt: str) -> str | None:
+        parts: list[str] = []
+        client.send([{"role": "user", "content": prompt}], parts.append)
+        return "".join(parts)
+
+    return ask
+
+
+@app.command()
+def learn(
+    quiet: bool = typer.Option(False, "--quiet", help="Print only what changed. For launchd."),
+    install: bool = typer.Option(False, "--install", help="Run this review daily, at login."),
+    uninstall: bool = typer.Option(False, "--uninstall", help="Stop running it daily."),
+    threshold: int = typer.Option(0, "--threshold", help="Times work must recur. 0 uses config."),
+) -> None:
+    """Review what Nero has done and write down what keeps coming back.
+
+    Reads the audit log, finds recurring work, and saves each one as a playbook
+    Nero can follow next time. Nothing here executes anything: a playbook is
+    text, and acting on it still goes through the normal skill gate.
+    """
+    manager = ConfigManager()
+    config = _load_or_exit(manager)
+
+    if uninstall:
+        console.print(routines.uninstall_review(routines.default_agents_dir()))
+        return
+    if install:
+        try:
+            message = routines.install_review(
+                routines.resolve_executable(), routines.default_agents_dir()
+            )
+        except routines.RoutineError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1) from exc
+        console.print(message)
+        console.print("[dim]Stop it with [bold]nero learn --uninstall[/bold].[/dim]")
+        return
+
+    if not config.memory.learning:
+        console.print(
+            "[yellow]Learning is switched off.[/yellow] Turn it on with "
+            "[bold]nero config set memory.learning true[/bold]."
+        )
+        raise typer.Exit(1)
+
+    store = PlaybookStore()
+    if not quiet:
+        console.print("[dim]Reviewing what Nero has done…[/dim]")
+    result = nero_learn.review(
+        AuditLog(default_audit_path()),
+        store,
+        _ask_once(_review_client(manager, config)),
+        threshold=threshold or config.memory.learn_after,
+    )
+    console.print(result.summary())
+    for name in result.created:
+        console.print(f"  [green]new[/green]      {name}")
+    for name in result.revised:
+        console.print(f"  [cyan]revised[/cyan]  {name}")
+    if result.nudges and not quiet:
+        console.print("\n[bold]Worth knowing[/bold]")
+        for nudge in result.nudges:
+            console.print(f"  [dim]•[/dim] {escape(nudge)}")
+    if result.changed and not quiet:
+        console.print(
+            "\n[dim]See them with [bold]nero playbooks[/bold]. "
+            "Anything wrong can be edited or removed.[/dim]"
+        )
+
+
+@playbooks_app.callback()
+def playbooks_main(ctx: typer.Context) -> None:
+    """Procedures Nero has learned from what it has done."""
+    if ctx.invoked_subcommand is not None:
+        return
+    books = PlaybookStore().all()
+    if not books:
+        console.print(
+            "[dim]Nothing learned yet. Run [/dim][bold]nero learn[/bold][dim] after "
+            "Nero has done some work.[/dim]"
+        )
+        return
+    table = Table(title="nero playbooks", show_header=True)
+    table.add_column("Name")
+    table.add_column("When it applies")
+    table.add_column("Ver", justify="right")
+    table.add_column("Used", justify="right")
+    for book in books:
+        table.add_row(book.name, book.task, f"v{book.version}", str(book.uses))
+    console.print(table)
+    console.print("[dim]nero playbooks show <name> for the steps.[/dim]")
+
+
+@playbooks_app.command("show")
+def playbooks_show(name: str) -> None:
+    """Print one playbook exactly as Nero sees it."""
+    book = PlaybookStore().get(name)
+    if book is None:
+        console.print(f"[red]No playbook named {name!r}.[/red]")
+        raise typer.Exit(1)
+    console.print(f"[bold]{book.name}[/bold] [dim]v{book.version}, used {book.uses}x[/dim]\n")
+    console.print(escape(book.render()))
+
+
+@playbooks_app.command("edit")
+def playbooks_edit(name: str) -> None:
+    """Open a playbook in $EDITOR. Saving writes a new version."""
+    import os
+    import subprocess
+    import tempfile
+
+    store = PlaybookStore()
+    book = store.get(name)
+    if book is None:
+        console.print(f"[red]No playbook named {name!r}.[/red]")
+        raise typer.Exit(1)
+    editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "nano"
+    # The round-trip format is the file itself: two labelled sections, so an
+    # edit cannot silently lose the "avoid" half by leaving it blank.
+    body = f"# {book.name}\nTASK: {book.task}\n\nSTEPS:\n{book.steps}\n\nAVOID:\n{book.avoid}\n"
+    with tempfile.NamedTemporaryFile("w+", suffix=".txt", delete=False) as handle:
+        handle.write(body)
+        path = handle.name
+    try:
+        subprocess.run([editor, path], check=False)
+        edited = pathlib.Path(path).read_text()
+    except OSError as exc:
+        console.print(f"[red]Could not edit: {exc}[/red]")
+        raise typer.Exit(1) from exc
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+    parsed = _parse_playbook_file(edited)
+    if parsed is None:
+        console.print("[red]Could not read that back.[/red] Nothing was changed.")
+        raise typer.Exit(1)
+    saved = store.save(book.name, *parsed, note="edited by hand")
+    console.print(f"[green]Saved {saved.name} v{saved.version}.[/green]")
+
+
+def _parse_playbook_file(text: str) -> tuple[str, str, str] | None:
+    """(task, steps, avoid) from the edit format, or None if it is unusable.
+
+    None rather than a partial parse: writing back a playbook with an empty
+    `steps` because a heading was renamed would destroy the thing being edited,
+    and the previous version is only recoverable if this refuses.
+    """
+    task = re.search(r"^TASK:\s*(.+)$", text, re.M)
+    steps = re.search(r"^STEPS:\s*\n([\s\S]*?)(?=^AVOID:|\Z)", text, re.M)
+    avoid = re.search(r"^AVOID:\s*\n([\s\S]*)", text, re.M)
+    if not task or not steps or not steps.group(1).strip():
+        return None
+    return (
+        task.group(1).strip(),
+        steps.group(1).strip(),
+        avoid.group(1).strip() if avoid else "",
+    )
+
+
+@playbooks_app.command("history")
+def playbooks_history(name: str) -> None:
+    """Every earlier version of a playbook."""
+    store = PlaybookStore()
+    revisions = store.history(name)
+    current = store.get(name)
+    if current is None and not revisions:
+        console.print(f"[red]No playbook named {name!r}.[/red]")
+        raise typer.Exit(1)
+    table = Table(title=f"{name} history", show_header=True)
+    table.add_column("Version")
+    table.add_column("When")
+    table.add_column("Why")
+    if current is not None:
+        table.add_row(f"v{current.version} (current)", current.updated_at, "")
+    for revision in revisions:
+        table.add_row(f"v{revision.version}", revision.saved_at, revision.note)
+    console.print(table)
+    console.print(f"[dim]Bring one back: nero playbooks restore {name} <version>[/dim]")
+
+
+@playbooks_app.command("restore")
+def playbooks_restore(name: str, version: int) -> None:
+    """Bring an earlier version back, as a new version."""
+    restored = PlaybookStore().restore(name, version)
+    if restored is None:
+        console.print(f"[red]{name!r} has no version {version}.[/red]")
+        raise typer.Exit(1)
+    console.print(
+        f"[green]Restored {name} v{version} as v{restored.version}.[/green] "
+        "[dim]Nothing was lost — the version you replaced is still in the history.[/dim]"
+    )
+
+
+@playbooks_app.command("forget")
+def playbooks_forget(
+    name: str,
+    keep_history: bool = typer.Option(False, "--keep-history", help="Leave earlier versions."),
+) -> None:
+    """Delete a playbook Nero should stop following."""
+    if PlaybookStore().forget(name, keep_history=keep_history):
+        console.print(f"[green]Forgot {name}.[/green]")
+    else:
+        console.print(f"[yellow]No playbook named {name!r}.[/yellow]")
+
+
+@googlechat_app.callback()
+def googlechat_main(ctx: typer.Context) -> None:
+    """Talk to Nero Agent from Google Chat."""
+    if ctx.invoked_subcommand is None:
+        _run_channel(_googlechat_channel())
+
+
+@googlechat_app.command("setup")
+def googlechat_setup() -> None:
+    """Store a Google Cloud service account key and its Pub/Sub coordinates."""
+    manager = ConfigManager()
+    if not manager.exists():
+        _first_time_setup(manager)
+    channel = _googlechat_channel()
+    console.print(channel.setup_help + "\n")
+
+    section = manager.load().googlechat
+    project = Prompt.ask(
+        "Google Cloud project id", default=section.project_id or "", console=console
+    ).strip()
+    subscription = Prompt.ask(
+        "Pub/Sub subscription id", default=section.subscription_id or "", console=console
+    ).strip()
+    if not project or not subscription:
+        console.print("[yellow]Both are needed — setup cancelled.[/yellow]")
+        raise typer.Exit(1)
+
+    console.print(
+        "\n[dim]Now the service account JSON. Paste the whole file, then a "
+        "blank line.[/dim]"
+    )
+    lines: list[str] = []
+    while True:
+        try:
+            line = input()
+        except EOFError:
+            break
+        if not line.strip() and lines:
+            break
+        lines.append(line)
+    key = "\n".join(lines).strip()
+    if not key:
+        if not manager.get_googlechat_key():
+            console.print("[yellow]Nothing entered — setup cancelled.[/yellow]")
+            raise typer.Exit(1)
+        key = manager.get_googlechat_key()
+
+    manager.set_value("googlechat.project_id", project)
+    manager.set_value("googlechat.subscription_id", subscription)
+    manager.set_googlechat_key(key)
+
+    bot = _googlechat_bot(manager)
+    if bot is None:
+        console.print("[red]That key could not be read back.[/red] Nothing is running yet.")
+        raise typer.Exit(1)
+    try:
+        bot.check()
+    except ChannelError as exc:
+        console.print(f"[red]{escape(str(exc))}[/red]")
+        raise typer.Exit(1) from exc
+    finally:
+        bot.close()
+    console.print(f"[green]Connected as {bot.username()}.[/green]")
+    console.print(
+        "\nNow start it with [bold]nero googlechat[/bold] and message the app in "
+        "Google Chat. It replies with a pairing code — approve that with "
+        "[bold]nero googlechat approve <code>[/bold]."
+    )
+
+
+@googlechat_app.command("approve")
+def googlechat_approve(
+    code: str = typer.Argument(..., help="The six-digit code the app sent you in Google Chat."),
+) -> None:
+    """Pair the space that was given this code."""
+    _approve_peer(_googlechat_channel(), code)
+
+
+@googlechat_app.command("pending")
+def googlechat_pending() -> None:
+    """Spaces waiting to be paired. Codes are shown in Google Chat, never here."""
+    _pending_peers(_googlechat_channel())
+
+
+@googlechat_app.command("install")
+def googlechat_install() -> None:
+    """Keep the Google Chat bridge running: at login, and again if it stops."""
+    _install_channel(_googlechat_channel())
+
+
+@googlechat_app.command("uninstall")
+def googlechat_uninstall() -> None:
+    """Stop the background Google Chat bridge and remove its launchd agent."""
+    console.print(routines.uninstall_bridge(routines.default_agents_dir(), "googlechat"))
 
 
 def _allowed_chats(manager: ConfigManager) -> set[int]:
@@ -1535,7 +1918,7 @@ def _start_bridges(manager: ConfigManager, config: NeroConfig, loop) -> list[thr
     telegram = _start_telegram_bridge(manager, config, loop)
     if telegram is not None:
         started.append((f"Telegram ({len(config.telegram.allowed_chat_ids)} paired)", telegram))
-    for build in (_discord_channel, _slack_channel):
+    for build in (_discord_channel, _slack_channel, _googlechat_channel):
         channel = build()
         try:
             stop = _start_channel_bridge(manager, config, loop, channel)
@@ -1573,7 +1956,9 @@ def _build_chat_loop(manager, config, api_key, registry, mcp_connections):
     )
     loop = ChatLoop(
         client, console=console, assistant_name=config.assistant.name,
-        history=_build_history(config), fallback_clients=fallback_clients,
+        history=_build_history(config),
+        playbooks=PlaybookStore() if config.memory.learning else None,
+        fallback_clients=fallback_clients,
         registry=registry, security=config.security,
         compact_after_messages=config.memory.compact_after_messages,
         route_by=config.llm.route_by, quality_rank=config.llm.quality_rank,
@@ -1939,9 +2324,15 @@ def config_spotify(
 @config_app.command("set-key")
 def config_set_key(
     provider: str,
-    slot: int = typer.Option(1, "--slot", min=1, help="Key slot to write (1 = base)."),
+    slot: int = typer.Option(
+        1, "--slot", min=1, help="Only for keeping several keys and rotating them."
+    ),
 ) -> None:
-    """Store an API key for `provider`, optionally in rotation slot N (> 1)."""
+    """Set the API key for `provider`, replacing the one already stored."""
+    # Slots exist for holding several keys for one provider and rotating
+    # through them on a rate limit. They are never mentioned unless you ask for
+    # one: printing "(slot 1)" at someone replacing their only key makes a
+    # one-step job look like it has a concept in it.
     if provider not in providers.names():
         console.print(f"[red]Unknown provider: {provider}[/red]")
         raise typer.Exit(1)
@@ -1949,12 +2340,23 @@ def config_set_key(
     if not manager.provider_needs_key(provider):
         console.print(f"[red]{provider} does not use an API key.[/red]")
         raise typer.Exit(1)
-    key = typer.prompt(f"{provider} API key (slot {slot})", hide_input=True).strip()
+
+    where = "" if slot == 1 else f" (slot {slot})"
+    replacing = len(manager.get_api_keys(provider)) >= slot
+    if replacing:
+        console.print(f"[dim]Replacing the {provider} key{where or ' already stored'}.[/dim]")
+    # default="" so a blank line returns rather than re-prompting: without it
+    # click keeps asking, and there is no way out of a key prompt you opened by
+    # mistake except Ctrl+C, which looks like it might have half-written one.
+    key = typer.prompt(
+        f"{provider} API key{where}", hide_input=True, default="", show_default=False
+    ).strip()
     if not key:
-        console.print("[red]No key entered.[/red]")
+        console.print("[dim]Nothing entered — the stored key is unchanged.[/dim]")
         raise typer.Exit(1)
     manager.set_api_key(provider, key, slot=slot)
-    console.print(f"[green]Saved key for {provider} (slot {slot}).[/green]")
+    verb = "Replaced" if replacing else "Saved"
+    console.print(f"[green]{verb} the {provider} key{where}.[/green]")
 
 
 def _warn_if_no_tool_support(manager: ConfigManager) -> None:

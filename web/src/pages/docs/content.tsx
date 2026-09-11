@@ -59,10 +59,23 @@ const CHANNELS: Row[] = [
   { cmd: "nero telegram setup", does: "Store a bot token and pair the chat allowed to use it." },
   { cmd: "nero discord setup", does: "Store a Discord bot token." },
   { cmd: "nero slack setup", does: "Store Slack's app token and bot token." },
+  { cmd: "nero googlechat setup", does: "Store a service account key and its Pub/Sub coordinates." },
   { cmd: "nero <channel> pending", does: "Who is waiting to be paired. Codes are shown in the chat app, never here." },
   { cmd: "nero <channel> approve <code>", does: "Pair whoever was given this code." },
   { cmd: "nero <channel> install", does: "Keep that bridge running: at login, and again if it ever stops." },
   { cmd: "nero <channel> uninstall", does: "Stop the background bridge and remove its launchd agent." },
+]
+
+const LEARNING: Row[] = [
+  { cmd: "nero learn", does: "Review what Nero has done and write down what keeps coming back." },
+  { cmd: "nero learn --install", does: "Run that review every night, at 03:20." },
+  { cmd: "nero learn --uninstall", does: "Stop running it." },
+  { cmd: "nero playbooks", does: "Every procedure Nero has learned, with how often each is used." },
+  { cmd: "nero playbooks show <name>", does: "One procedure, exactly as Nero sees it." },
+  { cmd: "nero playbooks edit <name>", does: "Open it in $EDITOR. Saving writes a new version." },
+  { cmd: "nero playbooks history <name>", does: "Every earlier version, and why it changed." },
+  { cmd: "nero playbooks restore <name> <v>", does: "Bring an earlier version back as a new one." },
+  { cmd: "nero playbooks forget <name>", does: "Delete a procedure Nero should stop following." },
 ]
 
 const AUTOMATION: Row[] = [
@@ -119,9 +132,14 @@ const SETTINGS: Row[] = [
   { cmd: "voice.tts.voice_id", does: "Which synthesized voice speaks." },
   { cmd: "security.command_denylist", does: "Substrings run_shell will never execute." },
   { cmd: "security.max_cost_usd_per_session", does: "Hard ceiling on spend. 0 means no ceiling." },
+  { cmd: "memory.learning", does: "Carry a matching learned procedure on the turn." },
+  { cmd: "memory.learn_after", does: "Times work must recur before it is written down." },
   { cmd: "telegram.allowed_chat_ids", does: "Paired Telegram chats. Empty answers nobody." },
   { cmd: "discord.allowed_channel_ids", does: "Paired Discord channels. Empty answers nobody." },
   { cmd: "slack.allowed_channel_ids", does: "Paired Slack channels. Empty answers nobody." },
+  { cmd: "googlechat.allowed_channel_ids", does: "Paired Google Chat spaces. Empty answers nobody." },
+  { cmd: "googlechat.project_id", does: "The Google Cloud project holding the Pub/Sub subscription." },
+  { cmd: "googlechat.subscription_id", does: "The subscription Chat events are pulled from." },
 ]
 
 /* ---------------------------------------------------------- primitives --- */
@@ -381,7 +399,7 @@ nero config set llm.model qwen3`}</Cmd>
     headings: [
       { id: "sessions", label: "Sessions" },
       { id: "voice", label: "Voice" },
-      { id: "phone", label: "Telegram, Discord and Slack" },
+      { id: "phone", label: "Chat apps" },
     ],
     body: (
       <>
@@ -399,9 +417,9 @@ nero config set llm.model qwen3`}</Cmd>
           over a reply to interrupt it. A waveform shows the level it is hearing.
         </p>
 
-        <H3 id="phone">Telegram, Discord and Slack</H3>
+        <H3 id="phone">Telegram, Discord, Slack and Google Chat</H3>
         <p>
-          All three work the same way, and all three connect outward. Nothing listens for inbound
+          All four work the same way, and all three connect outward. Nothing listens for inbound
           connections and there is no endpoint to host.
         </p>
         <Cards
@@ -409,12 +427,19 @@ nero config set llm.model qwen3`}</Cmd>
             { title: "Telegram", body: "Create a bot with BotFather and copy the token." },
             { title: "Discord", body: "Create an app in the developer portal. Nero answers DMs." },
             { title: "Slack", body: "Enable Socket Mode. Slack gives you two tokens, and both are needed." },
+            { title: "Google Chat", body: "A service account plus a Pub/Sub subscription to pull from." },
           ]}
         />
         <Cmd>{`nero discord setup
 nero discord            # message the bot, it replies with a code
 nero discord approve 123456
 nero discord install    # keep it running at login`}</Cmd>
+        <p>
+          Google Chat is the one with more setting up, and not by choice. It has no bot token: an
+          app authenticates as a Google Cloud service account, and the only delivery route that
+          works from a laptop is pulling a Pub/Sub subscription. That is a service account, a topic
+          and a subscription before the first message arrives. The setup command lists them.
+        </p>
         <Callout tone="note">
           Only channels you pair can talk to Nero, and pairing takes both devices: the code is shown
           only in the chat app, and approving it happens only at this terminal. An empty allowlist
@@ -436,6 +461,7 @@ nero discord install    # keep it running at login`}</Cmd>
       { id: "cmd-config", label: "Configuration" },
       { id: "cmd-memory", label: "Memory and history" },
       { id: "cmd-telegram", label: "Chat apps" },
+      { id: "cmd-learning", label: "Learning" },
       { id: "cmd-automation", label: "Routines and MCP" },
     ],
     body: (
@@ -453,6 +479,9 @@ nero discord install    # keep it running at login`}</Cmd>
 
         <H3 id="cmd-telegram">Chat apps</H3>
         <Commands rows={CHANNELS} />
+
+        <H3 id="cmd-learning">Learning</H3>
+        <Commands rows={LEARNING} />
 
         <H3 id="cmd-automation">Routines, approvals and MCP</H3>
         <Commands rows={AUTOMATION} />
@@ -569,6 +598,74 @@ nero facts forget favorite_color`}</Cmd>
           way to tell a real action from a narrated one.
         </p>
         <Cmd>nero history -n 50</Cmd>
+      </>
+    ),
+  },
+  {
+    id: "learning",
+    title: "Learning",
+    lede: "Nero writing down what keeps coming back.",
+    group: "Reference",
+    headings: [
+      { id: "playbooks", label: "Playbooks" },
+      { id: "how-it-learns", label: "How it learns" },
+      { id: "read-never-run", label: "Read, never run" },
+      { id: "correcting", label: "Correcting it" },
+    ],
+    body: (
+      <>
+        <H3 id="playbooks">Playbooks</H3>
+        <p>
+          A playbook is a procedure Nero has learned: when it applies, the steps that worked, and
+          what to avoid. When a matching request comes in, the playbook is in the prompt, so Nero
+          does the job the way it went right last time instead of working it out again.
+        </p>
+        <Cmd>{`nero playbooks
+nero playbooks show deploy-docs`}</Cmd>
+
+        <H3 id="how-it-learns">How it learns</H3>
+        <p>
+          Nero already logs every action it takes. The review reads that log, finds work that has
+          happened at least three times, and writes each one down. Because the log was being
+          written anyway, an ordinary turn pays nothing for this.
+        </p>
+        <Cmd>{`nero learn              # review now
+nero learn --install    # and every night at 03:20`}</Cmd>
+        <p>
+          Seeing the same work again revises the existing playbook rather than adding a second one,
+          so a procedure gets better over time instead of multiplying.
+        </p>
+
+        <H3 id="read-never-run">Read, never run</H3>
+        <Callout tone="note">
+          A playbook is text Nero reads. It is not code and nothing executes it. When a step says to
+          run a command, doing so still means calling a skill, which is off by default, asks first,
+          is checked against your denylist, and is logged.
+        </Callout>
+        <p>
+          That is what makes learning safe to leave on: a wrong playbook is a wrong suggestion, not
+          a wrong command. The reviewer itself is given no skills at all, so a model summarising
+          commands out of your log is never one step from running them.
+        </p>
+        <p>
+          Facts are the one thing the review will not write on its own. A fact goes into every
+          prompt of every turn, which is a much wider blast radius than a procedure that only
+          appears when it matches, so an observed preference comes back as a note and you decide.
+        </p>
+
+        <H3 id="correcting">Correcting it</H3>
+        <p>
+          Nothing Nero learns is permanent, and no version is ever lost. Editing writes a new
+          version, and restoring an old one is itself undoable.
+        </p>
+        <Cmd>{`nero playbooks edit deploy-docs
+nero playbooks history deploy-docs
+nero playbooks restore deploy-docs 2
+nero playbooks forget deploy-docs`}</Cmd>
+        <p>
+          Turn the whole thing off with <K>nero config set memory.learning false</K>. Nothing is
+          carried on a turn after that.
+        </p>
       </>
     ),
   },
