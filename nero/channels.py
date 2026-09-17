@@ -232,11 +232,23 @@ def split(text: str, limit: int) -> list[str]:
 # text inside it, giving `<b><b>Title</b></b>` on Telegram and `***Title***` on
 # Slack — which renders as literal asterisks rather than bold.
 _EMPHASIS = re.compile(r"^(\*\*|__|\*|_)(.*)\1$")
+# Bold markers anywhere inside a line, not just wrapping it.
+_INNER_BOLD = re.compile(r"(\*\*|__)(?=\S)(.+?)(?<=\S)\1")
 
 
-def strip_emphasis(text: str) -> str:
-    """`text` with one layer of surrounding markdown emphasis removed."""
-    text = text.strip()
+def heading_text(text: str) -> str:
+    """Heading text with its bold markers removed.
+
+    A heading is already rendered bold, so bold *inside* one is meaningless in
+    every dialect and actively wrong in two of them. Slack and Google Chat have
+    no nested emphasis: `### Buy **now** today` left the inner markers alone and
+    shipped literal asterisks to the reader, because the heading rule had
+    already parked the whole line where the bold rule could not reach it.
+    Telegram merely produced a redundant `<b>` inside a `<b>`.
+
+    Italic and strikethrough are left in place — those do combine with bold.
+    """
+    text = _INNER_BOLD.sub(r"\2", text.strip())
     match = _EMPHASIS.match(text)
     return match.group(2).strip() if match else text
 
@@ -250,17 +262,23 @@ _HELD = re.compile(r"\x00(\d+)\x00")
 # the italic rule below consumes. Left in the text, `**bold**` became `*bold*`
 # became `_bold_`. So their output is parked as a placeholder the italic pass
 # cannot see, the same trick code spans and links already use.
-_BOLD = [
-    re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$", re.M),   # heading
-    re.compile(r"(\*\*|__)(?=\S)(.+?)(?<=\S)\1"),      # bold
-]
-# Order still matters here: the bullet rule would otherwise eat the leading
-# asterisk of an italic run at the start of a line.
-_INLINE = [
-    (re.compile(r"^(\s*)[-*+][ \t]+", re.M), "\\1\u2022 "),            # bullet
+_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$", re.M)
+_BOLD = re.compile(r"(\*\*|__)(?=\S)(.+?)(?<=\S)\1")
+_BULLET = (re.compile(r"^(\s*)[-*+][ \t]+", re.M), "\\1\u2022 ")
+# Applied both to the body and, separately, inside a heading or a bold run —
+# anything parked as a placeholder is invisible to a later pass, so a heading
+# that was held before these ran shipped its `*italic*` and `~~strike~~` to the
+# reader as literal punctuation.
+_EMPHASIS_RULES = [
     (re.compile(r"~~(?=\S)(.+?)(?<=\S)~~"), r"~\1~"),                  # strike
     (re.compile(r"(?<![\w*])\*(?=\S)([^*\n]+?)(?<=\S)\*(?![\w*])"), r"_\1_"),  # italic
 ]
+
+
+def _emphasis(text: str) -> str:
+    for pattern, replacement in _EMPHASIS_RULES:
+        text = pattern.sub(replacement, text)
+    return text
 
 
 def starred_markdown(text: str, escape: "Callable[[str], str]") -> str:
@@ -285,12 +303,13 @@ def starred_markdown(text: str, escape: "Callable[[str], str]") -> str:
         lambda m: hold(f"<{escape(m.group(2))}|{escape(m.group(1)) or 'link'}>"), text
     )
     text = escape(text)
-    for pattern in _BOLD:
-        # The last group is the content either way: the heading pattern has one
-        # group, the bold pattern's second group is the text inside the markers.
-        text = pattern.sub(
-            lambda m: hold(f"*{strip_emphasis(m.group(m.re.groups))}*"), text
-        )
-    for pattern, replacement in _INLINE:
-        text = pattern.sub(replacement, text)
+    # Both wrap their content in a single asterisk, and both park the result so
+    # the italic rule below cannot mistake that asterisk for an italic marker.
+    # Their content is emphasised here instead, since nothing reaches it later.
+    text = _HEADING.sub(lambda m: hold(f"*{_emphasis(heading_text(m.group(1)))}*"), text)
+    text = _BOLD.sub(lambda m: hold(f"*{_emphasis(m.group(2))}*"), text)
+    pattern, replacement = _BULLET
+    # Before the italic rule, which would otherwise eat a bullet's asterisk.
+    text = pattern.sub(replacement, text)
+    text = _emphasis(text)
     return _HELD.sub(lambda m: held[int(m.group(1))], text)

@@ -41,6 +41,7 @@ class SkillRegistry:
         # via reset_turn(). Exposed read-only via `tainted` so a confirm
         # callback built before the registry exists can still consult it.
         self._tainted = False
+        self._called: set[str] = set()
 
     @property
     def tainted(self) -> bool:
@@ -50,9 +51,21 @@ class SkillRegistry:
         self._tainted = True
 
     def reset_turn(self) -> None:
-        """Clear per-turn taint. Called by ChatLoop at the start of each
-        user turn."""
+        """Clear per-turn taint and the record of what ran. Called by ChatLoop
+        at the start of each user turn."""
         self._tainted = False
+        self._called = set()
+
+    @property
+    def called(self) -> set[str]:
+        """Skills that actually ran during this turn.
+
+        The only reliable answer to "did it really do that?". A model will
+        cheerfully write "I've set a reminder" having called nothing, and with
+        a polluted transcript it does so every time — measured at 0 tool calls
+        in 4 on qwen3.5:2b once two such replies were in its history.
+        """
+        return set(getattr(self, "_called", set()))
 
     def known_names(self) -> set[str]:
         return set(self._skills)
@@ -101,6 +114,9 @@ class SkillRegistry:
         return validate_arguments(skill.meta.input_schema, clean(skill.meta.input_schema, arguments))
 
     async def execute(self, name: str, arguments: dict | None, provider: str = "unknown") -> str:
+        if not hasattr(self, "_called"):
+            self._called = set()
+        self._called.add(name)
         result = await self._dispatch(name, arguments)
         self._record(name, arguments, result, provider)
         return result
@@ -287,6 +303,11 @@ def build_registry(
     )
     from nero.skills.memory.server import ForgetFactSkill, RecallFactsSkill, RememberFactSkill
     from nero.skills.notes.server import SearchNotesSkill
+    from nero.skills.reminders.server import (
+        CancelReminderSkill,
+        ListRemindersSkill,
+        RemindMeSkill,
+    )
     from nero.skills.open_app.server import CloseAppSkill, OpenAppSkill
     from nero.skills.open_website.server import OpenWebsiteSkill
     from nero.skills.play_music.server import PlayMusicSkill
@@ -296,6 +317,9 @@ def build_registry(
     from nero.skills.web.server import FetchWebPageSkill
 
     fact_store = FactStore(default_facts_path())
+    from nero.reminders import ReminderStore
+
+    reminder_store = ReminderStore()
     notes_index = (
         NoteIndex(default_notes_index_path(), config.memory.notes_dir, config.memory.notes_max_bytes)
         if config.memory.notes_dir
@@ -332,6 +356,9 @@ def build_registry(
         GitCommandSkill(security=config.security),
         RunPythonSkill(),
         RunJavascriptSkill(),
+        RemindMeSkill(reminder_store),
+        ListRemindersSkill(reminder_store),
+        CancelReminderSkill(reminder_store),
         RememberFactSkill(fact_store),
         RecallFactsSkill(fact_store),
         ForgetFactSkill(fact_store),

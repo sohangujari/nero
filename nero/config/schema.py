@@ -301,6 +301,9 @@ class SkillToggles(BaseModel):
     recall_facts: bool = True
     forget_fact: bool = False
     search_notes: bool = True
+    remind_me: bool = True
+    list_reminders: bool = True
+    cancel_reminder: bool = True
 
     # v1.7: git_command -> run_git, so every executor reads run_*. Renaming a
     # field of a model with extra="forbid" would otherwise refuse to load an

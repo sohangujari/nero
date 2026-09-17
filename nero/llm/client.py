@@ -191,11 +191,21 @@ class LLMClient:
             "Answer any question normally: maths, facts, explanations, jokes, "
             "casual conversation. You are a normal assistant and are never limited "
             "to one topic. Never say that you can only do one kind of task.\n\n"
-            "You also have a few tools for doing things on the user's computer. "
-            "Call a tool only when the user explicitly asks for that action — for "
-            'example "open Calculator" or "what\'s the weather in Paris". For any '
-            "other message, including ordinary questions, do not call any tool: "
-            "just reply with text.\n\n"
+            # "do not call any tool for ordinary questions" was too absolute.
+            # A question can only be answered honestly by looking something up
+            # — "what's on hacker news" — and the model obeyed the rule, then
+            # invented a reason: "I don't have a tool to browse the web", with
+            # web_search sitting in its own tool list. Measured on qwen3.5:2b
+            # over 16 such questions: 11 answered, 1 flat refusal. With the
+            # wording below: 12 answered, 0 refusals, and no change at all to
+            # the 18 ordinary-chat turns, which stayed tool-free in both.
+            "You also have a few tools: some act on the user's computer, others "
+            "look things up. Call one when the user asks for an action, or when "
+            "answering needs current information you cannot already have — news, "
+            "prices, scores, what is happening today. Do not call one for "
+            "conversation, arithmetic, opinions, or what you already know.\n\n"
+            "Never say you are unable to do something one of your tools does. "
+            "Use it instead.\n\n"
             "When you are not calling a tool, reply with plain text only — never "
             "write tool-call JSON as text. Keep replies concise.\n\n"
             "A <memory> block on a message is your own recollection of earlier "

@@ -12,8 +12,13 @@ from __future__ import annotations
 
 from rich.console import Console
 
-# Block letters, 37 columns wide. Measured rather than guessed: below the
-# threshold the drawing wraps and reads as noise.
+# The product is "Nero Agent", so the wordmark says so. Set as a lockup rather
+# than one line: the same block font across "NERO AGENT" measures 80 columns,
+# which wraps and mangles itself on the 80-column terminal it only just fits.
+# NERO reads at 36, and AGENT sits under its right edge.
+#
+# This is the product name and does not follow `assistant.name` — renaming your
+# assistant to "Jarvis" changes what it calls itself, not what it is.
 WORDMARK = r"""
  ███╗   ██╗███████╗██████╗  ██████╗
  ████╗  ██║██╔════╝██╔══██╗██╔═══██╗
@@ -21,6 +26,7 @@ WORDMARK = r"""
  ██║╚██╗██║██╔══╝  ██╔══██╗██║   ██║
  ██║ ╚████║███████╗██║  ██║╚██████╔╝
  ╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝ ╚═════╝
+                       A  G  E  N  T
 """
 MIN_WIDTH = 40
 
@@ -40,12 +46,16 @@ def render(
     `channels` is what is actually answering, not what exists — a name here
     means a message sent there gets a reply now.
     """
+    # "Nero Agent" is the product; `assistant_name` is what it answers to. They
+    # are only the same until someone renames their assistant, and the banner
+    # should keep saying which program this is.
+    named = "" if assistant_name.strip().lower() == "nero" else f", answering as {assistant_name}"
     wide = console.width >= MIN_WIDTH
     if wide:
         console.print(f"[bold cyan]{WORDMARK.rstrip()}[/bold cyan]")
-        console.print(f"[dim] {assistant_name} — your personal AI assistant[/dim]\n")
+        console.print(f"[dim] your personal AI assistant{named}[/dim]\n")
     else:
-        console.print(f"[bold cyan]{assistant_name}[/bold cyan]\n")
+        console.print(f"[bold cyan]Nero Agent[/bold cyan][dim]{named}[/dim]\n")
 
     offline = " [yellow](offline)[/yellow]" if mode == "offline" else ""
     # "terminal" is always true and always first: it is the thing the reader is

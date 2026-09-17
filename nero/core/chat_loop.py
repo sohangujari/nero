@@ -15,6 +15,8 @@ from rich.text import Text
 from nero.llm.ollama_adapter import OllamaModelError
 from nero.llm.routing import SessionStats, order_chain
 from nero.memory.playbooks import playbook_block
+from nero.reminders import claims_a_reminder
+from nero.skills.registry import SkillRegistry
 from nero.memory.recall import recall_block, trim_to_window
 from nero.spinner import Spinner
 
@@ -326,6 +328,19 @@ class ChatLoop:
                         if i == len(candidates) - 1:
                             raise
             self.cost_usd += getattr(used_client, "last_turn_cost", 0.0) or 0.0
+            # Before the reply is printed, persisted, or returned: a claimed
+            # reminder that was never set must not reach the user, and must not
+            # go into history where it teaches the model to claim it again.
+            if self.messages[-1].get("role") == "assistant":
+                corrected = self._salvage_reminder(history_text, self.messages[-1]["content"])
+                if corrected is not None:
+                    self.messages[-1] = {"role": "assistant", "content": corrected}
+                    # Marked as a correction in the terminal, where the model's
+                    # claim has already streamed past. Every other channel gets
+                    # only the return value, so they see this and nothing else.
+                    self.console.print(
+                        f"\n[yellow]Correction:[/yellow] {escape(corrected)}"
+                    )
             self.console.print()
             if self.history is not None and self.messages[-1].get("role") == "assistant":
                 # Persist only on success — past every rollback branch below.
@@ -418,6 +433,53 @@ class ChatLoop:
         # rich markup itself (only the surrounding [dim]...[/dim] tags should be).
         self.console.print(
             f"[dim]{escape(f'[trimmed {dropped} older messages — still searchable]')}[/dim]"
+        )
+
+    def _salvage_reminder(self, asked: str, reply: str) -> str | None:
+        """Turn a claimed-but-unset reminder into a real one, or into the truth.
+
+        The model reproduces its own earlier "I've set a reminder" instead of
+        calling the tool once a couple of them are in the transcript — measured
+        at 0 calls in 4 on qwen3.5:2b, claiming success every time. A prompt
+        rule did nothing (0 in 4 with it too).
+
+        What does work is asking again with nothing else in the way: one tool,
+        no history, one job. That was right 15 times out of 15 on the same
+        model. So the claim is checked against what actually ran, and if it was
+        empty the request is re-put on its own.
+
+        Returns the replacement reply, or None to leave the model's alone.
+        """
+        if self.registry is None or "remind_me" in self.registry.called:
+            return None
+        if not claims_a_reminder(reply):
+            return None
+        # debug, not warning: the user already sees the correction, and a
+        # stderr line interleaved with the reply reads like a crash.
+        logger.debug("reply claimed a reminder that was never set; re-asking")
+        try:
+            focused = SkillRegistry([self.registry.get("remind_me")])
+            client = type(self.client)(
+                config=self.client.config,
+                assistant_name=self.assistant_name,
+                registry=focused,
+                api_key=self.client.api_key,
+            )
+            captured: list[str] = []
+            messages = [{"role": "user", "content": asked}]
+            client.send(messages, captured.append)
+        except Exception:  # noqa: BLE001 — salvage must never break the turn
+            logger.debug("reminder salvage failed", exc_info=True)
+            return None
+        for message in messages:
+            if message.get("role") == "tool" and message.get("content"):
+                # The skill's own words, which name the time it really stored.
+                return str(message["content"])
+        # It could not be set. Saying so is the whole point: a silent lie here
+        # is only discovered at the moment the reminder does not arrive.
+        return (
+            "I couldn't actually set that reminder — tell me the time again and "
+            "I'll try once more."
         )
 
     def _recalled(self, text: str) -> str:

@@ -44,7 +44,7 @@ from pathlib import Path
 import httpx
 from platformdirs import user_state_dir
 
-from nero.channels import split, strip_emphasis
+from nero.channels import heading_text, split
 
 logger = logging.getLogger("nero.telegram")
 
@@ -269,7 +269,7 @@ _INLINE = [
     # Heading: the content is stripped of emphasis first, or `### **Title**`
     # becomes <b><b>Title</b></b> once the bold rule below runs over it.
     (re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$", re.M),
-     lambda m: f"<b>{strip_emphasis(m.group(1))}</b>"),
+     lambda m: f"<b>{heading_text(m.group(1))}</b>"),
     (re.compile(r"^(\s*)[-*+][ \t]+", re.M), "\\1\u2022 "),           # bullet
     (re.compile(r"(\*\*|__)(?=\S)(.+?)(?<=\S)\1"), r"<b>\2</b>"),
     (re.compile(r"~~(?=\S)(.+?)(?<=\S)~~"), r"<s>\1</s>"),

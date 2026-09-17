@@ -806,7 +806,27 @@ class TestUniversalSessionBanner:
     def test_a_narrow_terminal_gets_the_name_not_broken_block_letters(self):
         narrow = self._render(width=30)
         assert "███" not in narrow
-        assert "Nero" in narrow
+        assert "Nero Agent" in narrow
+
+    def test_the_wordmark_says_the_product_name(self):
+        assert "A  G  E  N  T" in self._render()
+
+    def test_the_wordmark_fits_a_standard_terminal(self):
+        """The same block font across "NERO AGENT" on one line measures 80
+        columns, which wraps on the 80-column terminal it only just fits."""
+        from nero import banner
+
+        assert max(len(line) for line in banner.WORDMARK.splitlines()) <= 72
+
+    def test_renaming_the_assistant_does_not_rename_the_product(self):
+        """`assistant.name` changes what it answers to, not which program this
+        is."""
+        rendered = self._render(assistant_name="Jarvis")
+        assert "answering as Jarvis" in rendered
+        assert "A  G  E  N  T" in rendered
+
+    def test_the_default_name_adds_no_noise(self):
+        assert "answering as" not in self._render(assistant_name="Nero")
 
     def test_a_narrow_terminal_keeps_the_url_on_one_line(self):
         """A wrapped URL cannot be clicked or copied in one go."""

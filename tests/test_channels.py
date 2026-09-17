@@ -681,14 +681,43 @@ class TestHeadingsAreNotDoubleBolded:
         assert to_html("**just bold**") == "<b>just bold</b>"
         assert slack_bridge.to_mrkdwn("**just bold**") == "*just bold*"
 
-    def test_emphasis_inside_a_heading_is_not_stripped_from_the_middle(self):
-        """Only a layer wrapping the whole heading comes off."""
+    def test_bold_inside_a_heading_is_dropped_not_nested(self):
+        """A heading is already bold, so bold inside one is meaningless in
+        every dialect — and in Slack's there is no nesting at all."""
         from nero.telegram import to_html
 
-        assert to_html("### Buy **now** today") == "<b>Buy <b>now</b> today</b>"
+        assert to_html("### Buy **now** today") == "<b>Buy now today</b>"
+        assert slack_bridge.to_mrkdwn("### Buy **now** today") == "*Buy now today*"
+
+    def test_italic_inside_a_heading_is_still_converted(self):
+        """Italic does combine with bold, so it survives — and it has to be
+        converted, or Slack ships the reader a literal asterisk that collides
+        with the heading's own."""
+        from nero.telegram import to_html
+
+        assert to_html("### Half **b** and *i*") == "<b>Half b and <i>i</i></b>"
+        assert slack_bridge.to_mrkdwn("### Half **b** and *i*") == "*Half b and _i_*"
+        assert gchat_bridge.to_google_chat("### Half **b** and *i*") == "*Half b and _i_*"
+
+    def test_strikethrough_inside_a_heading_is_still_converted(self):
+        assert slack_bridge.to_mrkdwn("### ~~gone~~ today") == "*~gone~ today*"
+        assert gchat_bridge.to_google_chat("### ~~gone~~ today") == "*~gone~ today*"
+
+    def test_italic_inside_bold_is_converted(self):
+        """Same trap one level down: a bold run is parked before the italic
+        rule runs, so its contents must be emphasised on the way in."""
+        assert slack_bridge.to_mrkdwn("**bold with *inner* italic**") == (
+            "*bold with _inner_ italic*"
+        )
+
+    def test_markup_inside_a_code_span_is_still_left_alone(self):
+        assert slack_bridge.to_mrkdwn("`code **not bold**`") == "`code **not bold**`"
+
+    def test_a_bullet_is_not_eaten_by_the_italic_rule(self):
+        assert slack_bridge.to_mrkdwn("* item two") == "\u2022 item two"
 
 
-class TestStripEmphasis:
+class TestHeadingText:
     @pytest.mark.parametrize(
         ("source", "expected"),
         [
@@ -704,12 +733,20 @@ class TestStripEmphasis:
         ],
     )
     def test_one_layer_comes_off(self, source, expected):
-        from nero.channels import strip_emphasis
+        from nero.channels import heading_text
 
-        assert strip_emphasis(source) == expected
+        assert heading_text(source) == expected
 
-    def test_only_one_layer_comes_off(self):
-        """Two layers is a model being odd, not a reason to unwrap forever."""
-        from nero.channels import strip_emphasis
+    def test_every_bold_marker_comes_off(self):
+        """A heading is already bold. Any bold inside it is noise, however many
+        layers of it a model decided to write."""
+        from nero.channels import heading_text
 
-        assert strip_emphasis("****double****") == "**double**"
+        assert heading_text("****double****") == "double"
+
+    def test_italic_and_strike_are_left_for_the_caller(self):
+        """Those do combine with bold, so the heading keeps them and converts
+        them in the dialect's own syntax."""
+        from nero.channels import heading_text
+
+        assert heading_text("keep *this* and ~~that~~") == "keep *this* and ~~that~~"

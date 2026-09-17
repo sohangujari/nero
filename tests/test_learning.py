@@ -381,3 +381,23 @@ class TestRelevantFacts:
         from nero.memory.facts import relevant
 
         assert relevant([], "who is my brother") == []
+
+    def test_a_spelling_variant_still_finds_the_fact(self):
+        """A fact is keyed by whatever the model typed that day and asked about
+        in whatever the user types now. Exact matching missed
+        `favourite_colour` for "favorite color" and answered with somebody
+        else's colour instead."""
+        from nero.memory.facts import relevant
+
+        facts = [("favourite_colour", "blue")]
+        assert relevant(facts, "what is my favorite color") == facts
+        assert relevant(facts, "what is my favourite colour") == facts
+
+    def test_a_near_miss_is_still_a_miss(self):
+        """brother~mother scores 0.77 against favorite~favourite at 0.94. The
+        cutoff sits in that gap, and keeping `mother` out of a question about a
+        brother is the half that matters."""
+        from nero.memory.facts import relevant
+
+        assert relevant([("mother_name", "Asha")], "who is my brother") == []
+        assert relevant([("favorite_week", "long")], "am I weak") == []

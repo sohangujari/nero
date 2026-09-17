@@ -46,6 +46,7 @@ from nero.llm.client import LLMClient
 from nero.memory.embeddings import Embedder
 from nero.memory.facts import FactStore, default_facts_path
 from nero.memory.playbooks import PlaybookStore
+from nero.reminders import ReminderStore, notify_locally
 from nero import learn as nero_learn
 from nero.memory.history_store import HistoryStore, default_history_path
 from nero.memory.notes import NoteIndex, default_notes_index_path
@@ -87,6 +88,10 @@ googlechat_app = typer.Typer(
     invoke_without_command=True, help="Talk to Nero Agent from Google Chat."
 )
 app.add_typer(googlechat_app, name="googlechat")
+remind_app = typer.Typer(
+    invoke_without_command=True, help="Reminders Nero delivers at a set time."
+)
+app.add_typer(remind_app, name="remind")
 playbooks_app = typer.Typer(
     invoke_without_command=True, help="Procedures Nero has learned from what it has done."
 )
@@ -1151,6 +1156,216 @@ def slack_uninstall() -> None:
     console.print(routines.uninstall_bridge(routines.default_agents_dir(), "slack"))
 
 
+# --- Reminders ---------------------------------------------------------------
+
+
+def deliver(reminder, manager: ConfigManager, config: NeroConfig) -> list[str]:
+    """Send one reminder everywhere it can reach the user. Returns what worked.
+
+    Every paired chat app, because delivery is the whole point and the terminal
+    is the one place that may well be closed at 17:00. A channel that fails is
+    logged and skipped: a dead Slack token must not cost you the Telegram copy.
+    """
+    text = reminder.message()
+    reached: list[str] = []
+
+    # Always, not only as a fallback: the machine Nero runs on is the one place
+    # that is always reachable, and it costs nothing. Everything below needs a
+    # paired account, which most people do not have on day one — without this a
+    # CLI-only user sets a reminder, every part works, and nothing appears.
+    if notify_locally(text):
+        reached.append("this Mac")
+
+    token = manager.get_telegram_token()
+    if token and config.telegram.allowed_chat_ids:
+        bot = TelegramBot(token)
+        try:
+            for chat_id in config.telegram.allowed_chat_ids:
+                bot.send(chat_id, text)
+            reached.append("Telegram")
+        except ChannelError:
+            logger.warning("could not deliver reminder %s to Telegram", reminder.id)
+        finally:
+            bot.close()
+
+    for build in (_discord_channel, _slack_channel, _googlechat_channel):
+        channel = build()
+        peers = list(getattr(config, channel.name).allowed_channel_ids)
+        if not peers:
+            continue
+        bot = channel.connect(manager)
+        if bot is None:
+            continue
+        try:
+            for peer in peers:
+                bot.send(peer, text)
+            reached.append(channel.label)
+        except ChannelError:
+            logger.warning("could not deliver reminder %s to %s", reminder.id, channel.name)
+        finally:
+            bot.close()
+    return reached
+
+
+@remind_app.callback()
+def remind_main(ctx: typer.Context) -> None:
+    """Reminders Nero delivers at a set time."""
+    if ctx.invoked_subcommand is not None:
+        return
+    pending = ReminderStore().pending()
+    if not pending:
+        console.print(
+            "[dim]No reminders set. Ask in chat: [/dim][bold]remind me to take my "
+            "medicine at 5pm[/bold]"
+        )
+        return
+    table = Table(title="nero reminders", show_header=True)
+    table.add_column("#", justify="right")
+    table.add_column("When")
+    table.add_column("What")
+    table.add_column("Repeats")
+    for reminder in pending:
+        table.add_row(str(reminder.id), reminder.when(), reminder.text, reminder.repeat or "—")
+    console.print(table)
+    if not routines.reminder_plist_path(routines.default_agents_dir()).exists():
+        console.print(
+            "\n[yellow]Nothing is delivering these.[/yellow] Run "
+            "[bold]nero remind install[/bold] — otherwise they only fire while "
+            "a [bold]nero[/bold] session happens to be open."
+        )
+
+
+_REMINDER_THREAD = "nero-reminders"
+_REMINDER_STOP = threading.Event()
+
+
+def _start_reminder_ticker(manager: ConfigManager, config: NeroConfig) -> threading.Event:
+    """Deliver due reminders from inside a running session.
+
+    Belt and braces with the launchd agent, because the agent is not always
+    able to run: macOS refuses a launchd process access to anything under
+    ~/Documents without Full Disk Access, which is exactly where a development
+    checkout lives. Whichever of the two sees a reminder first claims it, so
+    running both delivers once rather than twice.
+    """
+    import nero.reminders as reminders_module
+
+    # One per process. `nero` builds a chat loop and so does anything it starts
+    # behind it; two tickers would double every database read for nothing, and
+    # `claim` would merely hide the waste rather than remove it.
+    existing = next(
+        (t for t in threading.enumerate() if t.name == _REMINDER_THREAD), None
+    )
+    if existing is not None:
+        return _REMINDER_STOP
+
+    stop = _REMINDER_STOP
+
+    def run() -> None:
+        store = ReminderStore()
+        while not stop.wait(reminders_module.TICK_SECONDS):
+            try:
+                due = store.due()
+                if not due:
+                    continue  # the common case: no config read, no delivery work
+                # Read once per tick that has work, not once per reminder.
+                current = manager.load()
+                for reminder in due:
+                    if not store.claim(reminder):
+                        continue  # the launchd agent got there first
+                    deliver(reminder, manager, current)
+                    _rearm(store, reminder)
+            except Exception:  # noqa: BLE001 — a bad tick must not end the session
+                logger.debug("reminder tick failed", exc_info=True)
+
+    threading.Thread(target=run, daemon=True, name=_REMINDER_THREAD).start()
+    return stop
+
+
+def _rearm(store: ReminderStore, reminder) -> None:
+    """Put a repeating reminder back for its next time."""
+    from nero.reminders import next_occurrence
+
+    following = next_occurrence(reminder.due_at, reminder.repeat)
+    if following is not None:
+        store.add(reminder.text, following, reminder.repeat, reminder.channel, reminder.peer)
+
+
+@remind_app.command("tick")
+def remind_tick(
+    quiet: bool = typer.Option(False, "--quiet", help="Print only what was delivered."),
+) -> None:
+    """Deliver whatever is due now. This is what launchd runs every minute."""
+    manager = ConfigManager()
+    config = _load_or_exit(manager)
+    store = ReminderStore()
+    due = store.due()
+    if not due:
+        if not quiet:
+            console.print("[dim]Nothing due.[/dim]")
+        return
+    for reminder in due:
+        # Claimed before sending: a running Nero session ticks too, and only
+        # one of us should send this.
+        if not store.claim(reminder):
+            continue
+        reached = deliver(reminder, manager, config)
+        # Claimed either way. A reminder that cannot be delivered because
+        # nothing is paired would otherwise be retried every minute until it
+        # ages out, which is a loop, not a retry.
+        _rearm(store, reminder)
+        where = ", ".join(reached) or "nowhere — no chat app is paired"
+        console.print(f"[green]Delivered[/green] {reminder.text} → {where}")
+
+
+@remind_app.command("cancel")
+def remind_cancel(reminder_id: int) -> None:
+    """Cancel one reminder by its number."""
+    if ReminderStore().cancel(reminder_id):
+        console.print(f"[green]Cancelled reminder {reminder_id}.[/green]")
+    else:
+        console.print(f"[yellow]There is no pending reminder {reminder_id}.[/yellow]")
+
+
+@remind_app.command("clear")
+def remind_clear() -> None:
+    """Cancel every pending reminder."""
+    removed = ReminderStore().clear()
+    console.print(f"[green]Cancelled {removed} reminder(s).[/green]")
+
+
+@remind_app.command("install")
+def remind_install() -> None:
+    """Deliver reminders in the background, from login.
+
+    Without this they only fire while a `nero` session is open, which is
+    exactly when you do not need reminding.
+    """
+    try:
+        message = routines.install_reminders(
+            routines.resolve_executable(), routines.default_agents_dir()
+        )
+    except routines.RoutineError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(message)
+    manager = ConfigManager()
+    config = _load_or_exit(manager)
+    if not config.telegram.allowed_chat_ids and not any(
+        getattr(config, name).allowed_channel_ids for name in ("discord", "slack", "googlechat")
+    ):
+        console.print(
+            "[yellow]Nothing is paired to deliver to.[/yellow] Reminders reach you "
+            "through a chat app — set one up with [bold]nero telegram setup[/bold]."
+        )
+
+
+@remind_app.command("uninstall")
+def remind_uninstall() -> None:
+    """Stop delivering reminders in the background."""
+    console.print(routines.uninstall_reminders(routines.default_agents_dir()))
+
+
 # --- Learning ---------------------------------------------------------------
 
 
@@ -1584,6 +1799,10 @@ def talk(
     # One registry, shared by the primary and every fallback: a turn that fails
     # over must still see the same skills, taint state and audit log.
     registry = _build_registry(manager, config)
+    # Voice builds no ChatLoop, so it was the one long-running session that
+    # never delivered a reminder. Started here for the same reason every other
+    # session starts one.
+    _start_reminder_ticker(manager, config)
     client = LLMClient(
         config=config.llm,
         assistant_name=config.assistant.name,
@@ -1984,6 +2203,12 @@ def _build_chat_loop(manager, config, api_key, registry, mcp_connections):
     """The one place a ChatLoop is assembled — `nero` and every chat bridge
     call it, so a turn from a phone is the same turn as a turn in the terminal:
     same fallback chain, key rotation, memory and skills."""
+    # Reminders are delivered by whichever session is running, and this is the
+    # one place every long-running command passes through: `nero`, `nero chat`,
+    # `nero telegram`, each other bridge, and `nero dashboard`. Wiring it into
+    # `nero` alone — which is what this did first — left the bridge, the one
+    # people actually leave running, delivering nothing.
+    _start_reminder_ticker(manager, config)
     fallback_clients = _build_fallback_clients(manager, config, registry)
     coding_client = _resolve_coding_client(manager, config, registry)
     facts = [(fact.key, fact.value) for fact in FactStore(default_facts_path()).all()]

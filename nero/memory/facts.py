@@ -1,5 +1,6 @@
 import logging
 import sqlite3
+from difflib import get_close_matches
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -129,14 +130,34 @@ def relevant(facts: list[tuple[str, str]], text: str) -> list[tuple[str, str]]:
     """
     from nero.memory.recall import query_terms
 
-    wanted = set(query_terms(text))
+    wanted = query_terms(text)
     if not wanted:
         return []
     return [
         (key, value)
         for key, value in facts
-        if wanted & set(query_terms(f"{key.replace('_', ' ')} {value}"))
+        if _touches(wanted, query_terms(f"{key.replace('_', ' ')} {value}"))
     ]
+
+
+# Exact matching missed `favourite_colour` for "what is my favorite color" and
+# answered with three other people's colours instead. Spelling variants are the
+# common case for facts, because a fact is keyed by whatever the model typed
+# that day and asked about in whatever the user types now.
+#
+# Measured on the pairs that matter: favorite~favourite 0.94, color~colour 0.91,
+# organize~organise 0.88 — against brother~mother 0.77, week~weak 0.75,
+# music~muscle 0.73. 0.85 sits in the gap with margin at both ends, and keeping
+# `brother` from matching `mother` is the half that matters most here.
+SPELLING_CUTOFF = 0.85
+
+
+def _touches(wanted: list[str], terms: list[str]) -> bool:
+    if not terms:
+        return False
+    if set(wanted) & set(terms):
+        return True
+    return any(get_close_matches(word, terms, n=1, cutoff=SPELLING_CUTOFF) for word in wanted)
 
 
 def facts_prompt_block(facts: list[tuple[str, str]]) -> str:

@@ -399,10 +399,12 @@ class TestSendLoop:
 
     def test_system_prompt_gates_tool_use(self):
         prompt = make_client().system_prompt.lower()
-        # Gating is preserved; wording changed when the general-purpose framing
-        # was restored (see TestGeneralPurposeRegression).
-        assert "only when the user explicitly asks for that action" in prompt
-        assert "do not call any tool" in prompt
+        # Gating is preserved, and it is gating *both ways*: the blanket "never
+        # for an ordinary question" it replaced made the model refuse anything
+        # it could only answer by looking it up, and then invent a reason.
+        assert "do not call one for conversation" in prompt
+        assert "never say you are unable to do something one of your tools does" in prompt
+        assert "when answering needs current information" in prompt
 
     def test_bug_report_repro_history_stays_clean(self):
         """hi → open_app → hi: no raw JSON ever persisted, no echo loop fuel."""
@@ -699,9 +701,9 @@ class TestGeneralPurposeRegression:
         assert "never limited to one topic" in lowered
         assert "never say that you can only do one kind of task" in lowered
         # The general framing comes before the tool description.
-        assert lowered.index("general-purpose") < lowered.index("a few tools")
+        assert lowered.index("general-purpose") < lowered.index("you also have a few tools")
         # Tool gating is still present.
-        assert "only when the user explicitly asks for that action" in lowered
+        assert "do not call one for conversation" in lowered
 
     def test_none_classification_passes_content_through_verbatim(self):
         """A plain answer must reach the user unmodified — no canned substitute."""

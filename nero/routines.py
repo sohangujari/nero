@@ -262,6 +262,70 @@ def uninstall_review(agents_dir: Path) -> str:
     return f"Removed {REVIEW_LABEL}."
 
 
+REMINDER_LABEL = "com.neroagent.reminders"
+# Every 60 seconds. StartInterval rather than StartCalendarInterval: this is a
+# heartbeat, not a schedule, and one agent ticks for every reminder rather than
+# a plist being written and unloaded each time someone says "remind me".
+REMINDER_INTERVAL = 60
+
+
+def reminder_plist_path(agents_dir: Path) -> Path:
+    return Path(agents_dir) / f"{REMINDER_LABEL}.plist"
+
+
+def install_reminders(executable: str, agents_dir: Path, interval: int = REMINDER_INTERVAL) -> str:
+    """Deliver due reminders, every minute, from login.
+
+    Refuses an executable that is plainly not Nero. `resolve_executable` reads
+    sys.argv[0], which is whatever is running — under pytest that is the pytest
+    binary, and a test once installed a live agent running `pytest remind tick`
+    every sixty seconds. An agent pointing at the wrong program is worse than
+    no agent: it is loaded, it fires, and it does nothing.
+    """
+    if Path(executable).name not in ("nero", "nero.exe", "__main__.py"):
+        raise RoutineError(
+            f"Refusing to schedule {executable!r} — that is not the nero "
+            "executable. Run `nero remind install` from a real nero command."
+        )
+    agents_dir = Path(agents_dir)
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    path = reminder_plist_path(agents_dir)
+    log_dir = Path(user_log_dir("nero"))
+    log_dir.mkdir(parents=True, exist_ok=True)
+    plist = {
+        "Label": REMINDER_LABEL,
+        "ProgramArguments": [executable, "remind", "tick"],
+        "StartInterval": interval,
+        "RunAtLoad": True,
+        "StandardOutPath": str(log_dir / "reminders.out.log"),
+        "StandardErrorPath": str(log_dir / "reminders.err.log"),
+    }
+    with path.open("wb") as f:
+        plistlib.dump(plist, f)
+
+    if sys.platform != "darwin":
+        return f"Wrote {path}. Loading skipped: launchd is darwin-only."
+
+    _run_launchctl("bootout", f"gui/{os.getuid()}/{REMINDER_LABEL}")
+    result = _run_launchctl("bootstrap", f"gui/{os.getuid()}", str(path))
+    if result.returncode != 0:
+        result = _run_launchctl("load", "-w", str(path))
+        if result.returncode != 0:
+            return f"Wrote {path}, but launchctl could not load it: {result.stderr.strip()}"
+    return f"Installed {REMINDER_LABEL}. Checking every {interval}s."
+
+
+def uninstall_reminders(agents_dir: Path) -> str:
+    path = reminder_plist_path(Path(agents_dir))
+    if sys.platform == "darwin":
+        _run_launchctl("bootout", f"gui/{os.getuid()}/{REMINDER_LABEL}")
+        _run_launchctl("unload", "-w", str(path))
+    if not path.exists():
+        return "Reminder delivery was not installed."
+    path.unlink()
+    return f"Removed {REMINDER_LABEL}. Reminders will no longer be delivered."
+
+
 def uninstall_routine(name: str, agents_dir: Path) -> str:
     """Unload from launchd and remove the plist. A missing plist is a no-op,
     not an error."""
